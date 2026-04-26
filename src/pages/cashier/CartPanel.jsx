@@ -33,8 +33,13 @@ export function CartPanel({
   isSubmitting = false,
   onPricingChange,         // (pricing) => void — parent uses for createBooking payload
 }) {
-  const [promo, setPromo] = useState(null);
-  const [promoOpen, setPromoOpen] = useState(false);
+  // Discount can be one of three modes — same as PaymentTab on All Reservations.
+  // Code: typed string → validated against /promos/validate → server-defined value
+  // Percentage: cashier types %, applied directly (subject to manager override above 20%)
+  // Amount: cashier types $, applied directly (subject to manager override above $20)
+  const [promo, setPromo] = useState(null);                // applied discount object
+  const [promoOpen, setPromoOpen] = useState(false);       // input expanded?
+  const [promoMode, setPromoMode] = useState("code");      // "code" | "percentage" | "amount"
   const [promoInput, setPromoInput] = useState("");
   const [validate, { isFetching: isValidating }] = useLazyValidateDiscountCodeQuery();
 
@@ -72,34 +77,100 @@ export function CartPanel({
   }, [subtotal, discountAmount, memberDiscount, tax, total, promo?.code]);
 
   const applyPromo = async () => {
-    const code = promoInput.trim();
-    if (!code) return;
-    try {
-      const res = await validate(code).unwrap();
-      if (res?.success && res.data) {
-        setPromo(res.data);
-        setPromoOpen(false);
-        setPromoInput("");
-        toast.success(`Promo "${res.data.name}" applied`);
-      } else {
-        toast.error("Invalid promo code");
+    const raw = promoInput.trim();
+    if (!raw) return;
+
+    // Code path — validates against the server, gets discount details
+    if (promoMode === "code") {
+      try {
+        const res = await validate(raw).unwrap();
+        if (res?.success && res.data) {
+          setPromo(res.data);
+          setPromoOpen(false);
+          setPromoInput("");
+          toast.success(`Promo "${res.data.name}" applied`);
+        } else {
+          toast.error("Invalid promo code");
+        }
+      } catch (err) {
+        const status = err?.status;
+        const msg = err?.data?.message || err?.data?.error || "Invalid promo code";
+        const isOverridable = status === 400 && /expired|usage limit/i.test(msg);
+        if (isOverridable) {
+          setOverrideContext({
+            code: raw,
+            reason: msg,
+            action: /expired/i.test(msg) ? "apply_expired_promo" : "apply_over_limit_promo",
+          });
+          return;
+        }
+        toast.error(msg);
       }
-    } catch (err) {
-      const status = err?.status;
-      const msg = err?.data?.message || err?.data?.error || "Invalid promo code";
-      // Blockable errors → offer manager override. The validate endpoint
-      // returns 400 for "expired" / "usage limit reached" (still real
-      // promos, just gated). 404 = code not in DB → no override possible.
-      const isOverridable = status === 400 && /expired|usage limit/i.test(msg);
-      if (isOverridable) {
+      return;
+    }
+
+    // Manual percentage / amount — no server validation, just bounds checks
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) {
+      toast.error("Enter a positive number");
+      return;
+    }
+    if (promoMode === "percentage") {
+      if (value > 100) {
+        toast.error("Percentage can't exceed 100");
+        return;
+      }
+      // Threshold gate — 20%+ requires manager override
+      if (value > 20) {
         setOverrideContext({
-          code,
-          reason: msg,
-          action: /expired/i.test(msg) ? "apply_expired_promo" : "apply_over_limit_promo",
+          code: `${value}%`,
+          reason: `${value}% manual discount exceeds the 20% cashier limit`,
+          action: "apply_manual_percentage_override",
+          payload: { mode: "percentage", value },
         });
         return;
       }
-      toast.error(msg);
+      setPromo({
+        discountId: null,
+        name: `Manual ${value}% off`,
+        code: null,
+        discountType: 1,
+        value,
+        maxValue: 0,
+        _manual: true,
+      });
+      setPromoOpen(false);
+      setPromoInput("");
+      toast.success(`${value}% discount applied`);
+      return;
+    }
+    if (promoMode === "amount") {
+      if (value > subtotal) {
+        toast.error("Discount can't exceed the subtotal");
+        return;
+      }
+      // Threshold gate — $20+ requires manager override
+      if (value > 20) {
+        setOverrideContext({
+          code: `$${value}`,
+          reason: `$${value.toFixed(2)} manual discount exceeds the $20 cashier limit`,
+          action: "apply_manual_amount_override",
+          payload: { mode: "amount", value },
+        });
+        return;
+      }
+      setPromo({
+        discountId: null,
+        name: `Manual $${value.toFixed(2)} off`,
+        code: null,
+        discountType: 2,
+        value,
+        maxValue: 0,
+        _manual: true,
+      });
+      setPromoOpen(false);
+      setPromoInput("");
+      toast.success(`$${value.toFixed(2)} discount applied`);
     }
   };
 
@@ -111,32 +182,52 @@ export function CartPanel({
   // query param later for cleaner data.
   const onOverrideApproved = async (audit) => {
     if (!overrideContext) return;
-    const { code } = overrideContext;
+    const { code, action, payload } = overrideContext;
     try {
-      // Use admin endpoint to look up the discount details bypassing the check.
-      // Backend validate already returns the discount on success; for blocked
-      // cases we use a manager-override-stamped re-validate. Simpler v1: we
-      // pretend the discount is valid and let the cashier apply; the booking
-      // create-time checks then carry the override flag. For UI feedback we
-      // just toast and clear the prompt.
-      const apiBase = import.meta.env.VITE_API_BASE_URL || "/api";
-      const r = await fetch(`${apiBase}/promos/validate/${encodeURIComponent(code)}?override=1`, {});
-      const body = await r.json();
-      // For now: even when validate still says no, we accept the override
-      // and apply with default values so the cashier can complete the sale.
-      // The audit row already proves a manager approved it.
-      const discount = body?.data || {
-        discountId: null,
-        name: `Override · ${code}`,
-        code,
-        discountType: 1, // percent
-        value: 0,
-        maxValue: 0,
-      };
-      setPromo({ ...discount, _overrideAuditId: audit.auditId });
+      // Manual % / $ override → apply directly, the audit row carries the
+      // approval. No server lookup needed.
+      if (payload?.mode === "percentage") {
+        setPromo({
+          discountId: null,
+          name: `Manual ${payload.value}% off (manager approved)`,
+          code: null,
+          discountType: 1,
+          value: payload.value,
+          maxValue: 0,
+          _manual: true,
+          _overrideAuditId: audit.auditId,
+        });
+        toast.success(`Override applied — ${payload.value}% off`);
+      } else if (payload?.mode === "amount") {
+        setPromo({
+          discountId: null,
+          name: `Manual $${payload.value.toFixed(2)} off (manager approved)`,
+          code: null,
+          discountType: 2,
+          value: payload.value,
+          maxValue: 0,
+          _manual: true,
+          _overrideAuditId: audit.auditId,
+        });
+        toast.success(`Override applied — $${payload.value.toFixed(2)} off`);
+      } else {
+        // Code override — re-fetch to get the discount details
+        const apiBase = import.meta.env.VITE_API_BASE_URL || "/api";
+        const r = await fetch(`${apiBase}/promos/validate/${encodeURIComponent(code)}?override=1`);
+        const body = await r.json();
+        const discount = body?.data || {
+          discountId: null,
+          name: `Override · ${code}`,
+          code,
+          discountType: 1,
+          value: 0,
+          maxValue: 0,
+        };
+        setPromo({ ...discount, _overrideAuditId: audit.auditId });
+        toast.success(`Override applied — code "${code}"`);
+      }
       setPromoOpen(false);
       setPromoInput("");
-      toast.success(`Override applied — code "${code}"`);
     } catch (err) {
       toast.error("Override approved but apply failed: " + (err?.message || ""));
     } finally {
@@ -233,41 +324,91 @@ export function CartPanel({
         {/* Promo input — appears when the Promo button is tapped */}
         {!promo && promoOpen && (
           <div style={{
-            display: "flex", gap: 8,
             padding: "10px 12px", background: "var(--ink-25)",
             border: "1.5px solid var(--ink-200)", borderRadius: 14,
+            display: "flex", flexDirection: "column", gap: 8,
           }}>
-            <input
-              autoFocus
-              value={promoInput}
-              onChange={(e) => setPromoInput(e.target.value.toUpperCase())}
-              onKeyDown={(e) => { if (e.key === "Enter") applyPromo(); }}
-              placeholder="Enter code"
-              style={{
-                all: "unset",
-                flex: 1,
-                fontFamily: "var(--font-mono)",
-                fontWeight: 700,
-                fontSize: 15,
-                color: "var(--ink-900)",
-                letterSpacing: "0.06em",
-              }}
-            />
-            <button
-              type="button"
-              onClick={applyPromo}
-              disabled={!promoInput.trim() || isValidating}
-              className="a-btn a-btn--primary a-btn--sm"
-            >
-              {isValidating ? "…" : "Apply"}
-            </button>
-            <button
-              type="button"
-              onClick={() => { setPromoOpen(false); setPromoInput(""); }}
-              className="a-btn a-btn--ghost a-btn--sm"
-            >
-              Cancel
-            </button>
+            {/* Mode tabs */}
+            <div style={{ display: "inline-flex", background: "white", border: "1.5px solid var(--ink-200)", borderRadius: 10, padding: 3, alignSelf: "flex-start" }}>
+              {[
+                { key: "code", label: "Code" },
+                { key: "percentage", label: "%" },
+                { key: "amount", label: "$" },
+              ].map((m) => (
+                <button
+                  key={m.key}
+                  type="button"
+                  onClick={() => { setPromoMode(m.key); setPromoInput(""); }}
+                  style={{
+                    all: "unset",
+                    cursor: "pointer",
+                    padding: "5px 14px",
+                    borderRadius: 7,
+                    fontWeight: 700,
+                    fontSize: 12,
+                    background: promoMode === m.key ? "var(--ink-800)" : "transparent",
+                    color: promoMode === m.key ? "white" : "var(--ink-700)",
+                  }}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", gap: 8 }}>
+              {promoMode === "amount" && (
+                <span style={{ fontWeight: 800, fontSize: 18, color: "var(--ink-700)", alignSelf: "center", paddingLeft: 4 }}>$</span>
+              )}
+              <input
+                autoFocus
+                value={promoInput}
+                onChange={(e) => {
+                  const v = promoMode === "code"
+                    ? e.target.value.toUpperCase()
+                    : e.target.value.replace(/[^0-9.]/g, "");
+                  setPromoInput(v);
+                }}
+                onKeyDown={(e) => { if (e.key === "Enter") applyPromo(); }}
+                placeholder={
+                  promoMode === "code" ? "Enter code"
+                  : promoMode === "percentage" ? "10"
+                  : "5.00"
+                }
+                inputMode={promoMode === "code" ? "text" : "decimal"}
+                style={{
+                  all: "unset",
+                  flex: 1,
+                  fontFamily: promoMode === "code" ? "var(--font-mono)" : "var(--font-sans)",
+                  fontWeight: 700,
+                  fontSize: 15,
+                  color: "var(--ink-900)",
+                  letterSpacing: promoMode === "code" ? "0.06em" : "0",
+                }}
+              />
+              {promoMode === "percentage" && (
+                <span style={{ fontWeight: 800, fontSize: 18, color: "var(--ink-700)", alignSelf: "center", paddingRight: 4 }}>%</span>
+              )}
+              <button
+                type="button"
+                onClick={applyPromo}
+                disabled={!promoInput.trim() || isValidating}
+                className="a-btn a-btn--primary a-btn--sm"
+              >
+                {isValidating ? "…" : "Apply"}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setPromoOpen(false); setPromoInput(""); }}
+                className="a-btn a-btn--ghost a-btn--sm"
+              >
+                Cancel
+              </button>
+            </div>
+            {promoMode !== "code" && (
+              <div style={{ fontSize: 11, color: "var(--ink-500)", fontWeight: 600 }}>
+                Manual {promoMode === "percentage" ? "percent" : "dollar"} discounts above {promoMode === "percentage" ? "20%" : "$20"} need a manager.
+              </div>
+            )}
           </div>
         )}
       </div>
