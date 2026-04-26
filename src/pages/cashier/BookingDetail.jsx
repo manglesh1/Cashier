@@ -110,13 +110,18 @@ function SearchBar({ onPick }) {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div>
                   <div style={{ fontWeight: 700, color: "var(--ink-900)" }}>
-                    {r.bookingName || r.guestName || "Walk-in"}
+                    {r.bookingName || r.guest?.guestName || "Walk-in"}
                   </div>
                   <div style={{ fontSize: 12, color: "var(--ink-500)" }}>
                     #{r.bookingNumber || r.bookingMasterId}
-                    {r.bookingDate && ` · ${new Date(r.bookingDate).toLocaleDateString()}`}
+                    {(r.bookingDate || r.dateOfBooking) && ` · ${new Date(r.bookingDate || r.dateOfBooking).toLocaleDateString()}`}
                     {r.totalAmount != null && ` · ${moneyFmt(r.totalAmount)}`}
                   </div>
+                  {(r.guest?.guestPhone || r.guest?.guestEmail) && (
+                    <div style={{ fontSize: 11, color: "var(--ink-400)", marginTop: 2 }}>
+                      {r.guest?.guestPhone || r.guest?.guestEmail}
+                    </div>
+                  )}
                 </div>
                 <Icon name="chevron-right" size={18} style={{ color: "var(--ink-400)" }} />
               </div>
