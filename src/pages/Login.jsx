@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { useLoginMutation } from "../features/auth/authApi";
 import { getTerminal, clearTerminal } from "../lib/terminal";
 
-export default function Login() {
+export default function Login({ onUsePinLogin }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [login, { isLoading }] = useLoginMutation();
@@ -195,6 +195,26 @@ export default function Login() {
         >
           {isLoading ? "Signing in…" : "Sign in"}
         </button>
+
+        {onUsePinLogin && (
+          <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1.5px solid var(--ink-100)", textAlign: "center" }}>
+            <button
+              type="button"
+              onClick={onUsePinLogin}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "var(--ink-500)",
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: "pointer",
+                textDecoration: "underline",
+              }}
+            >
+              Use PIN clock-in instead
+            </button>
+          </div>
+        )}
       </form>
     </div>
   );

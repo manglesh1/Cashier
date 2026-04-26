@@ -49,7 +49,41 @@ export const authApi = baseApi.injectEndpoints({
         method: "POST",
       }),
     }),
+
+    // ── POS clock-in (tile-grid + PIN) ──────────────────────────────
+    getClockInOptions: builder.query({
+      query: (deviceId) => ({
+        url: "/pos/clock-in/options",
+        params: { deviceId },
+      }),
+    }),
+    clockIn: builder.mutation({
+      query: ({ deviceId, userId, pin }) => ({
+        url: "/pos/clock-in",
+        method: "POST",
+        body: { deviceId, userId, pin },
+      }),
+      onQueryStarted: async (_arg, { dispatch, queryFulfilled }) => {
+        try {
+          const { data } = await queryFulfilled;
+          dispatch(
+            loginSuccess({
+              token: data.token,
+              user: data.user,
+              venues: data.venues || [],
+            })
+          );
+        } catch (error) {
+          console.error("Cashier clock-in failed:", error);
+        }
+      },
+    }),
   }),
 });
 
-export const { useLoginMutation, useLogoutMutation } = authApi;
+export const {
+  useLoginMutation,
+  useLogoutMutation,
+  useGetClockInOptionsQuery,
+  useClockInMutation,
+} = authApi;
