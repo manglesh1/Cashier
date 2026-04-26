@@ -17,7 +17,19 @@ export default function Login() {
       await login({ email, password }).unwrap();
       toast.success("Signed in");
     } catch (err) {
-      toast.error(err?.data?.message || "Sign-in failed");
+      // Surface every plausible failure shape — fetch errors don't have
+      // err.data, RTK Query auth errors do, plain HTTP errors carry status.
+      console.error("Cashier login error:", err);
+      const msg =
+        err?.data?.message ||
+        err?.data?.error ||
+        err?.error ||
+        (err?.status === "FETCH_ERROR" && "Can't reach the API. Check VITE_API_BASE_URL in .env, then restart npm run dev.") ||
+        (err?.status === "PARSING_ERROR" && "API returned non-JSON. Check the URL is correct.") ||
+        (typeof err?.status === "number" && `HTTP ${err.status}${err.data ? ` — ${JSON.stringify(err.data).slice(0, 120)}` : ""}`) ||
+        err?.message ||
+        "Sign-in failed (check the browser console for details)";
+      toast.error(String(msg), { duration: 6000 });
     }
   };
 
