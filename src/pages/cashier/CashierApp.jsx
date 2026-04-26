@@ -135,6 +135,7 @@ export function CashierApp() {
         name: pairedTerminal.deviceName,
         deviceName: pairedTerminal.deviceName,
         venueId: pairedTerminal.venueId,
+        venueName: pairedTerminal.venueName,
         templateId: pairedTerminal.templateId,
         posTemplateId: pairedTerminal.templateId,
       };
@@ -449,7 +450,12 @@ export function CashierApp() {
         </button>
       </aside>
       <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-        {header}
+        {/* Inject venue + terminal name into every Header so the cashier
+            always sees which park / lane they're operating from. */}
+        {header && React.cloneElement(header, {
+          venue: header.props.venue ?? (myDevice?.venueName || pairedTerminal?.venueName),
+          terminal: header.props.terminal ?? (myDevice?.deviceName || myDevice?.name),
+        })}
         <div style={{ flex: 1, display: "flex", minHeight: 0 }}>{body}</div>
       </main>
     </div>
