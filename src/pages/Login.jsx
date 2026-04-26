@@ -1,20 +1,27 @@
-// Minimal cashier login screen — same /api/auth/login backend as the
-// admin app. Cashier role users hit this URL on the terminal; admins
-// can use it too if they want to act as a cashier.
+// Cashier login — accepts email + password, sends pairedVenueId/Id so
+// the backend can refuse staff who don't have access to the venue this
+// tablet is paired to.
 
 import React, { useState } from "react";
 import { toast } from "sonner";
 import { useLoginMutation } from "../features/auth/authApi";
+import { getTerminal, clearTerminal } from "../lib/terminal";
 
 export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [login, { isLoading }] = useLoginMutation();
+  const terminal = getTerminal();
 
   const onSubmit = async (e) => {
     e.preventDefault();
     try {
-      await login({ email, password }).unwrap();
+      await login({
+        email,
+        password,
+        pairedVenueId: terminal?.venueId,
+        pairedDeviceId: terminal?.deviceId,
+      }).unwrap();
       toast.success("Signed in");
     } catch (err) {
       // Surface every plausible failure shape — fetch errors don't have
@@ -55,6 +62,64 @@ export default function Login() {
           width: "min(420px, 100%)",
         }}
       >
+        {terminal && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "10px 12px",
+              background: "var(--aero-orange-50)",
+              border: "1.5px solid var(--aero-orange-300)",
+              borderRadius: 12,
+              marginBottom: 18,
+            }}
+          >
+            <span
+              style={{
+                width: 32, height: 32, borderRadius: 8,
+                background: "var(--aero-orange-500)",
+                color: "white",
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                fontWeight: 800, fontSize: 12,
+                border: "1.5px solid var(--ink-800)",
+                flexShrink: 0,
+              }}
+            >
+              {String(terminal.deviceName || "?").slice(0, 2).toUpperCase()}
+            </span>
+            <div style={{ flex: 1, lineHeight: 1.2, textAlign: "left" }}>
+              <div style={{ fontWeight: 800, fontSize: 13, color: "var(--ink-900)" }}>
+                {terminal.deviceName}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--ink-600)", fontWeight: 600 }}>
+                {terminal.venueName || `Venue ${terminal.venueId}`}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm("Unpair this terminal? You'll need a new pairing code.")) {
+                  clearTerminal();
+                  window.location.reload();
+                }
+              }}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "var(--ink-500)",
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: "pointer",
+                textDecoration: "underline",
+                padding: 4,
+              }}
+            >
+              Switch
+            </button>
+          </div>
+        )}
+
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
           <div
             style={{

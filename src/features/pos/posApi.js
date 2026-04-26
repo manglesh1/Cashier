@@ -2,6 +2,22 @@ import { baseApi } from "../../api/baseApi";
 
 export const posApi = baseApi.injectEndpoints({
   endpoints: (builder) => ({
+    // Device pairing — public endpoint (tablet has no token yet)
+    pairDevice: builder.mutation({
+      query: ({ code, appVersion }) => ({
+        url: "/pos/pair",
+        method: "POST",
+        body: { code, appVersion },
+      }),
+    }),
+    deviceHeartbeat: builder.mutation({
+      query: ({ deviceId, appVersion }) => ({
+        url: "/pos/devices/heartbeat",
+        method: "POST",
+        body: { deviceId, appVersion },
+      }),
+    }),
+
     // Templates (presets)
     getAllPosTemplates: builder.query({
       query: () => "/pos/templates",
@@ -93,6 +109,8 @@ export const posApi = baseApi.injectEndpoints({
 });
 
 export const {
+  usePairDeviceMutation,
+  useDeviceHeartbeatMutation,
   useGetAllPosTemplatesQuery,
   useCreatePosTemplateMutation,
   useUpdatePosTemplateMutation,

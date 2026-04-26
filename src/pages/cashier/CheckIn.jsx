@@ -15,6 +15,7 @@ import {
   useCheckInAllTicketsMutation,
 } from "../../features/tickets/ticketApi";
 import { useDebounceSearch } from "../../hooks/useDebounceSearch";
+import { getTerminal } from "../../lib/terminal";
 
 const today = new Date().toISOString().slice(0, 10);
 
@@ -237,7 +238,12 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 
   const handleCheckIn = async () => {
     if (!booking?.bookingMasterId) return;
-    const promise = checkInAll({ bookingMasterId: booking.bookingMasterId, gateOrZone: "Cashier check-in" }).unwrap();
+    const terminal = getTerminal();
+    const promise = checkInAll({
+      bookingMasterId: booking.bookingMasterId,
+      terminalDeviceId: terminal?.deviceId || null,
+      gateOrZone: terminal?.deviceName || "Cashier check-in",
+    }).unwrap();
     toast.promise(promise, {
       loading: "Checking in…",
       success: (res) => {

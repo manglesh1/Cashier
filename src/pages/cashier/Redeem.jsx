@@ -12,6 +12,7 @@ import {
   useLazyGetTicketByCodeQuery,
   useRedeemTicketMutation,
 } from "../../features/tickets/ticketApi";
+import { getTerminal } from "../../lib/terminal";
 
 const REASON_COPY = {
   not_found: { title: "Ticket not found", body: "This code isn't in the system. Re-scan or check the print." },
@@ -46,7 +47,12 @@ export function Redeem() {
 
     setCode("");
     try {
-      const res = await redeem({ ticketCode }).unwrap();
+      const terminal = getTerminal();
+      const res = await redeem({
+        ticketCode,
+        terminalDeviceId: terminal?.deviceId || null,
+        gateOrZone: terminal?.deviceName || null,
+      }).unwrap();
       const ticket = res?.data;
       setRecent((prev) => [{ ticket, ok: true, at: Date.now() }, ...prev].slice(0, 8));
       toast.success(`Redeemed · ${ticket?.product?.productName || ticket?.productType || "ticket"}`);

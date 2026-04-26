@@ -32,8 +32,10 @@ import { Redeem } from "./Redeem";
 import {
   useGetAllPosDevicesQuery,
   useGetPresetFullQuery,
+  useDeviceHeartbeatMutation,
 } from "../../features/pos/posApi";
 import { useCreateBookingMutation } from "../../features/bookings/bookingApi";
+import { getTerminal, clearTerminal } from "../../lib/terminal";
 
 // ── Map preset { sections: [{ products: [...] }] } → CatalogGrid sections
 const SECTION_TONES = ["orange", "yellow", "neutral", "orange", "yellow"];
@@ -109,15 +111,43 @@ export function CashierApp() {
   const [createBooking, { isLoading: isCreating }] = useCreateBookingMutation();
 
   // ── Resolve which template to load ─────────────────────────────────
-  // For v1 we pick the first device assigned to this venue; in production
-  // the cashier should pick a device at sign-in, then we lock it in.
+  // The terminal is paired (PairTerminal page) before the user logs in;
+  // the device record comes from localStorage. Falls back to the first
+  // device for the venue if pairing somehow vanished mid-session.
+  const pairedTerminal = getTerminal();
   const { data: devicesData } = useGetAllPosDevicesQuery();
   const devices = devicesData?.data || devicesData || [];
-  const myDevice = useMemo(
-    () => devices.find((d) => String(d.venueId) === String(venueId)) || devices[0] || null,
-    [devices, venueId]
-  );
-  const templateId = myDevice?.templateId || myDevice?.presetId;
+  const myDevice = useMemo(() => {
+    if (pairedTerminal?.deviceId) {
+      const fromList = devices.find(
+        (d) => String(d.posDeviceId || d.deviceId) === String(pairedTerminal.deviceId)
+      );
+      // Fall back to the local pairing snapshot if device list hasn't loaded yet
+      return fromList || {
+        posDeviceId: pairedTerminal.deviceId,
+        deviceId: pairedTerminal.deviceId,
+        name: pairedTerminal.deviceName,
+        deviceName: pairedTerminal.deviceName,
+        venueId: pairedTerminal.venueId,
+        templateId: pairedTerminal.templateId,
+        posTemplateId: pairedTerminal.templateId,
+      };
+    }
+    return devices.find((d) => String(d.venueId) === String(venueId)) || devices[0] || null;
+  }, [devices, venueId, pairedTerminal?.deviceId]);
+  const templateId =
+    myDevice?.posTemplateId || myDevice?.templateId || myDevice?.presetId || pairedTerminal?.templateId;
+  const terminalDeviceId = pairedTerminal?.deviceId || myDevice?.posDeviceId || myDevice?.deviceId;
+
+  // Heartbeat — bump lastSeenAt every 60 s while the cashier app is open
+  const [heartbeat] = useDeviceHeartbeatMutation();
+  React.useEffect(() => {
+    if (!terminalDeviceId) return;
+    const tick = () => heartbeat({ deviceId: terminalDeviceId, appVersion: "0.1.0" }).catch(() => {});
+    tick();
+    const id = setInterval(tick, 60_000);
+    return () => clearInterval(id);
+  }, [terminalDeviceId, heartbeat]);
 
   const {
     data: presetData,
