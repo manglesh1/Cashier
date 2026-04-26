@@ -39,6 +39,7 @@ export default function PairTerminal({ onPaired }) {
         venueId: device.venueId,
         venueName: device.venueName,
         templateId: device.templateId,
+        settings: device.settings || null,
         pairedAt: new Date().toISOString(),
       });
       toast.success(`Paired to ${device.deviceName}`);

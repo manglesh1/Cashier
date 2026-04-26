@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discountApi";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
+import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 
 // Compute a discount amount from the validated discount + subtotal.
 // Mirrors what the admin's createBooking pricing logic does:
@@ -47,6 +48,12 @@ export function CartPanel({
   // blockable error (expired / usage limit reached) so a manager can
   // type their PIN and authorize the apply.
   const [overrideContext, setOverrideContext] = useState(null);
+
+  // Layered POS settings — venue defaults + per-device overrides, set at pair time.
+  const settings = useEffectiveSettings();
+  const pctLimit = Number(settings.cashierDiscountPercentLimit ?? 20);
+  const amtLimit = Number(settings.cashierDiscountAmountLimit ?? 20);
+  const skipPin = !!settings.allowCustomDiscountWithoutPin;
 
   const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
   const discountAmount = computeDiscountAmount(promo, subtotal);
@@ -120,11 +127,11 @@ export function CartPanel({
         toast.error("Percentage can't exceed 100");
         return;
       }
-      // Threshold gate — 20%+ requires manager override
-      if (value > 20) {
+      // Threshold gate — over the venue's % limit needs manager override (unless skipPin)
+      if (!skipPin && value > pctLimit) {
         setOverrideContext({
           code: `${value}%`,
-          reason: `${value}% manual discount exceeds the 20% cashier limit`,
+          reason: `${value}% manual discount exceeds the ${pctLimit}% cashier limit`,
           action: "apply_manual_percentage_override",
           payload: { mode: "percentage", value },
         });
@@ -149,11 +156,11 @@ export function CartPanel({
         toast.error("Discount can't exceed the subtotal");
         return;
       }
-      // Threshold gate — $20+ requires manager override
-      if (value > 20) {
+      // Threshold gate — over the venue's $ limit needs manager override (unless skipPin)
+      if (!skipPin && value > amtLimit) {
         setOverrideContext({
           code: `$${value}`,
-          reason: `$${value.toFixed(2)} manual discount exceeds the $20 cashier limit`,
+          reason: `$${value.toFixed(2)} manual discount exceeds the $${amtLimit.toFixed(2)} cashier limit`,
           action: "apply_manual_amount_override",
           payload: { mode: "amount", value },
         });
@@ -332,8 +339,10 @@ export function CartPanel({
             <div style={{ display: "inline-flex", background: "white", border: "1.5px solid var(--ink-200)", borderRadius: 10, padding: 3, alignSelf: "flex-start" }}>
               {[
                 { key: "code", label: "Code" },
-                { key: "percentage", label: "%" },
-                { key: "amount", label: "$" },
+                ...(settings.enableCustomDiscount ? [
+                  { key: "percentage", label: "%" },
+                  { key: "amount", label: "$" },
+                ] : []),
               ].map((m) => (
                 <button
                   key={m.key}
@@ -404,9 +413,9 @@ export function CartPanel({
                 Cancel
               </button>
             </div>
-            {promoMode !== "code" && (
+            {promoMode !== "code" && !skipPin && (
               <div style={{ fontSize: 11, color: "var(--ink-500)", fontWeight: 600 }}>
-                Manual {promoMode === "percentage" ? "percent" : "dollar"} discounts above {promoMode === "percentage" ? "20%" : "$20"} need a manager.
+                Manual {promoMode === "percentage" ? "percent" : "dollar"} discounts above {promoMode === "percentage" ? `${pctLimit}%` : `$${amtLimit.toFixed(2)}`} need a manager.
               </div>
             )}
           </div>
@@ -428,7 +437,7 @@ export function CartPanel({
           total={total}
         />
         <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-          {!promo && (
+          {!promo && settings.enableDiscounts && (
             <button
               type="button"
               onClick={() => setPromoOpen((o) => !o)}
