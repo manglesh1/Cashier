@@ -94,8 +94,24 @@ function normalizePresetSections(preset) {
 }
 
 export function CashierApp() {
-  const venueId = Cookies.get("venueId");
   const { user, venues } = useSelector((s) => s.auth);
+
+  // The paired terminal is the source of truth for venue scope —
+  // bookings, tickets, devices and presets are all filtered by the
+  // venueId on the backend (via getVenueFromRequest → cookie). The
+  // login flow seeds the cookie from the user's first venue, which
+  // is wrong when a multi-venue user paired to a different park.
+  // Force the cookie to match the paired terminal so all subsequent
+  // API calls are scoped to the correct venue.
+  const pairedVenueId = (() => {
+    try { return JSON.parse(localStorage.getItem("cashier:terminal") || "null")?.venueId; }
+    catch { return null; }
+  })();
+  if (pairedVenueId && String(Cookies.get("venueId")) !== String(pairedVenueId)) {
+    Cookies.set("venueId", pairedVenueId, { expires: 2 / 24 });
+  }
+  const venueId = Cookies.get("venueId");
+
   const dispatch = useDispatch();
   const [logoutCall] = useLogoutMutation();
   const handleSignOut = async () => {
