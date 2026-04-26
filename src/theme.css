@@ -1,0 +1,163 @@
+/* Aerosports Cashier — design tokens */
+/* Extracted from the admin app's [data-app="admin"] block; same        */
+/* cashier-DNA palette + chunky borders + offset-shadow buttons.        */
+/* Scoped under [data-app="cashier"] so it can't bleed if the bundle is */
+/* ever embedded inside another shell.                                   */
+
+[data-app="cashier"] {
+  --aero-orange-50:  #FFF4EC;
+  --aero-orange-100: #FFE4D0;
+  --aero-orange-200: #FFC59A;
+  --aero-orange-300: #FFA15F;
+  --aero-orange-400: #FF7A24;
+  --aero-orange-500: #F45B0A;
+  --aero-orange-600: #D14808;
+  --aero-orange-700: #A33706;
+  --aero-orange-800: #6E2604;
+
+  --aero-yellow-300: #FFCF1F;
+  --aero-yellow-400: #E9B400;
+
+  --aero-electric-300: #8E6BFF;
+  --aero-electric-400: #6A40F5;
+  --aero-electric-500: #4F25C9;
+
+  --aero-cyan-400:    #18B8C9;
+  --aero-lime-300:    #C6F25C;
+
+  --ink-0:   #FFFFFF;
+  --ink-25:  #FBF8F5;
+  --ink-50:  #F5F0EA;
+  --ink-100: #ECE5DC;
+  --ink-200: #D9CFC1;
+  --ink-300: #B7AB99;
+  --ink-400: #8C8273;
+  --ink-500: #5F584C;
+  --ink-600: #3F3A31;
+  --ink-700: #2A2620;
+  --ink-800: #1A1814;
+  --ink-900: #0F0E0B;
+
+  --color-success: #1F9D55;
+  --color-success-soft: #DDF3E3;
+  --color-warning: #E9A100;
+  --color-warning-soft: #FFF1CC;
+  --color-danger: #D6361A;
+  --color-danger-soft: #FCE2DA;
+
+  --font-display: 'Bricolage Grotesque', system-ui, sans-serif;
+  --font-sans:    'DM Sans', system-ui, -apple-system, sans-serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, monospace;
+
+  --shadow-1: 0 4px 0 var(--ink-800);
+
+  --dur-fast: 120ms;
+  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  font-family: var(--font-sans);
+  color: var(--ink-800);
+}
+
+[data-app="cashier"] *,
+[data-app="cashier"] *::before,
+[data-app="cashier"] *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100vh;
+  overflow: hidden;
+}
+body {
+  background: var(--ink-25, #FBF8F5);
+  font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
+  color: var(--ink-800, #1A1814);
+}
+
+/* ── Reusable cashier button (a-btn-style for the new app) ────── */
+[data-app="cashier"] .a-btn {
+  font-family: var(--font-sans);
+  font-weight: 700;
+  font-size: 14px;
+  border-radius: 12px;
+  padding: 10px 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 2px solid var(--ink-800);
+  cursor: pointer;
+  transition: transform 100ms ease, box-shadow 100ms ease;
+  white-space: nowrap;
+  user-select: none;
+  background: white;
+  color: var(--ink-800);
+}
+[data-app="cashier"] .a-btn--primary  { background: var(--aero-orange-500); color: white; box-shadow: 0 4px 0 var(--aero-orange-700); }
+[data-app="cashier"] .a-btn--primary:hover { background: var(--aero-orange-400); }
+[data-app="cashier"] .a-btn--secondary { box-shadow: 0 4px 0 var(--ink-800); }
+[data-app="cashier"] .a-btn--secondary:hover { background: var(--ink-50); }
+[data-app="cashier"] .a-btn--ghost  { background: transparent; color: var(--ink-700); border-color: var(--ink-200); box-shadow: none; }
+[data-app="cashier"] .a-btn--ghost:hover { background: var(--ink-50); border-color: var(--ink-300); }
+[data-app="cashier"] .a-btn--sm   { padding: 7px 12px; font-size: 12px; border-radius: 10px; box-shadow: 0 3px 0 var(--ink-800); }
+[data-app="cashier"] .a-btn--icon { padding: 8px; width: 36px; height: 36px; justify-content: center; }
+[data-app="cashier"] .a-btn:active:not(.a-btn--ghost) { transform: translateY(4px); box-shadow: 0 0 0 var(--ink-800) !important; }
+[data-app="cashier"] .a-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* Eyebrow label (uppercase tracking) */
+[data-app="cashier"] .eyebrow {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-500);
+}
+
+/* Big number display class used in the cashier kit */
+[data-app="cashier"] .display-num {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--ink-900);
+  line-height: 1;
+}
+
+/* Chip — used in the catalog category filter */
+[data-app="cashier"] .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: white;
+  border: 1.5px solid var(--ink-200);
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--ink-700);
+  cursor: pointer;
+}
+[data-app="cashier"] .chip.is-active {
+  background: var(--ink-800);
+  color: white;
+  border-color: var(--ink-800);
+}
+
+/* Icon-only button (used inside catalog tiles for actions) */
+[data-app="cashier"] .icon-btn {
+  width: 30px; height: 30px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1.5px solid var(--ink-200);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--ink-600);
+}
+[data-app="cashier"] .icon-btn:hover {
+  background: var(--ink-25);
+  border-color: var(--ink-800);
+  color: var(--ink-900);
+}
