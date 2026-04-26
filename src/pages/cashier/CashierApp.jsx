@@ -115,7 +115,11 @@ export function CashierApp() {
   // the device record comes from localStorage. Falls back to the first
   // device for the venue if pairing somehow vanished mid-session.
   const pairedTerminal = getTerminal();
-  const { data: devicesData } = useGetAllPosDevicesQuery();
+  // /pos/devices needs ?venueId — getVenueFromRequest reads query first.
+  // Cashier's token doesn't carry session-style context the way admin does.
+  const { data: devicesData } = useGetAllPosDevicesQuery(
+    pairedTerminal?.venueId || venueId
+  );
   const devices = devicesData?.data || devicesData || [];
   const myDevice = useMemo(() => {
     if (pairedTerminal?.deviceId) {

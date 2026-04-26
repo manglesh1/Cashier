@@ -74,9 +74,9 @@ export const posApi = baseApi.injectEndpoints({
       invalidatesTags: ["PresetBuilder"],
     }),
 
-    // Devices
+    // Devices — accepts venueId (required by backend's getVenueFromRequest)
     getAllPosDevices: builder.query({
-      query: () => "/pos/devices",
+      query: (venueId) => ({ url: "/pos/devices", params: venueId ? { venueId } : {} }),
       providesTags: ["PosDevice"],
     }),
     getPosDeviceById: builder.query({

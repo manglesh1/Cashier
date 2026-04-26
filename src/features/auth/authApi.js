@@ -73,6 +73,26 @@ export const authApi = baseApi.injectEndpoints({
               venues: data.venues || [],
             })
           );
+
+          // Refresh the terminal snapshot in localStorage with the
+          // current device data the server just returned. Important
+          // because a template might have been assigned / changed since
+          // the tablet was paired — the pairing-time snapshot is stale.
+          if (data?.device?.deviceId) {
+            try {
+              const existing = JSON.parse(localStorage.getItem("cashier:terminal") || "{}");
+              localStorage.setItem(
+                "cashier:terminal",
+                JSON.stringify({
+                  ...existing,
+                  deviceId: data.device.deviceId,
+                  deviceName: data.device.deviceName,
+                  venueId: data.device.venueId,
+                  templateId: data.device.templateId,
+                })
+              );
+            } catch { /* noop */ }
+          }
         } catch (error) {
           console.error("Cashier clock-in failed:", error);
         }
