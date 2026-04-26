@@ -34,14 +34,22 @@ export default function CashierPage() {
     }
   }, [isLucideReady]);
 
-  // Fit the 1920×1080 design surface to the actual viewport
+  // Fit the 1920×1080 design surface to the actual viewport. Uses an
+  // outer wrapper sized to the SCALED dimensions so the parent flex
+  // centering matches what's actually visible — without this, the
+  // un-scaled 1920×1080 bounding box throws the centering off and
+  // crops the top/right when the viewport is smaller than the canvas.
+  const wrapperRef = useRef(null);
   useEffect(() => {
     const fit = () => {
       const frame = scaleFrameRef.current;
-      if (!frame) return;
+      const wrap = wrapperRef.current;
+      if (!frame || !wrap) return;
       const scale = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
       frame.style.transform = `scale(${scale})`;
       frame.style.transformOrigin = "top left";
+      wrap.style.width = `${1920 * scale}px`;
+      wrap.style.height = `${1080 * scale}px`;
     };
     fit();
     window.addEventListener("resize", fit);
@@ -62,6 +70,10 @@ export default function CashierPage() {
       }}
     >
       <div
+        ref={wrapperRef}
+        style={{ position: "relative", overflow: "hidden" }}
+      >
+      <div
         ref={scaleFrameRef}
         style={{
           width: 1920,
@@ -79,6 +91,7 @@ export default function CashierPage() {
             Loading…
           </div>
         )}
+      </div>
       </div>
     </div>
   );
