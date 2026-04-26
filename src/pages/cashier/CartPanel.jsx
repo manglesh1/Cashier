@@ -160,6 +160,37 @@ function CartRow({ item, onRemove, onQty }) {
       <div className="display-num" style={{ fontSize: 18, minWidth: 64, textAlign: "right" }}>
         ${(item.price * item.qty).toFixed(2)}
       </div>
+      <button
+        type="button"
+        onClick={onRemove}
+        title="Remove from cart"
+        style={{
+          all: "unset",
+          cursor: "pointer",
+          width: 28,
+          height: 28,
+          borderRadius: 8,
+          background: "transparent",
+          border: "1.5px solid var(--ink-200)",
+          color: "var(--color-danger, #DC2626)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontWeight: 800,
+          fontSize: 14,
+          flexShrink: 0,
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "var(--color-danger, #DC2626)";
+          e.currentTarget.style.color = "white";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "transparent";
+          e.currentTarget.style.color = "var(--color-danger, #DC2626)";
+        }}
+      >
+        ✕
+      </button>
     </div>
   );
 }
