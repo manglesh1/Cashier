@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Icon } from './Icon';
 
-export function Payment({ total = 128.40, onComplete }) {
+export function Payment({ total = 128.40, bookingId, onComplete, onOpenInAdmin }) {
   const [tenders, setTenders] = useState([
     { id: "t1", method: "card", label: "Visa terminal", amount: 80, status: "captured", last4: "4421" },
   ]);

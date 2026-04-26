@@ -39,7 +39,7 @@ export function WaiverDetail() {
           <h2 style={{ margin: "0 0 14px", fontFamily: "var(--font-display)", fontSize: 18, fontWeight: 800 }}>Why it expired</h2>
           <ul style={{ margin: 0, paddingLeft: 20, fontSize: 14, color: "var(--ink-700)", lineHeight: 1.8 }}>
             <li>Annual waivers expire 365 days after signing.</li>
-            <li>Park terms updated — requires re-acknowledgment.</li>
+            <li>Location terms updated — requires re-acknowledgment.</li>
           </ul>
         </div>
       </div>

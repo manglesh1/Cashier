@@ -2,7 +2,7 @@ import { baseApi } from "../../api/baseApi";
 import Cookies from "js-cookie";
 import { loginSuccess } from "./authSlice";
 
-const LAST_VENUE_KEY = "lastSelectedVenue";
+const LAST_LOCATION_KEY = "lastSelectedLocation";
 
 export const authApi = baseApi.injectEndpoints({
   endpoints: (builder) => ({
@@ -15,18 +15,18 @@ export const authApi = baseApi.injectEndpoints({
       onQueryStarted: async (_arg, { dispatch, queryFulfilled }) => {
         try {
           const { data } = await queryFulfilled;
-          // Mirror the admin app's behaviour for venue persistence so the
-          // first booking-API call has the right park context.
-          const preferredVenue = data.venues?.[0];
-          if (preferredVenue) {
-            Cookies.set("venueId", preferredVenue.venueId, { expires: 2 / 24 });
-            Cookies.set("state", preferredVenue.stateOrProvince || "Unknown", { expires: 2 / 24 });
+          // Mirror the admin app's behaviour for location persistence so the
+          // first booking-API call has the right location context.
+          const preferredLocation = data.locations?.[0];
+          if (preferredLocation) {
+            Cookies.set("locationId", preferredLocation.locationId, { expires: 2 / 24 });
+            Cookies.set("state", preferredLocation.stateOrProvince || "Unknown", { expires: 2 / 24 });
             try {
               localStorage.setItem(
-                LAST_VENUE_KEY,
+                LAST_LOCATION_KEY,
                 JSON.stringify({
-                  venueId: preferredVenue.venueId,
-                  stateOrProvince: preferredVenue.stateOrProvince || "",
+                  locationId: preferredLocation.locationId,
+                  stateOrProvince: preferredLocation.stateOrProvince || "",
                 })
               );
             } catch { /* noop */ }
@@ -35,7 +35,7 @@ export const authApi = baseApi.injectEndpoints({
             loginSuccess({
               token: data.token,
               user: data.user,
-              venues: data.venues || [],
+              locations: data.locations || [],
             })
           );
         } catch (error) {
@@ -70,7 +70,7 @@ export const authApi = baseApi.injectEndpoints({
             loginSuccess({
               token: data.token,
               user: data.user,
-              venues: data.venues || [],
+              locations: data.locations || [],
             })
           );
 
@@ -87,7 +87,7 @@ export const authApi = baseApi.injectEndpoints({
                   ...existing,
                   deviceId: data.device.deviceId,
                   deviceName: data.device.deviceName,
-                  venueId: data.device.venueId,
+                  locationId: data.device.locationId,
                   templateId: data.device.templateId,
                 })
               );

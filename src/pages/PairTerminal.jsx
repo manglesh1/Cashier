@@ -36,8 +36,8 @@ export default function PairTerminal({ onPaired }) {
       setTerminal({
         deviceId: device.deviceId,
         deviceName: device.deviceName,
-        venueId: device.venueId,
-        venueName: device.venueName,
+        locationId: device.locationId,
+        locationName: device.locationName,
         templateId: device.templateId,
         settings: device.settings || null,
         pairedAt: new Date().toISOString(),

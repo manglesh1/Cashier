@@ -1,5 +1,5 @@
-// Cashier login — accepts email + password, sends pairedVenueId/Id so
-// the backend can refuse staff who don't have access to the venue this
+// Cashier login — accepts email + password, sends pairedLocationId/Id so
+// the backend can refuse staff who don't have access to the location this
 // tablet is paired to.
 
 import React, { useState } from "react";
@@ -19,7 +19,7 @@ export default function Login({ onUsePinLogin }) {
       await login({
         email,
         password,
-        pairedVenueId: terminal?.venueId,
+        pairedLocationId: terminal?.locationId,
         pairedDeviceId: terminal?.deviceId,
       }).unwrap();
       toast.success("Signed in");
@@ -93,7 +93,7 @@ export default function Login({ onUsePinLogin }) {
                 {terminal.deviceName}
               </div>
               <div style={{ fontSize: 11, color: "var(--ink-600)", fontWeight: 600 }}>
-                {terminal.venueName || `Venue ${terminal.venueId}`}
+                {terminal.locationName || `Location ${terminal.locationId}`}
               </div>
             </div>
             <button

@@ -1,6 +1,6 @@
 // CashierApp — top-level cashier shell. Wires:
 //   • CatalogGrid to the device's terminal template (useGetPresetFullQuery)
-//   • Cart "Pay" → useCreateBookingMutation (creates a draft reservation;
+//   • Cart "Pay" → useCreateBookingMutation (creates a draft booking;
 //     payment capture happens in the existing booking-detail flow per the
 //     user's instruction to skip on-counter payment for now)
 //   • CheckIn / Refund screens to their respective real APIs
@@ -77,12 +77,12 @@ function normalizePresetSections(preset) {
     tone: SECTION_TONES[i % SECTION_TONES.length],
     items: (sec.products || sec.items || []).map((p) => ({
       // Preserve every backend identifier we'll need to build a booking payload
-      id: p.productItemId || p.id || `${sec.sectionId}-${p.productId}`,
-      productId: p.productId,
+      id: p.productItemId || p.id || `${sec.sectionId}-${p.activityId || p.productId}`,
+      activityId: p.activityId || p.productId,
       variationId: p.variationId,
       productItemId: p.productItemId,
       productType: p.productType || p.type,
-      name: p.displayName || p.productName || p.name || "Untitled",
+      name: p.displayName || p.activityName || p.productName || p.name || "Untitled",
       sub: p.description || p.subtitle || "",
       price: Number(p.price ?? p.unitPrice ?? p.basePrice ?? NaN),
       icon: pickItemIcon(p.productType || p.type),
@@ -94,23 +94,23 @@ function normalizePresetSections(preset) {
 }
 
 export function CashierApp() {
-  const { user, venues } = useSelector((s) => s.auth);
+  const { user, locations } = useSelector((s) => s.auth);
 
-  // The paired terminal is the source of truth for venue scope —
+  // The paired terminal is the source of truth for location scope —
   // bookings, tickets, devices and presets are all filtered by the
-  // venueId on the backend (via getVenueFromRequest → cookie). The
-  // login flow seeds the cookie from the user's first venue, which
-  // is wrong when a multi-venue user paired to a different park.
+  // locationId on the backend (via getLocationFromRequest → cookie). The
+  // login flow seeds the cookie from the user's first location, which
+  // is wrong when a multi-location user paired to a different location.
   // Force the cookie to match the paired terminal so all subsequent
-  // API calls are scoped to the correct venue.
-  const pairedVenueId = (() => {
-    try { return JSON.parse(localStorage.getItem("cashier:terminal") || "null")?.venueId; }
+  // API calls are scoped to the correct location.
+  const pairedLocationId = (() => {
+    try { return JSON.parse(localStorage.getItem("cashier:terminal") || "null")?.locationId; }
     catch { return null; }
   })();
-  if (pairedVenueId && String(Cookies.get("venueId")) !== String(pairedVenueId)) {
-    Cookies.set("venueId", pairedVenueId, { expires: 2 / 24 });
+  if (pairedLocationId && String(Cookies.get("locationId")) !== String(pairedLocationId)) {
+    Cookies.set("locationId", pairedLocationId, { expires: 2 / 24 });
   }
-  const venueId = Cookies.get("venueId");
+  const locationId = Cookies.get("locationId");
 
   const dispatch = useDispatch();
   const [logoutCall] = useLogoutMutation();
@@ -131,12 +131,12 @@ export function CashierApp() {
   // ── Resolve which template to load ─────────────────────────────────
   // The terminal is paired (PairTerminal page) before the user logs in;
   // the device record comes from localStorage. Falls back to the first
-  // device for the venue if pairing somehow vanished mid-session.
+  // device for the location if pairing somehow vanished mid-session.
   const pairedTerminal = getTerminal();
-  // /pos/devices needs ?venueId — getVenueFromRequest reads query first.
+  // /pos/devices needs ?locationId — getLocationFromRequest reads query first.
   // Cashier's token doesn't carry session-style context the way admin does.
   const { data: devicesData } = useGetAllPosDevicesQuery(
-    pairedTerminal?.venueId || venueId
+    pairedTerminal?.locationId || locationId
   );
   const devices = devicesData?.data || devicesData || [];
   const myDevice = useMemo(() => {
@@ -150,14 +150,14 @@ export function CashierApp() {
         deviceId: pairedTerminal.deviceId,
         name: pairedTerminal.deviceName,
         deviceName: pairedTerminal.deviceName,
-        venueId: pairedTerminal.venueId,
-        venueName: pairedTerminal.venueName,
+        locationId: pairedTerminal.locationId,
+        locationName: pairedTerminal.locationName,
         templateId: pairedTerminal.templateId,
         posTemplateId: pairedTerminal.templateId,
       };
     }
-    return devices.find((d) => String(d.venueId) === String(venueId)) || devices[0] || null;
-  }, [devices, venueId, pairedTerminal?.deviceId]);
+    return devices.find((d) => String(d.locationId) === String(locationId)) || devices[0] || null;
+  }, [devices, locationId, pairedTerminal?.deviceId]);
   const templateId =
     myDevice?.posTemplateId || myDevice?.templateId || myDevice?.presetId || pairedTerminal?.templateId;
   const terminalDeviceId = pairedTerminal?.deviceId || myDevice?.posDeviceId || myDevice?.deviceId;
@@ -197,7 +197,7 @@ export function CashierApp() {
         ...prev,
         {
           id: productItem.id,
-          productId: productItem.productId,
+          activityId: productItem.activityId,
           variationId: productItem.variationId,
           productType: productItem.productType,
           name: productItem.name,
@@ -219,7 +219,7 @@ export function CashierApp() {
       return n;
     });
 
-  // ── Cart → create reservation ─────────────────────────────────────
+  // ── Cart → create booking ─────────────────────────────────────────
   // Builds the same payload shape as BookingConfirmation. Walk-in by
   // default; staff can finish guest details on the booking detail page.
   const handleCheckout = async () => {
@@ -227,22 +227,22 @@ export function CashierApp() {
       toast.error("Cart is empty");
       return;
     }
-    if (!venueId) {
-      toast.error("No park selected");
+    if (!locationId) {
+      toast.error("No location selected");
       return;
     }
 
     const sessions = items
-      .filter((it) => it.productId)
+      .filter((it) => it.activityId)
       .map((it) => ({
-        productId: it.productId,
+        activityId: it.activityId,
         variationId: it.variationId,
         quantity: it.qty,
         isAddon: String(it.productType || "").toLowerCase().includes("add"),
       }));
 
     const payload = {
-      venueId,
+      locationId,
       bookingDate: new Date().toISOString().slice(0, 10),
       sessions,
       guestName: member?.name || `Walk-in ${Math.random().toString(36).slice(-4).toUpperCase()}`,
@@ -269,15 +269,15 @@ export function CashierApp() {
 
     try {
       const res = await createBooking(payload).unwrap();
-      const bookingMasterId = res?.data?.bookingMasterId || res?.bookingMasterId || res?.id;
-      setCreatedBookingId(bookingMasterId);
+      const bookingId = res?.data?.bookingId || res?.data?.bookingMasterId || res?.bookingId || res?.bookingMasterId || res?.id;
+      setCreatedBookingId(bookingId);
       setItems([]);
-      toast.success(`Reservation ${res?.data?.bookingNumber || ""} created`);
+      toast.success(`Booking ${res?.data?.bookingNumber || ""} created`);
       // Hand off to the Payment screen which can finalize via the existing
       // booking-detail flow (link / refund). Capture endpoint comes later.
       setScreen("payment");
     } catch (err) {
-      const msg = err?.data?.message || err?.data?.error || err?.message || "Failed to create reservation";
+      const msg = err?.data?.message || err?.data?.error || err?.message || "Failed to create booking";
       toast.error(msg);
     }
   };
@@ -377,7 +377,7 @@ export function CashierApp() {
     body = (
       <Payment
         total={items.reduce((s, it) => s + it.price * it.qty, 0)}
-        bookingMasterId={createdBookingId}
+        bookingId={createdBookingId}
         onComplete={() => {
           setCreatedBookingId(null);
           setScreen("sell");
@@ -389,7 +389,7 @@ export function CashierApp() {
     );
     header = (
       <Header
-        breadcrumb={createdBookingId ? `RESERVATION · ${createdBookingId}` : "CART · NEW"}
+        breadcrumb={createdBookingId ? `BOOKING · ${createdBookingId}` : "CART · NEW"}
         title="Checkout"
         subtitle={`${items.length} items · ${items.reduce((s, i) => s + i.qty, 0)} jumpers`}
       />
@@ -466,17 +466,17 @@ export function CashierApp() {
         </button>
       </aside>
       <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-        {/* Inject venue + terminal name into every Header so the cashier
-            always sees which park / lane they're operating from. Falls
-            back to the auth venues list when an older paired snapshot
-            doesn't carry venueName. */}
+        {/* Inject location + terminal name into every Header so the cashier
+            always sees which location / lane they're operating from. Falls
+            back to the auth locations list when an older paired snapshot
+            doesn't carry locationName. */}
         {header && React.cloneElement(header, {
-          venue: header.props.venue ?? (
-            myDevice?.venueName ||
-            pairedTerminal?.venueName ||
-            (venues || []).find((v) => String(v.venueId) === String(pairedTerminal?.venueId || venueId))?.legalBusinessName ||
-            (venues || []).find((v) => String(v.venueId) === String(pairedTerminal?.venueId || venueId))?.venueName ||
-            (venues || []).find((v) => String(v.venueId) === String(pairedTerminal?.venueId || venueId))?.name
+          location: header.props.location ?? (
+            myDevice?.locationName ||
+            pairedTerminal?.locationName ||
+            (locations || []).find((l) => String(l.locationId) === String(pairedTerminal?.locationId || locationId))?.legalBusinessName ||
+            (locations || []).find((l) => String(l.locationId) === String(pairedTerminal?.locationId || locationId))?.locationName ||
+            (locations || []).find((l) => String(l.locationId) === String(pairedTerminal?.locationId || locationId))?.name
           ),
           terminal: header.props.terminal ?? (myDevice?.deviceName || myDevice?.name),
         })}

@@ -22,7 +22,7 @@ function computeDiscountAmount(discount, subtotal) {
   return Math.min(value, subtotal);
 }
 
-const TAX_RATE = 0.05; // TODO: read from venue tax config when wired
+const TAX_RATE = 0.05; // TODO: read from location tax config when wired
 
 export function CartPanel({
   items = [],
@@ -34,7 +34,7 @@ export function CartPanel({
   isSubmitting = false,
   onPricingChange,         // (pricing) => void — parent uses for createBooking payload
 }) {
-  // Discount can be one of three modes — same as PaymentTab on All Reservations.
+  // Discount can be one of three modes — same as PaymentTab on All Bookings.
   // Code: typed string → validated against /promos/validate → server-defined value
   // Percentage: cashier types %, applied directly (subject to manager override above 20%)
   // Amount: cashier types $, applied directly (subject to manager override above $20)
@@ -49,7 +49,7 @@ export function CartPanel({
   // type their PIN and authorize the apply.
   const [overrideContext, setOverrideContext] = useState(null);
 
-  // Layered POS settings — venue defaults + per-device overrides, set at pair time.
+  // Layered POS settings — location defaults + per-device overrides, set at pair time.
   const settings = useEffectiveSettings();
   const pctLimit = Number(settings.cashierDiscountPercentLimit ?? 20);
   const amtLimit = Number(settings.cashierDiscountAmountLimit ?? 20);
@@ -127,7 +127,7 @@ export function CartPanel({
         toast.error("Percentage can't exceed 100");
         return;
       }
-      // Threshold gate — over the venue's % limit needs manager override (unless skipPin)
+      // Threshold gate — over the location's % limit needs manager override (unless skipPin)
       if (!skipPin && value > pctLimit) {
         setOverrideContext({
           code: `${value}%`,
@@ -156,7 +156,7 @@ export function CartPanel({
         toast.error("Discount can't exceed the subtotal");
         return;
       }
-      // Threshold gate — over the venue's $ limit needs manager override (unless skipPin)
+      // Threshold gate — over the location's $ limit needs manager override (unless skipPin)
       if (!skipPin && value > amtLimit) {
         setOverrideContext({
           code: `$${value}`,
@@ -286,7 +286,7 @@ export function CartPanel({
           <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--ink-400)" }}>
             <Icon name="shopping-bag" size={42} stroke={1.5} />
             <div style={{ marginTop: 14, fontWeight: 700, fontSize: 16, color: "var(--ink-600)" }}>Cart is empty</div>
-            <div style={{ fontSize: 13, marginTop: 4 }}>Tap a product to add it.</div>
+            <div style={{ fontSize: 13, marginTop: 4 }}>Tap an activity to add it.</div>
           </div>
         )}
         {items.map((it, idx) => (

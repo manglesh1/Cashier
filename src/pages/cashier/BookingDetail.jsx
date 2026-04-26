@@ -95,9 +95,9 @@ function SearchBar({ onPick }) {
           )}
           {results.map((r) => (
             <button
-              key={r.bookingMasterId}
+              key={r.bookingId}
               type="button"
-              onClick={() => onPick(r.bookingMasterId)}
+              onClick={() => onPick(r.bookingId)}
               style={{
                 all: "unset", cursor: "pointer", display: "block", width: "100%", boxSizing: "border-box",
                 padding: "14px 18px",
@@ -113,7 +113,7 @@ function SearchBar({ onPick }) {
                     {r.bookingName || r.guest?.guestName || "Walk-in"}
                   </div>
                   <div style={{ fontSize: 12, color: "var(--ink-500)" }}>
-                    #{r.bookingNumber || r.bookingMasterId}
+                    #{r.bookingNumber || r.bookingId}
                     {(r.bookingDate || r.dateOfBooking) && ` · ${new Date(r.bookingDate || r.dateOfBooking).toLocaleDateString()}`}
                     {r.totalAmount != null && ` · ${moneyFmt(r.totalAmount)}`}
                   </div>
@@ -133,24 +133,24 @@ function SearchBar({ onPick }) {
   );
 }
 
-// ── Group tickets by product+productType ──────────────────────────
+// ── Group tickets by activity+productType ──────────────────────────
 function groupTickets(tickets = []) {
   const buckets = {
     party: [],
     tickets: [],
     addons: [],
   };
-  // Group key: productType|productId|variationId
+  // Group key: productType|activityId|variationId
   const map = new Map();
   for (const t of tickets) {
-    const key = `${t.productType}|${t.productId}|${t.variationId || ""}`;
+    const key = `${t.productType}|${t.activityId}|${t.variationId || ""}`;
     if (!map.has(key)) {
       map.set(key, {
         key,
         productType: t.productType,
-        productId: t.productId,
-        productName: t.product?.name || "(unnamed)",
-        captureTicketHolder: !!t.product?.captureTicketHolder,
+        activityId: t.activityId,
+        activityName: t.activity?.name || "(unnamed)",
+        captureTicketHolder: !!t.activity?.captureTicketHolder,
         validFrom: t.validFrom,
         validUntil: t.validUntil,
         items: [],
@@ -211,7 +211,7 @@ function TicketGroupCard({ group }) {
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 14, color: "var(--ink-900)" }}>
-            {group.productName} <span style={{ color: "var(--ink-500)", fontWeight: 600 }}>· ×{total}</span>
+            {group.activityName} <span style={{ color: "var(--ink-500)", fontWeight: 600 }}>· ×{total}</span>
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
             <CountChip
@@ -380,7 +380,7 @@ function BookingSummary({ booking }) {
         {booking.bookingName || guest.guestName || "Walk-in"}
       </div>
       <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 4 }}>
-        #{booking.bookingNumber || booking.bookingMasterId}
+        #{booking.bookingNumber || booking.bookingId}
         {booking.bookingDate && ` · ${new Date(booking.bookingDate).toLocaleDateString()}`}
       </div>
 
@@ -481,19 +481,19 @@ function StatusHeader({ booking, ticketSummary }) {
 
 // ── Main screen ───────────────────────────────────────────────────
 export default function BookingDetail() {
-  const [bookingMasterId, setBookingMasterId] = useState(null);
+  const [bookingId, setBookingId] = useState(null);
 
   const { data: bookingData, isFetching: isLoadingBooking } =
-    useGetBookingByIdQuery(bookingMasterId, { skip: !bookingMasterId });
+    useGetBookingByIdQuery(bookingId, { skip: !bookingId });
   const { data: ticketsData, isFetching: isLoadingTickets } =
-    useGetBookingTicketsQuery(bookingMasterId, { skip: !bookingMasterId });
+    useGetBookingTicketsQuery(bookingId, { skip: !bookingId });
 
   const booking = bookingData?.data || bookingData;
   const tickets = ticketsData?.data || [];
   const summary = ticketsData?.summary;
 
   // No booking yet → search-only view
-  if (!bookingMasterId) {
+  if (!bookingId) {
     return (
       <div style={{ padding: 24, flex: 1, overflow: "auto", background: "var(--ink-25)" }}>
         <div style={{ textAlign: "center", marginBottom: 28 }}>
@@ -505,7 +505,7 @@ export default function BookingDetail() {
             Search by guest name, phone, email, booking number, or ticket code.
           </p>
         </div>
-        <SearchBar onPick={setBookingMasterId} />
+        <SearchBar onPick={setBookingId} />
       </div>
     );
   }
@@ -515,7 +515,7 @@ export default function BookingDetail() {
       {/* Top bar — "back to search" */}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <button type="button"
-          onClick={() => setBookingMasterId(null)}
+          onClick={() => setBookingId(null)}
           className="a-btn a-btn--ghost a-btn--sm">
           <Icon name="arrow-left" size={14} /> Search
         </button>

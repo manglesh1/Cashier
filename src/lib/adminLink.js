@@ -9,7 +9,7 @@ export const openInAdmin = (path) => {
   window.open(url, "_blank", "noopener,noreferrer");
 };
 
-export const adminBookingDetailUrl = (bookingMasterId, query = "") => {
+export const adminBookingDetailUrl = (bookingId, query = "") => {
   const q = query ? `&${query.replace(/^[?&]/, "")}` : "";
-  return `${ADMIN_URL.replace(/\/$/, "")}/reservations/confirmation?book_id=${bookingMasterId}${q}`;
+  return `${ADMIN_URL.replace(/\/$/, "")}/bookings/confirmation?book_id=${bookingId}${q}`;
 };

@@ -63,7 +63,7 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
           </div>
         ) : visibleSections.length === 0 ? (
           <div style={{ padding: 60, textAlign: "center", color: "var(--ink-500)" }}>
-            <div style={{ fontWeight: 700, marginBottom: 4 }}>No products in this template</div>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>No activities in this template</div>
             <div style={{ fontSize: 13 }}>Configure sections in admin → POS → Terminal Presets.</div>
           </div>
         ) : (

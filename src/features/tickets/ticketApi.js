@@ -4,41 +4,41 @@ export const ticketApi = baseApi.injectEndpoints({
   endpoints: (builder) => ({
     // Booking-scoped reads
     getBookingTickets: builder.query({
-      query: (bookingMasterId) => `/reservations/${bookingMasterId}/tickets`,
+      query: (bookingId) => `/bookings/${bookingId}/tickets`,
       providesTags: (result, error, id) => [{ type: "Tickets", id }],
     }),
 
     // Mint missing tickets for a booking (idempotent)
     issueTickets: builder.mutation({
-      query: ({ bookingMasterId, force = false }) => ({
-        url: `/reservations/${bookingMasterId}/tickets`,
+      query: ({ bookingId, force = false }) => ({
+        url: `/bookings/${bookingId}/tickets`,
         method: "POST",
         body: { force },
       }),
-      invalidatesTags: (result, error, { bookingMasterId }) => [
-        { type: "Tickets", id: bookingMasterId },
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "Tickets", id: bookingId },
       ],
     }),
 
     regenerateTicketCodes: builder.mutation({
-      query: ({ bookingMasterId }) => ({
-        url: `/reservations/${bookingMasterId}/tickets/regenerate-codes`,
+      query: ({ bookingId }) => ({
+        url: `/bookings/${bookingId}/tickets/regenerate-codes`,
         method: "POST",
       }),
-      invalidatesTags: (result, error, { bookingMasterId }) => [
-        { type: "Tickets", id: bookingMasterId },
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "Tickets", id: bookingId },
       ],
     }),
 
     checkInAllTickets: builder.mutation({
-      query: ({ bookingMasterId, terminalDeviceId, gateOrZone }) => ({
-        url: `/reservations/${bookingMasterId}/tickets/check-in-all`,
+      query: ({ bookingId, terminalDeviceId, gateOrZone }) => ({
+        url: `/bookings/${bookingId}/tickets/check-in-all`,
         method: "POST",
         body: { terminalDeviceId, gateOrZone },
       }),
-      invalidatesTags: (result, error, { bookingMasterId }) => [
-        { type: "Tickets", id: bookingMasterId },
-        { type: "Reservation", id: bookingMasterId },
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "Tickets", id: bookingId },
+        { type: "Booking", id: bookingId },
       ],
     }),
 
@@ -55,8 +55,8 @@ export const ticketApi = baseApi.injectEndpoints({
         body: { terminalDeviceId, gateOrZone, notes, managerOverride },
       }),
       invalidatesTags: (result) => {
-        if (!result?.data?.bookingMasterId) return [];
-        return [{ type: "Tickets", id: result.data.bookingMasterId }];
+        if (!result?.data?.bookingId) return [];
+        return [{ type: "Tickets", id: result.data.bookingId }];
       },
     }),
 
@@ -67,8 +67,8 @@ export const ticketApi = baseApi.injectEndpoints({
         body: { reason, managerOverride },
       }),
       invalidatesTags: (result) => {
-        if (!result?.data?.bookingMasterId) return ["Tickets"];
-        return [{ type: "Tickets", id: result.data.bookingMasterId }];
+        if (!result?.data?.bookingId) return ["Tickets"];
+        return [{ type: "Tickets", id: result.data.bookingId }];
       },
     }),
   }),

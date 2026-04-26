@@ -2,7 +2,7 @@
 // Replaces email/password as the primary login flow on a paired tablet.
 //
 // Flow:
-//   1. Loads staff for the paired terminal's venue
+//   1. Loads staff for the paired terminal's location
 //   2. Cashier taps their photo/initials tile → PIN pad slides in
 //   3. PIN entered → clockIn mutation → token in Redux → CashierApp loads
 //
@@ -90,7 +90,7 @@ export default function ClockIn({ onUseEmailLogin }) {
           overflow: "auto",
         }}
       >
-        {/* Header — terminal + venue */}
+        {/* Header — terminal + location */}
         <TerminalBar terminal={terminal} onSwitch={() => {
           if (window.confirm("Unpair this terminal?")) {
             clearTerminal();
@@ -274,7 +274,7 @@ function TerminalBar({ terminal, onSwitch }) {
           {terminal.deviceName}
         </div>
         <div style={{ fontSize: 11, color: "var(--ink-600)", fontWeight: 600 }}>
-          {terminal.venueName || `Venue ${terminal.venueId}`}
+          {terminal.locationName || `Location ${terminal.locationId}`}
         </div>
       </div>
       <button

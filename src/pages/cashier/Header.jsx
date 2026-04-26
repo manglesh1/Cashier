@@ -1,6 +1,6 @@
 import React from 'react';
 
-export function Header({ title, subtitle, right, breadcrumb, venue, terminal }) {
+export function Header({ title, subtitle, right, breadcrumb, location, terminal }) {
   return (
     <header style={{
       height: 72, background: "var(--ink-0)", borderBottom: "1px solid var(--ink-100)",
@@ -15,20 +15,20 @@ export function Header({ title, subtitle, right, breadcrumb, venue, terminal }) 
           {subtitle && <span style={{ color: "var(--ink-500)", fontSize: 14, whiteSpace: "nowrap" }}>{subtitle}</span>}
         </div>
       </div>
-      {/* Venue + terminal pinned chip — surfaces on every screen so the
-          cashier always knows which park / lane they're operating. */}
-      {(venue || terminal) && (
+      {/* Location + terminal pinned chip — surfaces on every screen so the
+          cashier always knows which location / lane they're operating. */}
+      {(location || terminal) && (
         <div style={{
           display: "flex", flexDirection: "column", alignItems: "flex-end",
           padding: "6px 12px", borderRadius: 10,
           background: "var(--ink-50)", border: "1px solid var(--ink-100)",
           maxWidth: 240,
-        }} title={venue ? `Park: ${venue}${terminal ? ` · Lane: ${terminal}` : ""}` : terminal}>
-          {venue && (
+        }} title={location ? `Location: ${location}${terminal ? ` · Lane: ${terminal}` : ""}` : terminal}>
+          {location && (
             <span style={{
               fontSize: 12, fontWeight: 800, color: "var(--ink-900)",
               maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            }}>{venue}</span>
+            }}>{location}</span>
           )}
           {terminal && (
             <span style={{

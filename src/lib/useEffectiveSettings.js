@@ -1,6 +1,6 @@
-// useEffectiveSettings — merged venue + device settings for the cashier.
+// useEffectiveSettings — merged location + device settings for the cashier.
 //
-// The pair endpoint already returns a `settings` object with venue
+// The pair endpoint already returns a `settings` object with location
 // defaults + device overrides merged server-side; we save it on
 // localStorage at pair time. Reading from there means every screen has
 // settings synchronously without an API round-trip.
@@ -9,7 +9,7 @@ import { useMemo } from "react";
 import { getTerminal } from "./terminal";
 
 const FALLBACKS = {
-  // Venue-wide cashier behaviour
+  // Location-wide cashier behaviour
   skipNewGuestDetails: true,
   autoCheckInOnPurchase: true,
   allowUndoCheckIn: false,

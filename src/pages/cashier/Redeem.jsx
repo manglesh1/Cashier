@@ -4,7 +4,6 @@
 // "just works" without the cashier touching the screen.
 
 import React, { useEffect, useRef, useState } from "react";
-import Cookies from "js-cookie";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
@@ -31,8 +30,6 @@ export function Redeem() {
   const [recent, setRecent] = useState([]); // [{ ticket, ok, reason, at }]
   const [lookup, { isFetching: isLookingUp }] = useLazyGetTicketByCodeQuery();
   const [redeem, { isLoading: isRedeeming }] = useRedeemTicketMutation();
-  const venueId = Cookies.get("venueId");
-
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
@@ -55,7 +52,7 @@ export function Redeem() {
       }).unwrap();
       const ticket = res?.data;
       setRecent((prev) => [{ ticket, ok: true, at: Date.now() }, ...prev].slice(0, 8));
-      toast.success(`Redeemed · ${ticket?.product?.productName || ticket?.productType || "ticket"}`);
+      toast.success(`Redeemed · ${ticket?.activity?.activityName || ticket?.productType || "ticket"}`);
     } catch (err) {
       const reason = err?.data?.reason || "not_found";
       const ticket = err?.data?.data;
@@ -82,7 +79,7 @@ export function Redeem() {
       const res = await lookup(code.trim()).unwrap();
       const t = res?.data;
       toast.message(
-        `${t?.product?.productName || t?.productType || "Ticket"} · ${t?.status} · ${t?.redemptionCount ?? 0}/${t?.maxRedemptions ?? 1} uses`
+        `${t?.activity?.activityName || t?.productType || "Ticket"} · ${t?.status} · ${t?.redemptionCount ?? 0}/${t?.maxRedemptions ?? 1} uses`
       );
     } catch (err) {
       const reason = err?.data?.reason || "not_found";
@@ -198,7 +195,7 @@ function RecentRow({ entry }) {
       <div style={{ lineHeight: 1.3 }}>
         <div style={{ fontWeight: 700, fontSize: 14 }}>
           {t?.ticketCode || "—"}
-          {entry.ok && t?.product?.productName && <span style={{ color: "var(--ink-500)", fontWeight: 500, marginLeft: 6 }}>· {t.product.productName}</span>}
+          {entry.ok && t?.activity?.activityName && <span style={{ color: "var(--ink-500)", fontWeight: 500, marginLeft: 6 }}>· {t.activity.activityName}</span>}
         </div>
         <div style={{ fontSize: 12, color: "var(--ink-600)" }}>
           {entry.ok

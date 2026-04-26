@@ -148,7 +148,7 @@ function GuestDetail({ guest }) {
     dateTo: "",
     status: [],
     paymentStatus: [],
-    productId: [],
+    activityId: [],
   });
 
   const bookings = data?.data || [];
@@ -247,8 +247,8 @@ function GuestDetail({ guest }) {
               const isCancelled = b.status === "cancelled";
               return (
                 <li
-                  key={b.bookingMasterId}
-                  onClick={() => window.open(adminBookingDetailUrl(b.bookingMasterId), "_blank", "noopener,noreferrer")}
+                  key={b.bookingId}
+                  onClick={() => window.open(adminBookingDetailUrl(b.bookingId), "_blank", "noopener,noreferrer")}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -261,7 +261,7 @@ function GuestDetail({ guest }) {
                 >
                   <div style={{ flex: 1, lineHeight: 1.3, minWidth: 0 }}>
                     <div style={{ fontWeight: 700, fontSize: 14 }}>
-                      {b.productName || "Reservation"}
+                      {b.activityName || "Booking"}
                     </div>
                     <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 2 }}>
                       {b.bookingNumber} · {b.dateOfBooking || "—"} · {b.totalGuests || 0} pax

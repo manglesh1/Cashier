@@ -1,5 +1,5 @@
 // CheckIn — cashier check-in screen.
-// Lists today's confirmed reservations, lets the cashier search by
+// Lists today's confirmed bookings, lets the cashier search by
 // name/email/phone/booking number, and one-tap-checks-in the whole
 // party via the checkInAllTickets endpoint (which iterates the booking's
 // pending tickets, mints redemption events, and respects waiver/expiry
@@ -33,7 +33,7 @@ export function CheckIn() {
     dateTo: today,
     status: ["confirmed", "pending"],
     paymentStatus: [],
-    productId: [],
+    activityId: [],
   });
 
   const bookings = data?.data || [];
@@ -110,14 +110,14 @@ export function CheckIn() {
             <div style={{ padding: 32, textAlign: "center", color: "var(--ink-500)" }}>Loading…</div>
           ) : partition.length === 0 ? (
             <div style={{ padding: 32, textAlign: "center", color: "var(--ink-500)" }}>
-              No reservations match.
+              No bookings match.
             </div>
           ) : (
             partition.map((b) => (
               <BookingRow
-                key={b.bookingMasterId}
+                key={b.bookingId}
                 b={b}
-                isSelected={selected?.bookingMasterId === b.bookingMasterId}
+                isSelected={selected?.bookingId === b.bookingId}
                 onClick={() => setSelected(b)}
               />
             ))
@@ -207,7 +207,7 @@ function BookingRow({ b, isSelected, onClick }) {
           {b.bookingName || "Walk-in"}
         </div>
         <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 2 }}>
-          {b.bookingNumber} · {b.totalGuests || 0} pax · {b.productName || "—"}
+          {b.bookingNumber} · {b.totalGuests || 0} pax · {b.activityName || "—"}
         </div>
       </div>
       <StatusPill tone={tone}>{waiverLabel}</StatusPill>
@@ -221,7 +221,7 @@ function EmptyDetail() {
   return (
     <div style={{ padding: 24, textAlign: "center", color: "var(--ink-500)" }}>
       <Icon name="user-round" size={42} style={{ color: "var(--ink-200)", marginBottom: 12 }} />
-      <div style={{ fontWeight: 700, color: "var(--ink-700)", marginBottom: 4 }}>Select a reservation</div>
+      <div style={{ fontWeight: 700, color: "var(--ink-700)", marginBottom: 4 }}>Select a booking</div>
       <div style={{ fontSize: 13 }}>Tap a row on the left to see details, waiver status, and check the party in.</div>
     </div>
   );
@@ -229,7 +229,7 @@ function EmptyDetail() {
 
 function SelectedBookingDetail({ booking, onCheckedIn }) {
   const { data: ticketsData, isLoading: ticketsLoading, refetch: refetchTickets } =
-    useGetBookingTicketsQuery(booking.bookingMasterId, { skip: !booking.bookingMasterId });
+    useGetBookingTicketsQuery(booking.bookingId, { skip: !booking.bookingId });
   const [checkInAll, { isLoading: checkingIn }] = useCheckInAllTicketsMutation();
 
   const tickets = ticketsData?.data || [];
@@ -237,10 +237,10 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const issuedRemaining = summary.issued ?? 0;
 
   const handleCheckIn = async () => {
-    if (!booking?.bookingMasterId) return;
+    if (!booking?.bookingId) return;
     const terminal = getTerminal();
     const promise = checkInAll({
-      bookingMasterId: booking.bookingMasterId,
+      bookingId: booking.bookingId,
       terminalDeviceId: terminal?.deviceId || null,
       gateOrZone: terminal?.deviceName || "Cashier check-in",
     }).unwrap();
@@ -267,7 +267,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           {booking.bookingName || "Walk-in"}
         </div>
         <div style={{ fontSize: 13, color: "var(--ink-500)", marginTop: 4 }}>
-          {booking.productName} · {booking.totalGuests || 0} pax · {booking.timeRange || "—"}
+          {booking.activityName} · {booking.totalGuests || 0} pax · {booking.timeRange || "—"}
         </div>
       </div>
 
