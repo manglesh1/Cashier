@@ -1,25 +1,97 @@
-import React, { useState } from 'react';
-import { Icon } from './Icon';
+import React, { useState } from "react";
+import { toast } from "sonner";
+import { Icon } from "./Icon";
+import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discountApi";
+
+// Compute a discount amount from the validated discount + subtotal.
+// Mirrors what the admin's createBooking pricing logic does:
+//   discountType: 1 = percentage (value is %)
+//   discountType: 2 = fixed     (value is $)
+// maxValue caps a percentage so e.g. "10% off, max $20" works.
+function computeDiscountAmount(discount, subtotal) {
+  if (!discount) return 0;
+  const value = Number(discount.value || 0);
+  const max = Number(discount.maxValue || 0);
+  if (Number(discount.discountType) === 1) {
+    const raw = subtotal * (value / 100);
+    return max > 0 ? Math.min(raw, max) : raw;
+  }
+  // Fixed
+  return Math.min(value, subtotal);
+}
+
+const TAX_RATE = 0.05; // TODO: read from venue tax config when wired
 
 export function CartPanel({
   items = [],
   onRemove,
   onQty,
   onCheckout,
-  promo = null,
   member = null,
-  variant = "default", // "default" | "bold" | "minimal"
+  variant = "default",
+  isSubmitting = false,
+  onPricingChange,         // (pricing) => void — parent uses for createBooking payload
 }) {
+  const [promo, setPromo] = useState(null);
+  const [promoOpen, setPromoOpen] = useState(false);
+  const [promoInput, setPromoInput] = useState("");
+  const [validate, { isFetching: isValidating }] = useLazyValidateDiscountCodeQuery();
+
   const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
-  const discount = promo ? promo.amount : 0;
+  const discountAmount = computeDiscountAmount(promo, subtotal);
   const memberDiscount = member ? subtotal * 0.1 : 0;
-  const tax = (subtotal - discount - memberDiscount) * 0.05;
-  const total = subtotal - discount - memberDiscount + tax;
+  const afterDiscount = Math.max(0, subtotal - discountAmount - memberDiscount);
+  const tax = afterDiscount * TAX_RATE;
+  const total = afterDiscount + tax;
+
+  // Push current pricing up so CashierApp can include it in createBooking
+  React.useEffect(() => {
+    onPricingChange?.({
+      subtotal,
+      discount: promo
+        ? {
+            code: promo.code,
+            name: promo.name,
+            type: promo.discountType,
+            value: promo.value,
+            maxValue: promo.maxValue,
+            amount: discountAmount,
+          }
+        : null,
+      memberDiscount,
+      tax,
+      total,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subtotal, discountAmount, memberDiscount, tax, total, promo?.code]);
+
+  const applyPromo = async () => {
+    const code = promoInput.trim();
+    if (!code) return;
+    try {
+      const res = await validate(code).unwrap();
+      if (res?.success && res.data) {
+        setPromo(res.data);
+        setPromoOpen(false);
+        setPromoInput("");
+        toast.success(`Promo "${res.data.name}" applied`);
+      } else {
+        toast.error("Invalid promo code");
+      }
+    } catch (err) {
+      toast.error(err?.data?.message || "Invalid promo code");
+    }
+  };
+
+  const clearPromo = () => {
+    setPromo(null);
+    setPromoInput("");
+  };
 
   const isBold = variant === "bold";
   const panelStyle = {
     width: 460, flexShrink: 0,
-    background: isBold ? "var(--ink-0)" : "var(--ink-0)",
+    background: "var(--ink-0)",
     border: isBold ? "2px solid var(--ink-800)" : "1px solid var(--ink-100)",
     borderRadius: isBold ? 24 : 20,
     boxShadow: isBold ? "0 6px 0 var(--ink-800)" : "var(--shadow-2)",
@@ -47,12 +119,6 @@ export function CartPanel({
             padding: "3px 10px", borderRadius: 999,
           }}>{items.reduce((s,i)=>s+i.qty,0)} items</span>
         </div>
-        <button style={{
-          all: "unset", cursor: "pointer", color: isBold ? "rgba(255,255,255,.85)" : "var(--ink-500)",
-          fontSize: 13, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 4,
-        }}>
-          <Icon name="user-round" size={14} /> Maya C.
-        </button>
       </div>
 
       {/* items */}
@@ -71,8 +137,8 @@ export function CartPanel({
         {member && (
           <div style={{
             display: "flex", alignItems: "center", gap: 10,
-            padding: "12px 14px", background: "var(--aero-electric-50)",
-            border: "1.5px solid var(--aero-electric-200)", borderRadius: 14,
+            padding: "12px 14px", background: "var(--aero-electric-50, var(--ink-50))",
+            border: "1.5px solid var(--aero-electric-300, var(--ink-200))", borderRadius: 14,
           }}>
             <div style={{ width: 32, height: 32, borderRadius: 10, background: "var(--aero-electric-400)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
               <Icon name="sparkles" size={18} />
@@ -87,17 +153,60 @@ export function CartPanel({
         {promo && (
           <div style={{
             display: "flex", alignItems: "center", gap: 10,
-            padding: "12px 14px", background: "var(--aero-yellow-50)",
+            padding: "12px 14px", background: "var(--aero-yellow-50, #FFF7DC)",
             border: "1.5px solid var(--aero-yellow-300)", borderRadius: 14,
           }}>
             <div style={{ width: 32, height: 32, borderRadius: 10, background: "var(--aero-yellow-300)", color: "var(--ink-800)", display: "flex", alignItems: "center", justifyContent: "center" }}>
               <Icon name="gift" size={18} />
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>{promo.code}</div>
-              <div style={{ fontSize: 12, color: "var(--ink-600)" }}>−${promo.amount.toFixed(2)} off</div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{promo.code} · {promo.name}</div>
+              <div style={{ fontSize: 12, color: "var(--ink-600)" }}>−${discountAmount.toFixed(2)} off</div>
             </div>
-            <Icon name="x" size={16} stroke={2} />
+            <button onClick={clearPromo} title="Remove promo" style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)" }}>
+              <Icon name="x" size={18} stroke={2} />
+            </button>
+          </div>
+        )}
+
+        {/* Promo input — appears when the Promo button is tapped */}
+        {!promo && promoOpen && (
+          <div style={{
+            display: "flex", gap: 8,
+            padding: "10px 12px", background: "var(--ink-25)",
+            border: "1.5px solid var(--ink-200)", borderRadius: 14,
+          }}>
+            <input
+              autoFocus
+              value={promoInput}
+              onChange={(e) => setPromoInput(e.target.value.toUpperCase())}
+              onKeyDown={(e) => { if (e.key === "Enter") applyPromo(); }}
+              placeholder="Enter code"
+              style={{
+                all: "unset",
+                flex: 1,
+                fontFamily: "var(--font-mono)",
+                fontWeight: 700,
+                fontSize: 15,
+                color: "var(--ink-900)",
+                letterSpacing: "0.06em",
+              }}
+            />
+            <button
+              type="button"
+              onClick={applyPromo}
+              disabled={!promoInput.trim() || isValidating}
+              className="a-btn a-btn--primary a-btn--sm"
+            >
+              {isValidating ? "…" : "Apply"}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setPromoOpen(false); setPromoInput(""); }}
+              className="a-btn a-btn--ghost a-btn--sm"
+            >
+              Cancel
+            </button>
           </div>
         )}
       </div>
@@ -108,23 +217,35 @@ export function CartPanel({
         background: "var(--ink-50)",
         borderTop: "1px solid var(--ink-100)",
       }}>
-        <Totals subtotal={subtotal} discount={discount} memberDiscount={memberDiscount} tax={tax} total={total} />
+        <Totals
+          subtotal={subtotal}
+          discount={discountAmount}
+          discountLabel={promo ? `Promo · ${promo.code}` : "Discount"}
+          memberDiscount={memberDiscount}
+          tax={tax}
+          total={total}
+        />
         <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-          <button className="t-btn t-btn--ghost" style={{ flex: 1 }}>
-            <Icon name="bookmark-plus" size={18} />Hold
-          </button>
-          <button className="t-btn t-btn--secondary" style={{ flex: 1 }}>
-            <Icon name="gift" size={18} />Promo
-          </button>
+          {!promo && (
+            <button
+              type="button"
+              onClick={() => setPromoOpen((o) => !o)}
+              className="a-btn a-btn--ghost a-btn--sm"
+              style={{ flex: 1, justifyContent: "center" }}
+            >
+              <Icon name="gift" size={16} /> {promoOpen ? "Cancel" : "Promo code"}
+            </button>
+          )}
         </div>
         <button
-          className="t-btn t-btn--primary t-btn--xl t-btn--block"
-          style={{ marginTop: 10 }}
+          type="button"
+          className="a-btn a-btn--primary"
+          style={{ marginTop: 10, width: "100%", justifyContent: "center", padding: "14px 18px", fontSize: 16 }}
           onClick={onCheckout}
-          disabled={items.length === 0}
+          disabled={items.length === 0 || isSubmitting}
         >
-          <Icon name="credit-card" size={22} />
-          Take payment · <span className="num">${total.toFixed(2)}</span>
+          <Icon name="credit-card" size={20} />
+          {isSubmitting ? "Creating…" : `Take payment · $${total.toFixed(2)}`}
         </button>
       </div>
     </section>
@@ -195,24 +316,29 @@ function CartRow({ item, onRemove, onQty }) {
   );
 }
 
-function Totals({ subtotal, discount, memberDiscount, tax, total }) {
-  const Row = ({ label, amount, muted, bold }) => (
-    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: bold ? 16 : 14, fontWeight: bold ? 700 : 500, color: muted ? "var(--ink-500)" : "var(--ink-800)" }}>
-      <span>{label}</span>
-      <span className="num">${amount.toFixed(2)}</span>
+function Totals({ subtotal, discount, discountLabel, memberDiscount, tax, total }) {
+  const Row = ({ label, value, accent, big }) => (
+    <div style={{
+      display: "flex", justifyContent: "space-between", alignItems: "center",
+      padding: big ? "8px 0 0" : "4px 0",
+      borderTop: big ? "1.5px dashed var(--ink-200)" : undefined,
+      marginTop: big ? 6 : 0,
+    }}>
+      <span style={{ fontSize: big ? 14 : 13, fontWeight: big ? 800 : 600, color: accent || "var(--ink-600)" }}>
+        {label}
+      </span>
+      <span className="display-num" style={{ fontSize: big ? 22 : 14, color: accent || "var(--ink-900)" }}>
+        {value}
+      </span>
     </div>
   );
   return (
     <div>
-      <Row label="Subtotal" amount={subtotal} muted />
-      {discount > 0 && <Row label="Promo" amount={-discount} muted />}
-      {memberDiscount > 0 && <Row label="Member 10%" amount={-memberDiscount} muted />}
-      <Row label="Tax (5%)" amount={tax} muted />
-      <div style={{ height: 1, background: "var(--ink-100)", margin: "6px 0" }} />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-        <span style={{ fontWeight: 700, fontSize: 14, textTransform: "uppercase", letterSpacing: ".06em" }}>Total</span>
-        <span className="display-num" style={{ fontSize: 36 }}>${total.toFixed(2)}</span>
-      </div>
+      <Row label="Subtotal" value={`$${subtotal.toFixed(2)}`} />
+      {discount > 0 && <Row label={discountLabel} value={`−$${discount.toFixed(2)}`} accent="var(--color-success)" />}
+      {memberDiscount > 0 && <Row label="Member 10%" value={`−$${memberDiscount.toFixed(2)}`} accent="var(--aero-electric-500)" />}
+      <Row label="Tax" value={`$${tax.toFixed(2)}`} />
+      <Row label="Total" value={`$${total.toFixed(2)}`} big />
     </div>
   );
 }

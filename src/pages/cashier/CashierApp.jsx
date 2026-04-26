@@ -106,6 +106,7 @@ export function CashierApp() {
   const [variant, setVariant] = useState("A");
   const [items, setItems] = useState([]);
   const [createdBookingId, setCreatedBookingId] = useState(null);
+  const [cartPricing, setCartPricing] = useState(null);
   const [member] = useState(null);
 
   const [createBooking, { isLoading: isCreating }] = useCreateBookingMutation();
@@ -232,6 +233,20 @@ export function CashierApp() {
       bookingName: member?.name || "Walk-in",
       source: "cashier",
       notes: `Created by ${user?.first_name || user?.name || "cashier"} at terminal ${myDevice?.deviceName || myDevice?.name || "—"}`,
+      // Pricing — includes promo code if the cashier applied one in CartPanel.
+      // Backend's createBooking re-validates and recomputes; we just supply
+      // the chosen discount so the booking record carries the right code.
+      pricingSummary: {
+        subtotalAmount: cartPricing?.subtotal || 0,
+        discountCode: cartPricing?.discount?.code || null,
+        discountName: cartPricing?.discount?.name || null,
+        discountType: cartPricing?.discount?.type || null,
+        discountValue: cartPricing?.discount?.value || 0,
+        discountMaxValue: cartPricing?.discount?.maxValue || 0,
+        discountAmount: cartPricing?.discount?.amount || 0,
+        taxAmount: cartPricing?.tax || 0,
+        totalAmount: cartPricing?.total || 0,
+      },
     };
 
     try {
@@ -292,6 +307,7 @@ export function CashierApp() {
           onRemove={removeItem}
           onQty={setQty}
           onCheckout={handleCheckout}
+          onPricingChange={setCartPricing}
           variant={v.cartVariant}
           isSubmitting={isCreating}
         />
