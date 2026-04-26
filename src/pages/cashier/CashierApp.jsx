@@ -95,7 +95,7 @@ function normalizePresetSections(preset) {
 
 export function CashierApp() {
   const venueId = Cookies.get("venueId");
-  const { user } = useSelector((s) => s.auth);
+  const { user, venues } = useSelector((s) => s.auth);
   const dispatch = useDispatch();
   const [logoutCall] = useLogoutMutation();
   const handleSignOut = async () => {
@@ -451,9 +451,17 @@ export function CashierApp() {
       </aside>
       <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
         {/* Inject venue + terminal name into every Header so the cashier
-            always sees which park / lane they're operating from. */}
+            always sees which park / lane they're operating from. Falls
+            back to the auth venues list when an older paired snapshot
+            doesn't carry venueName. */}
         {header && React.cloneElement(header, {
-          venue: header.props.venue ?? (myDevice?.venueName || pairedTerminal?.venueName),
+          venue: header.props.venue ?? (
+            myDevice?.venueName ||
+            pairedTerminal?.venueName ||
+            (venues || []).find((v) => String(v.venueId) === String(pairedTerminal?.venueId || venueId))?.legalBusinessName ||
+            (venues || []).find((v) => String(v.venueId) === String(pairedTerminal?.venueId || venueId))?.venueName ||
+            (venues || []).find((v) => String(v.venueId) === String(pairedTerminal?.venueId || venueId))?.name
+          ),
           terminal: header.props.terminal ?? (myDevice?.deviceName || myDevice?.name),
         })}
         <div style={{ flex: 1, display: "flex", minHeight: 0 }}>{body}</div>
