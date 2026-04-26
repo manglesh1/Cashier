@@ -29,6 +29,7 @@ import { ShiftClose } from "./ShiftClose";
 import { Refund } from "./Refund";
 import { WaiverDetail } from "./WaiverDetail";
 import { Redeem } from "./Redeem";
+import BookingDetail from "./BookingDetail";
 import {
   useGetAllPosDevicesQuery,
   useGetPresetFullQuery,
@@ -284,6 +285,7 @@ export function CashierApp() {
 
   const screens = [
     { id: "sell", label: "Sell", icon: "ticket" },
+    { id: "find", label: "Find", icon: "search" },
     { id: "redeem", label: "Redeem", icon: "qr-code" },
     { id: "checkin", label: "Check-in", icon: "log-in" },
     { id: "guest", label: "Guest", icon: "user-round" },
@@ -319,6 +321,15 @@ export function CashierApp() {
         title="Sell"
         subtitle={new Date().toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric" })}
         right={<HeaderRight variant={variant} setVariant={setVariant} variants={variants} />}
+      />
+    );
+  } else if (screen === "find") {
+    body = <BookingDetail />;
+    header = (
+      <Header
+        breadcrumb="BOOKINGS · LOOKUP"
+        title="Find a booking"
+        subtitle="Search · view tickets · take payment"
       />
     );
   } else if (screen === "redeem") {
