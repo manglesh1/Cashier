@@ -19,6 +19,7 @@ import {
 import {
   useGetBookingTicketsQuery,
   useCheckInAllTicketsMutation,
+  useRedeemTicketMutation,
 } from "../../features/tickets/ticketApi";
 import { useDebounceSearch } from "../../hooks/useDebounceSearch";
 import { getTerminal } from "../../lib/terminal";
@@ -129,7 +130,7 @@ export function CheckIn() {
             ))
           )}
         </div>
-        <aside style={{ width: 360, overflowY: "auto", padding: "16px 22px" }}>
+        <aside style={{ width: 720, overflowY: "auto", padding: "16px 22px", background: "var(--ink-25)" }}>
           {selected ? (
             <SelectedBookingDetail booking={selected} onCheckedIn={() => { refetch(); }} />
           ) : (
@@ -234,46 +235,82 @@ function EmptyDetail() {
 }
 
 function SelectedBookingDetail({ booking, onCheckedIn }) {
-  const { data: status, isLoading: statusLoading, refetch: refetchStatus } =
-    useGetCheckInStatusQuery(booking.bookingId, { skip: !booking.bookingId });
-  const [checkInBatch, { isLoading: batchPosting }] = useCheckInParticipantsMutation();
-  const [undoCheckIn, { isLoading: undoing }] = useUndoParticipantCheckInMutation();
+  // Tickets are the source of truth — one row per redeemable line.
+  const { data: ticketsData, isLoading: ticketsLoading, refetch: refetchTickets } =
+    useGetBookingTicketsQuery(booking.bookingId, { skip: !booking.bookingId });
+  const { refetch: refetchStatus } = useGetCheckInStatusQuery(booking.bookingId, { skip: !booking.bookingId });
+  const [redeemTicket, { isLoading: redeeming }] = useRedeemTicketMutation();
   const [checkInAll, { isLoading: checkingInAll }] = useCheckInAllTicketsMutation();
-  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [selectedCodes, setSelectedCodes] = useState(new Set());
+  const [hideCheckedIn, setHideCheckedIn] = useState(false);
 
-  const participants = status?.data?.participants || [];
-  const checkedInCount = participants.filter((p) => !!p.checkedInAt).length;
-  const totalCount = participants.length || (booking.totalGuests || 0);
-  const remaining = Math.max(0, totalCount - checkedInCount);
+  const tickets = ticketsData?.data || [];
+  const summary = ticketsData?.summary || {};
+  const redeemedCount = (summary.redeemed ?? 0);
+  const totalCount = summary.total ?? tickets.length;
+  const remaining = Math.max(0, totalCount - redeemedCount);
 
-  const toggleSelect = (id) => {
-    setSelectedIds((prev) => {
+  const visibleTickets = useMemo(
+    () => (hideCheckedIn ? tickets.filter((t) => t.status !== "redeemed") : tickets),
+    [tickets, hideCheckedIn]
+  );
+
+  const allSelectableCodes = useMemo(
+    () => visibleTickets.filter((t) => t.status === "issued").map((t) => t.ticketCode),
+    [visibleTickets]
+  );
+  const allSelected = allSelectableCodes.length > 0 && allSelectableCodes.every((c) => selectedCodes.has(c));
+
+  const toggleSelect = (code) => {
+    setSelectedCodes((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(code)) next.delete(code); else next.add(code);
       return next;
     });
   };
 
-  const handleCheckInSelected = async () => {
-    if (selectedIds.size === 0) return;
-    const promise = checkInBatch({
-      bookingId: booking.bookingId,
-      participantIds: [...selectedIds],
+  const toggleSelectAll = () => {
+    if (allSelected) setSelectedCodes(new Set());
+    else setSelectedCodes(new Set(allSelectableCodes));
+  };
+
+  const refresh = () => { refetchTickets(); refetchStatus(); onCheckedIn?.(); };
+
+  const handleRedeemOne = async (code) => {
+    const terminal = getTerminal();
+    const promise = redeemTicket({
+      ticketCode: code,
+      terminalDeviceId: terminal?.deviceId || null,
+      gateOrZone: terminal?.deviceName || "Cashier check-in",
     }).unwrap();
     toast.promise(promise, {
-      loading: `Checking in ${selectedIds.size}…`,
-      success: (res) => {
-        setSelectedIds(new Set());
-        refetchStatus();
-        onCheckedIn?.();
-        const n = res?.data?.updated?.length ?? selectedIds.size;
-        return `Checked in ${n} guest${n === 1 ? "" : "s"}`;
-      },
-      error: (err) => err?.data?.error || "Check-in failed",
+      loading: "Redeeming…",
+      success: () => { refresh(); return "Redeemed"; },
+      error: (err) => err?.data?.error || err?.data?.reason || "Redeem failed",
     });
   };
 
-  const handleCheckInAll = async () => {
+  const handleRedeemSelected = async () => {
+    if (selectedCodes.size === 0) return;
+    const terminal = getTerminal();
+    const codes = [...selectedCodes];
+    let ok = 0; let fail = 0;
+    for (const code of codes) {
+      try {
+        await redeemTicket({
+          ticketCode: code,
+          terminalDeviceId: terminal?.deviceId || null,
+          gateOrZone: terminal?.deviceName || "Cashier check-in",
+        }).unwrap();
+        ok++;
+      } catch { fail++; }
+    }
+    setSelectedCodes(new Set());
+    refresh();
+    toast.success(`Redeemed ${ok}${fail ? ` · ${fail} failed` : ""}`);
+  };
+
+  const handleRedeemAll = async () => {
     const terminal = getTerminal();
     const promise = checkInAll({
       bookingId: booking.bookingId,
@@ -281,29 +318,15 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       gateOrZone: terminal?.deviceName || "Cashier check-in",
     }).unwrap();
     toast.promise(promise, {
-      loading: "Checking in everyone…",
-      success: (res) => {
-        refetchStatus();
-        onCheckedIn?.();
-        return res?.succeeded > 0
-          ? `Checked in ${res.succeeded} of ${res.attempted}`
-          : "Nothing to check in";
-      },
-      error: (err) => err?.data?.error || "Check-in failed",
-    });
-  };
-
-  const handleUndo = async (participantId) => {
-    const promise = undoCheckIn({ bookingId: booking.bookingId, participantId }).unwrap();
-    toast.promise(promise, {
-      loading: "Undoing…",
-      success: () => { refetchStatus(); onCheckedIn?.(); return "Check-in reversed"; },
-      error: (err) => err?.data?.error || "Undo failed",
+      loading: "Redeeming all…",
+      success: (res) => { refresh(); return `Redeemed ${res?.succeeded ?? 0} of ${res?.attempted ?? 0}`; },
+      error: (err) => err?.data?.error || "Redeem failed",
     });
   };
 
   return (
     <div>
+      {/* Booking header */}
       <div style={{ marginBottom: 14 }}>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--aero-orange-600)", fontWeight: 700, letterSpacing: "0.05em" }}>
           {booking.bookingNumber}
@@ -312,121 +335,137 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           {booking.bookingName || "Walk-in"}
         </div>
         <div style={{ fontSize: 13, color: "var(--ink-500)", marginTop: 4 }}>
-          {booking.activityName} · {totalCount} pax · {booking.timeRange || "—"}
+          {booking.activityName} · {booking.totalGuests || totalCount} pax · {booking.timeRange || "—"}
         </div>
       </div>
 
-      {/* Roster headline + bulk actions */}
+      {/* Toolbar — ROLLER-style: select all + hide checked-in + batch redeem */}
       <div style={{
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-        marginBottom: 10,
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        gap: 12, marginBottom: 10, padding: "10px 12px",
+        background: "white", border: "1.5px solid var(--ink-200)", borderRadius: 12,
       }}>
-        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: "var(--ink-700)" }}>
-          Roster · {checkedInCount}/{totalCount}
-        </div>
-        {remaining > 0 && (
-          <button
-            type="button"
-            onClick={handleCheckInAll}
-            disabled={checkingInAll}
-            className="a-btn a-btn--ghost a-btn--sm"
-            title="Check in every remaining guest"
-          >
-            <Icon name="check-check" size={13} /> All
-          </button>
-        )}
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, fontWeight: 600, color: "var(--ink-700)" }}>
+          <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+          Select all
+        </label>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, fontWeight: 600, color: "var(--ink-700)" }}>
+          <input type="checkbox" checked={hideCheckedIn} onChange={(e) => setHideCheckedIn(e.target.checked)} />
+          Hide checked in
+        </label>
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 11, color: "var(--ink-500)", fontWeight: 600 }}>
+          {redeemedCount}/{totalCount} redeemed
+        </span>
+        <button
+          type="button"
+          onClick={selectedCodes.size > 0 ? handleRedeemSelected : handleRedeemAll}
+          disabled={(selectedCodes.size === 0 && remaining === 0) || redeeming || checkingInAll}
+          className="a-btn a-btn--primary a-btn--sm"
+          style={{ minWidth: 110, justifyContent: "center" }}
+        >
+          <Icon name="check" size={13} stroke={3} />
+          {selectedCodes.size > 0 ? `Redeem (${selectedCodes.size})` : `All (${remaining})`}
+        </button>
       </div>
 
-      {/* Roster list */}
-      {statusLoading ? (
-        <div style={{ fontSize: 13, color: "var(--ink-500)", padding: 12 }}>Loading roster…</div>
-      ) : participants.length === 0 ? (
-        <NameGuestsForm
-          bookingId={booking.bookingId}
-          totalGuests={totalCount}
-          onSaved={() => { refetchStatus(); onCheckedIn?.(); }}
-        />
+      {/* Ticket list — ROLLER-style flat rows with per-row redeem */}
+      {ticketsLoading ? (
+        <div style={{ fontSize: 13, color: "var(--ink-500)", padding: 12 }}>Loading tickets…</div>
+      ) : visibleTickets.length === 0 ? (
+        <div style={{ fontSize: 13, color: "var(--ink-500)", padding: 16, textAlign: "center", background: "white", borderRadius: 10 }}>
+          {tickets.length === 0 ? "No tickets minted for this booking yet." : "All tickets redeemed."}
+        </div>
       ) : (
         <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
-          {participants.map((p) => {
-            const checkedIn = !!p.checkedInAt;
-            const isSelected = selectedIds.has(p.bookingParticipantId);
+          {visibleTickets.map((t, i) => {
+            const isRedeemed = t.status === "redeemed" || t.status === "partially_redeemed";
+            const isSelected = selectedCodes.has(t.ticketCode);
+            const time = t.validFrom
+              ? new Date(t.validFrom).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+              : null;
+            const dur = (t.validFrom && t.validUntil)
+              ? Math.round((new Date(t.validUntil) - new Date(t.validFrom)) / (1000 * 60 * 60))
+              : null;
             return (
               <li
-                key={p.bookingParticipantId}
-                onClick={() => !checkedIn && toggleSelect(p.bookingParticipantId)}
+                key={t.ticketId}
                 style={{
                   display: "flex", alignItems: "center", gap: 10,
                   padding: "10px 12px", borderRadius: 10,
-                  cursor: checkedIn ? "default" : "pointer",
-                  background: checkedIn ? "var(--color-success-soft)"
-                            : isSelected ? "var(--aero-orange-50)" : "#fff",
-                  border: checkedIn ? "1.5px solid var(--color-success)"
-                        : isSelected ? "2px solid var(--aero-orange-500)" : "1.5px solid var(--ink-200)",
+                  background: isRedeemed ? "var(--ink-50)" : "white",
+                  border: isSelected ? "2px solid var(--aero-orange-500)" : "1.5px solid var(--ink-200)",
+                  opacity: isRedeemed ? 0.7 : 1,
                 }}
               >
-                <div
-                  style={{
-                    width: 24, height: 24, borderRadius: 6, flexShrink: 0,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    background: checkedIn ? "var(--color-success)" : isSelected ? "var(--aero-orange-500)" : "var(--ink-100)",
-                    color: "#fff",
-                  }}
-                >
-                  {checkedIn ? <Icon name="check" size={14} stroke={3} />
-                   : isSelected ? <Icon name="check" size={14} stroke={3} />
-                   : null}
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  disabled={isRedeemed}
+                  onChange={() => toggleSelect(t.ticketCode)}
+                  style={{ width: 16, height: 16, cursor: isRedeemed ? "not-allowed" : "pointer", flexShrink: 0 }}
+                />
+                <div style={{
+                  width: 28, height: 28, borderRadius: 6, flexShrink: 0,
+                  background: "var(--ink-50)", color: "var(--ink-600)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}>
+                  <Icon name="user-round" size={14} />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13, color: "var(--ink-900)" }}>
-                    {p.displayName || `Guest ${p.bookingParticipantId}`}
-                    {p.isMinor && <span style={{ marginLeft: 6, fontSize: 10, color: "var(--ink-500)", fontWeight: 600 }}>(minor)</span>}
+                  <div style={{
+                    fontWeight: 700, fontSize: 13, color: "var(--ink-900)",
+                    textDecoration: isRedeemed ? "line-through" : "none",
+                  }}>
+                    {t.product?.name || t.activity?.name || activityNameFromBooking(booking)}
+                    {t.variation?.name && <span style={{ marginLeft: 6, fontWeight: 600, color: "var(--ink-600)" }}>· {t.variation.name}</span>}
                   </div>
-                  <div style={{ fontSize: 11, color: "var(--ink-500)" }}>
-                    {checkedIn
-                      ? `Checked in ${new Date(p.checkedInAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
-                      : p.waiverStatus === "valid"
-                      ? "Waiver valid"
-                      : <span style={{ color: "var(--color-danger)" }}>Waiver missing</span>}
+                  <div style={{ fontSize: 11, color: "var(--ink-500)", display: "flex", gap: 8, marginTop: 2 }}>
+                    <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, color: "var(--aero-orange-600)" }}>
+                      {t.ticketCode}
+                    </span>
+                    {t.participant?.displayName && <span>· {t.participant.displayName}</span>}
+                    {time && <span>· {time}{dur ? ` (${dur}h)` : ""}</span>}
                   </div>
                 </div>
-                {checkedIn && (
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); handleUndo(p.bookingParticipantId); }}
-                    disabled={undoing}
-                    style={{
-                      all: "unset", cursor: "pointer",
-                      fontSize: 11, fontWeight: 700,
-                      color: "var(--ink-500)",
-                      padding: "4px 8px", borderRadius: 6,
-                    }}
-                    title="Undo check-in"
-                  >
-                    Undo
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => !isRedeemed && handleRedeemOne(t.ticketCode)}
+                  disabled={isRedeemed || redeeming}
+                  title={isRedeemed ? "Already redeemed" : "Redeem this ticket"}
+                  style={{
+                    width: 36, height: 36, flexShrink: 0,
+                    borderRadius: 8, border: "1.5px solid",
+                    borderColor: isRedeemed ? "var(--color-success)" : "var(--ink-200)",
+                    background: isRedeemed ? "var(--color-success)" : "white",
+                    color: isRedeemed ? "white" : "var(--ink-700)",
+                    cursor: isRedeemed ? "default" : "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}
+                >
+                  <Icon name="check" size={16} stroke={3} />
+                </button>
               </li>
             );
           })}
         </ul>
       )}
 
-      {/* Sticky-ish action bar for batch */}
-      {selectedIds.size > 0 && (
-        <button
-          type="button"
-          onClick={handleCheckInSelected}
-          disabled={batchPosting}
-          className="a-btn a-btn--primary"
-          style={{ width: "100%", justifyContent: "center", marginTop: 14 }}
-        >
-          <Icon name="check" size={16} stroke={3} />
-          Check in {selectedIds.size} selected
-        </button>
+      {/* Inline name-entry form when this booking has no named participants
+          but we still want to attach names to tickets. */}
+      {!ticketsLoading && tickets.length === 0 && (
+        <NameGuestsForm
+          bookingId={booking.bookingId}
+          totalGuests={booking.totalGuests || 0}
+          onSaved={refresh}
+        />
       )}
     </div>
   );
+}
+
+function activityNameFromBooking(b) {
+  return b?.activityName || "Item";
 }
 
 function MiniStat({ label, value, tone }) {
