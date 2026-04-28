@@ -75,7 +75,7 @@ function normalizePresetSections(preset) {
     title: sec.sectionName || sec.name || `Section ${i + 1}`,
     icon: pickSectionIcon(sec.sectionName || sec.name || ""),
     tone: SECTION_TONES[i % SECTION_TONES.length],
-    items: (sec.products || sec.items || []).map((p) => ({
+    items: (sec.activities || sec.products || sec.items || []).map((p) => ({
       // Preserve every backend identifier we'll need to build a booking payload
       id: p.productItemId || p.id || `${sec.sectionId}-${p.activityId || p.productId}`,
       activityId: p.activityId || p.productId,
