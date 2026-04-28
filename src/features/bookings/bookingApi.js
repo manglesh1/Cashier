@@ -87,6 +87,36 @@ export const bookingApi = baseApi.injectEndpoints({
         { type: "Booking", id: bookingId },
       ],
     }),
+    // Lookup signed waivers in this location (cashier search modal)
+    searchWaivers: builder.query({
+      query: ({ search = "", limit = 12 } = {}) => ({
+        url: "/waivers/holders",
+        params: { search, limit, status: "active" },
+      }),
+    }),
+    linkParticipantFromWaiver: builder.mutation({
+      query: ({ bookingId, waiverSignatureId, includeMinors = true }) => ({
+        url: `/bookings/${bookingId}/participants/from-waiver`,
+        method: "POST",
+        body: { waiverSignatureId, includeMinors },
+      }),
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "CheckIn", id: bookingId },
+        { type: "Tickets", id: bookingId },
+        { type: "Booking", id: bookingId },
+      ],
+    }),
+    removeParticipant: builder.mutation({
+      query: ({ bookingId, participantId }) => ({
+        url: `/bookings/${bookingId}/participants/${participantId}`,
+        method: "DELETE",
+      }),
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "CheckIn", id: bookingId },
+        { type: "Tickets", id: bookingId },
+        { type: "Booking", id: bookingId },
+      ],
+    }),
   }),
 });
 
@@ -102,4 +132,8 @@ export const {
   useCheckInParticipantsMutation,
   useUndoParticipantCheckInMutation,
   useUpsertParticipantsMutation,
+  useSearchWaiversQuery,
+  useLazySearchWaiversQuery,
+  useLinkParticipantFromWaiverMutation,
+  useRemoveParticipantMutation,
 } = bookingApi;

@@ -15,6 +15,9 @@ import {
   useCheckInParticipantsMutation,
   useUndoParticipantCheckInMutation,
   useUpsertParticipantsMutation,
+  useLazySearchWaiversQuery,
+  useLinkParticipantFromWaiverMutation,
+  useRemoveParticipantMutation,
 } from "../../features/bookings/bookingApi";
 import {
   useGetBookingTicketsQuery,
@@ -249,6 +252,8 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const redeemedCount = (summary.redeemed ?? 0);
   const totalCount = summary.total ?? tickets.length;
   const remaining = Math.max(0, totalCount - redeemedCount);
+  const [waiverModalOpen, setWaiverModalOpen] = useState(false);
+  const [removeParticipant] = useRemoveParticipantMutation();
 
   const visibleTickets = useMemo(
     () => (hideCheckedIn ? tickets.filter((t) => t.status !== "redeemed") : tickets),
@@ -275,6 +280,16 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   };
 
   const refresh = () => { refetchTickets(); refetchStatus(); onCheckedIn?.(); };
+
+  const handleUnlinkParticipant = async (participantId) => {
+    if (!window.confirm("Remove this guest from the booking? Their tickets stay on the booking and can be re-assigned.")) return;
+    const promise = removeParticipant({ bookingId: booking.bookingId, participantId }).unwrap();
+    toast.promise(promise, {
+      loading: "Removing…",
+      success: () => { refresh(); return "Removed"; },
+      error: (err) => err?.data?.error || "Could not remove (check if already checked in)",
+    });
+  };
 
   const handleRedeemOne = async (code) => {
     const terminal = getTerminal();
@@ -359,6 +374,15 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         </span>
         <button
           type="button"
+          onClick={() => setWaiverModalOpen(true)}
+          className="a-btn a-btn--ghost a-btn--sm"
+          title="Look up an existing waiver and add the guest to this booking"
+          style={{ justifyContent: "center" }}
+        >
+          <Icon name="search" size={13} /> Add from waiver
+        </button>
+        <button
+          type="button"
           onClick={selectedCodes.size > 0 ? handleRedeemSelected : handleRedeemAll}
           disabled={(selectedCodes.size === 0 && remaining === 0) || redeeming || checkingInAll}
           className="a-btn a-btn--primary a-btn--sm"
@@ -368,6 +392,14 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           {selectedCodes.size > 0 ? `Redeem (${selectedCodes.size})` : `All (${remaining})`}
         </button>
       </div>
+
+      {waiverModalOpen && (
+        <WaiverLookupModal
+          bookingId={booking.bookingId}
+          onClose={() => setWaiverModalOpen(false)}
+          onLinked={() => { refresh(); }}
+        />
+      )}
 
       {/* Ticket list — ROLLER-style flat rows with per-row redeem */}
       {ticketsLoading ? (
@@ -428,6 +460,22 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                     {time && <span>· {time}{dur ? ` (${dur}h)` : ""}</span>}
                   </div>
                 </div>
+                {t.participantId && !isRedeemed && (
+                  <button
+                    type="button"
+                    onClick={() => handleUnlinkParticipant(t.participantId)}
+                    title="Remove this guest from the booking (e.g. no-show)"
+                    style={{
+                      width: 28, height: 28, flexShrink: 0,
+                      borderRadius: 6, border: "1.5px solid var(--ink-200)",
+                      background: "white", color: "var(--ink-500)",
+                      cursor: "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}
+                  >
+                    <Icon name="x" size={14} stroke={3} />
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => !isRedeemed && handleRedeemOne(t.ticketCode)}
@@ -451,21 +499,160 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         </ul>
       )}
 
-      {/* Inline name-entry form when this booking has no named participants
-          but we still want to attach names to tickets. */}
-      {!ticketsLoading && tickets.length === 0 && (
-        <NameGuestsForm
-          bookingId={booking.bookingId}
-          totalGuests={booking.totalGuests || 0}
-          onSaved={refresh}
-        />
-      )}
     </div>
   );
 }
 
 function activityNameFromBooking(b) {
   return b?.activityName || "Item";
+}
+
+// ── WaiverLookupModal — search signed waivers for this location and
+//    link the picked one as a participant on the current booking ──
+function WaiverLookupModal({ bookingId, onClose, onLinked }) {
+  const [query, setQuery] = useState("");
+  const [trigger, { data, isFetching }] = useLazySearchWaiversQuery();
+  const [linkFromWaiver, { isLoading: linking }] = useLinkParticipantFromWaiverMutation();
+
+  React.useEffect(() => {
+    const t = setTimeout(() => {
+      if (query.trim().length >= 2) trigger({ search: query.trim(), limit: 12 });
+    }, 250);
+    return () => clearTimeout(t);
+  }, [query, trigger]);
+
+  const results = data?.data || [];
+
+  const handlePick = async (sig) => {
+    const promise = linkFromWaiver({
+      bookingId,
+      waiverSignatureId: sig.id,
+      includeMinors: true,
+    }).unwrap();
+    toast.promise(promise, {
+      loading: "Linking…",
+      success: (res) => {
+        onLinked?.();
+        onClose();
+        const n = res?.data?.created || 0;
+        return n > 0 ? `Linked ${n} guest${n === 1 ? "" : "s"}` : "Already linked";
+      },
+      error: (err) => err?.data?.error || "Could not link",
+    });
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,0.4)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 540, maxHeight: "82vh",
+          background: "white", borderRadius: 18,
+          border: "2px solid var(--ink-800)", boxShadow: "0 8px 0 var(--ink-800)",
+          padding: 22, display: "flex", flexDirection: "column",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <h2 style={{ margin: 0, fontFamily: "var(--font-display)", fontSize: 20, fontWeight: 800, color: "var(--ink-900)" }}>
+            Find a waiver
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)", padding: 4 }}
+            title="Close"
+          >
+            <Icon name="x" size={18} />
+          </button>
+        </div>
+
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "10px 12px", background: "var(--ink-25)",
+          border: "1.5px solid var(--ink-200)", borderRadius: 12, marginBottom: 12,
+        }}>
+          <Icon name="search" size={16} style={{ color: "var(--ink-500)" }} />
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Name, email or phone…"
+            style={{ all: "unset", flex: 1, fontSize: 14, fontWeight: 600 }}
+          />
+        </div>
+
+        <div style={{ overflowY: "auto", flex: 1, marginBottom: 4 }}>
+          {query.trim().length < 2 ? (
+            <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
+              Type at least 2 characters to search.
+            </div>
+          ) : isFetching ? (
+            <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
+              Searching…
+            </div>
+          ) : results.length === 0 ? (
+            <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
+              No matching waivers. The guest will need to sign one first.
+            </div>
+          ) : (
+            <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
+              {results.map((sig) => {
+                const minorCount = Array.isArray(sig.minors) ? sig.minors.length : 0;
+                const expired = sig.expiredAt && new Date(sig.expiredAt) < new Date();
+                return (
+                  <li key={sig.id}>
+                    <button
+                      type="button"
+                      disabled={linking}
+                      onClick={() => handlePick(sig)}
+                      style={{
+                        all: "unset", cursor: linking ? "wait" : "pointer", display: "block", width: "100%", boxSizing: "border-box",
+                        padding: "10px 12px",
+                        border: "1.5px solid var(--ink-200)",
+                        borderRadius: 10, background: "white",
+                      }}
+                      onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--aero-orange-500)")}
+                      onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--ink-200)")}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 14, color: "var(--ink-900)" }}>
+                            {sig.guest?.guestName || sig.signedByName || "Guest"}
+                          </div>
+                          <div style={{ fontSize: 11, color: "var(--ink-500)", marginTop: 2 }}>
+                            {sig.guest?.guestEmail || sig.guest?.guestPhone || "—"}
+                            {minorCount > 0 && <span> · {minorCount} minor{minorCount === 1 ? "" : "s"}</span>}
+                            {sig.signedAt && <span> · signed {new Date(sig.signedAt).toLocaleDateString()}</span>}
+                          </div>
+                        </div>
+                        {expired ? (
+                          <StatusPill tone="danger">Expired</StatusPill>
+                        ) : (
+                          <Icon name="chevron-right" size={16} style={{ color: "var(--ink-400)" }} />
+                        )}
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        <div style={{ fontSize: 11, color: "var(--ink-500)", textAlign: "center", marginTop: 8 }}>
+          Picking a waiver creates a participant on this booking. Existing waivers
+          tied to the booking auto-link at sign-time — use this only when a guest's
+          waiver wasn't auto-attached.
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function MiniStat({ label, value, tone }) {
