@@ -9,7 +9,12 @@ import React, { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
-import { useGetAllBookingQuery } from "../../features/bookings/bookingApi";
+import {
+  useGetAllBookingQuery,
+  useGetCheckInStatusQuery,
+  useCheckInParticipantsMutation,
+  useUndoParticipantCheckInMutation,
+} from "../../features/bookings/bookingApi";
 import {
   useGetBookingTicketsQuery,
   useCheckInAllTicketsMutation,
@@ -228,16 +233,46 @@ function EmptyDetail() {
 }
 
 function SelectedBookingDetail({ booking, onCheckedIn }) {
-  const { data: ticketsData, isLoading: ticketsLoading, refetch: refetchTickets } =
-    useGetBookingTicketsQuery(booking.bookingId, { skip: !booking.bookingId });
-  const [checkInAll, { isLoading: checkingIn }] = useCheckInAllTicketsMutation();
+  const { data: status, isLoading: statusLoading, refetch: refetchStatus } =
+    useGetCheckInStatusQuery(booking.bookingId, { skip: !booking.bookingId });
+  const [checkInBatch, { isLoading: batchPosting }] = useCheckInParticipantsMutation();
+  const [undoCheckIn, { isLoading: undoing }] = useUndoParticipantCheckInMutation();
+  const [checkInAll, { isLoading: checkingInAll }] = useCheckInAllTicketsMutation();
+  const [selectedIds, setSelectedIds] = useState(new Set());
 
-  const tickets = ticketsData?.data || [];
-  const summary = ticketsData?.summary || {};
-  const issuedRemaining = summary.issued ?? 0;
+  const participants = status?.data?.participants || [];
+  const checkedInCount = participants.filter((p) => !!p.checkedInAt).length;
+  const totalCount = participants.length || (booking.totalGuests || 0);
+  const remaining = Math.max(0, totalCount - checkedInCount);
 
-  const handleCheckIn = async () => {
-    if (!booking?.bookingId) return;
+  const toggleSelect = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const handleCheckInSelected = async () => {
+    if (selectedIds.size === 0) return;
+    const promise = checkInBatch({
+      bookingId: booking.bookingId,
+      participantIds: [...selectedIds],
+    }).unwrap();
+    toast.promise(promise, {
+      loading: `Checking in ${selectedIds.size}…`,
+      success: (res) => {
+        setSelectedIds(new Set());
+        refetchStatus();
+        onCheckedIn?.();
+        const n = res?.data?.updated?.length ?? selectedIds.size;
+        return `Checked in ${n} guest${n === 1 ? "" : "s"}`;
+      },
+      error: (err) => err?.data?.error || "Check-in failed",
+    });
+  };
+
+  const handleCheckInAll = async () => {
     const terminal = getTerminal();
     const promise = checkInAll({
       bookingId: booking.bookingId,
@@ -245,21 +280,30 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       gateOrZone: terminal?.deviceName || "Cashier check-in",
     }).unwrap();
     toast.promise(promise, {
-      loading: "Checking in…",
+      loading: "Checking in everyone…",
       success: (res) => {
-        refetchTickets();
+        refetchStatus();
         onCheckedIn?.();
         return res?.succeeded > 0
           ? `Checked in ${res.succeeded} of ${res.attempted}`
-          : "Nothing to check in (already redeemed)";
+          : "Nothing to check in";
       },
       error: (err) => err?.data?.error || "Check-in failed",
     });
   };
 
+  const handleUndo = async (participantId) => {
+    const promise = undoCheckIn({ bookingId: booking.bookingId, participantId }).unwrap();
+    toast.promise(promise, {
+      loading: "Undoing…",
+      success: () => { refetchStatus(); onCheckedIn?.(); return "Check-in reversed"; },
+      error: (err) => err?.data?.error || "Undo failed",
+    });
+  };
+
   return (
     <div>
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ marginBottom: 14 }}>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--aero-orange-600)", fontWeight: 700, letterSpacing: "0.05em" }}>
           {booking.bookingNumber}
         </div>
@@ -267,93 +311,121 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           {booking.bookingName || "Walk-in"}
         </div>
         <div style={{ fontSize: 13, color: "var(--ink-500)", marginTop: 4 }}>
-          {booking.activityName} · {booking.totalGuests || 0} pax · {booking.timeRange || "—"}
+          {booking.activityName} · {totalCount} pax · {booking.timeRange || "—"}
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
-        <MiniStat label="Issued" value={summary.issued ?? 0} tone="warning" />
-        <MiniStat label="Redeemed" value={summary.redeemed ?? 0} tone="success" />
-      </div>
-
-      {!booking._waiverComplete && (
-        <div
-          style={{
-            padding: "10px 12px",
-            background: "var(--color-warning-soft)",
-            border: "1.5px solid var(--color-warning)",
-            borderRadius: 10,
-            fontSize: 12,
-            color: "#8B6100",
-            marginBottom: 12,
-            fontWeight: 600,
-          }}
-        >
-          ⚠ {booking.totalGuests - (booking.signedWaivers || 0)} waiver{booking.totalGuests - (booking.signedWaivers || 0) === 1 ? "" : "s"} missing
+      {/* Roster headline + bulk actions */}
+      <div style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+        marginBottom: 10,
+      }}>
+        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.04em", textTransform: "uppercase", color: "var(--ink-700)" }}>
+          Roster · {checkedInCount}/{totalCount}
         </div>
-      )}
-
-      <button
-        type="button"
-        onClick={handleCheckIn}
-        disabled={checkingIn || issuedRemaining === 0}
-        className="a-btn a-btn--primary"
-        style={{ width: "100%", justifyContent: "center" }}
-      >
-        <Icon name="check" size={16} stroke={3} />
-        {issuedRemaining === 0 ? "All checked in" : `Check in ${issuedRemaining} ticket${issuedRemaining === 1 ? "" : "s"}`}
-      </button>
-
-      {/* Tickets list */}
-      <div style={{ marginTop: 18 }}>
-        <div className="eyebrow" style={{ marginBottom: 8 }}>Tickets</div>
-        {ticketsLoading ? (
-          <div style={{ fontSize: 13, color: "var(--ink-500)" }}>Loading tickets…</div>
-        ) : tickets.length === 0 ? (
-          <div style={{ fontSize: 13, color: "var(--ink-500)" }}>No tickets minted for this booking.</div>
-        ) : (
-          <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
-            {tickets.slice(0, 12).map((t) => (
-              <li
-                key={t.ticketId}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 8,
-                  padding: "8px 10px",
-                  borderRadius: 8,
-                  background: t.status === "redeemed" ? "var(--color-success-soft)" : "var(--ink-25)",
-                  border: "1px solid var(--ink-100)",
-                  fontSize: 12,
-                }}
-              >
-                <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, color: "var(--aero-orange-600)" }}>
-                  {t.ticketCode}
-                </span>
-                <span
-                  style={{
-                    fontWeight: 700,
-                    fontSize: 10,
-                    padding: "2px 7px",
-                    borderRadius: 999,
-                    background: t.status === "redeemed" ? "var(--color-success)" : "var(--color-warning)",
-                    color: "white",
-                    textTransform: "uppercase",
-                  }}
-                >
-                  {t.status}
-                </span>
-              </li>
-            ))}
-            {tickets.length > 12 && (
-              <li style={{ fontSize: 11, color: "var(--ink-500)", padding: "6px 10px" }}>
-                +{tickets.length - 12} more
-              </li>
-            )}
-          </ul>
+        {remaining > 0 && (
+          <button
+            type="button"
+            onClick={handleCheckInAll}
+            disabled={checkingInAll}
+            className="a-btn a-btn--ghost a-btn--sm"
+            title="Check in every remaining guest"
+          >
+            <Icon name="check-check" size={13} /> All
+          </button>
         )}
       </div>
+
+      {/* Roster list */}
+      {statusLoading ? (
+        <div style={{ fontSize: 13, color: "var(--ink-500)", padding: 12 }}>Loading roster…</div>
+      ) : participants.length === 0 ? (
+        <div style={{
+          fontSize: 12, color: "var(--ink-500)",
+          padding: 14, background: "var(--ink-25)", borderRadius: 10, lineHeight: 1.5,
+        }}>
+          No named participants on this booking yet. Use <strong>"All"</strong> above to check in
+          all anonymous tickets, or have the guest sign a waiver to populate the roster.
+        </div>
+      ) : (
+        <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
+          {participants.map((p) => {
+            const checkedIn = !!p.checkedInAt;
+            const isSelected = selectedIds.has(p.bookingParticipantId);
+            return (
+              <li
+                key={p.bookingParticipantId}
+                onClick={() => !checkedIn && toggleSelect(p.bookingParticipantId)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "10px 12px", borderRadius: 10,
+                  cursor: checkedIn ? "default" : "pointer",
+                  background: checkedIn ? "var(--color-success-soft)"
+                            : isSelected ? "var(--aero-orange-50)" : "#fff",
+                  border: checkedIn ? "1.5px solid var(--color-success)"
+                        : isSelected ? "2px solid var(--aero-orange-500)" : "1.5px solid var(--ink-200)",
+                }}
+              >
+                <div
+                  style={{
+                    width: 24, height: 24, borderRadius: 6, flexShrink: 0,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    background: checkedIn ? "var(--color-success)" : isSelected ? "var(--aero-orange-500)" : "var(--ink-100)",
+                    color: "#fff",
+                  }}
+                >
+                  {checkedIn ? <Icon name="check" size={14} stroke={3} />
+                   : isSelected ? <Icon name="check" size={14} stroke={3} />
+                   : null}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: "var(--ink-900)" }}>
+                    {p.displayName || `Guest ${p.bookingParticipantId}`}
+                    {p.isMinor && <span style={{ marginLeft: 6, fontSize: 10, color: "var(--ink-500)", fontWeight: 600 }}>(minor)</span>}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--ink-500)" }}>
+                    {checkedIn
+                      ? `Checked in ${new Date(p.checkedInAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+                      : p.waiverStatus === "valid"
+                      ? "Waiver valid"
+                      : <span style={{ color: "var(--color-danger)" }}>Waiver missing</span>}
+                  </div>
+                </div>
+                {checkedIn && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); handleUndo(p.bookingParticipantId); }}
+                    disabled={undoing}
+                    style={{
+                      all: "unset", cursor: "pointer",
+                      fontSize: 11, fontWeight: 700,
+                      color: "var(--ink-500)",
+                      padding: "4px 8px", borderRadius: 6,
+                    }}
+                    title="Undo check-in"
+                  >
+                    Undo
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {/* Sticky-ish action bar for batch */}
+      {selectedIds.size > 0 && (
+        <button
+          type="button"
+          onClick={handleCheckInSelected}
+          disabled={batchPosting}
+          className="a-btn a-btn--primary"
+          style={{ width: "100%", justifyContent: "center", marginTop: 14 }}
+        >
+          <Icon name="check" size={16} stroke={3} />
+          Check in {selectedIds.size} selected
+        </button>
+      )}
     </div>
   );
 }

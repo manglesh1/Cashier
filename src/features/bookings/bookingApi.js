@@ -46,6 +46,35 @@ export const bookingApi = baseApi.injectEndpoints({
         "Bookings",
       ],
     }),
+
+    // Per-participant check-in roster + actions.
+    getCheckInStatus: builder.query({
+      query: (bookingId) => `/bookings/${bookingId}/check-in-status`,
+      providesTags: (result, error, id) => [{ type: "CheckIn", id }],
+    }),
+    checkInParticipants: builder.mutation({
+      query: ({ bookingId, participantIds, wristbandAssignments = [] }) => ({
+        url: `/bookings/${bookingId}/check-in`,
+        method: "POST",
+        body: { participantIds, wristbandAssignments },
+      }),
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "CheckIn", id: bookingId },
+        { type: "Tickets", id: bookingId },
+        { type: "Booking", id: bookingId },
+      ],
+    }),
+    undoParticipantCheckIn: builder.mutation({
+      query: ({ bookingId, participantId }) => ({
+        url: `/bookings/${bookingId}/participants/${participantId}/undo-check-in`,
+        method: "POST",
+      }),
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "CheckIn", id: bookingId },
+        { type: "Tickets", id: bookingId },
+        { type: "Booking", id: bookingId },
+      ],
+    }),
   }),
 });
 
@@ -57,4 +86,7 @@ export const {
   useSendBookingConfirmationMutation,
   usePaymentSendPaymentLinkMutation,
   useRefundPaymentMutation,
+  useGetCheckInStatusQuery,
+  useCheckInParticipantsMutation,
+  useUndoParticipantCheckInMutation,
 } = bookingApi;
