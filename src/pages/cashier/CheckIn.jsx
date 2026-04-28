@@ -14,6 +14,7 @@ import {
   useGetCheckInStatusQuery,
   useCheckInParticipantsMutation,
   useUndoParticipantCheckInMutation,
+  useUpsertParticipantsMutation,
 } from "../../features/bookings/bookingApi";
 import {
   useGetBookingTicketsQuery,
@@ -340,13 +341,11 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       {statusLoading ? (
         <div style={{ fontSize: 13, color: "var(--ink-500)", padding: 12 }}>Loading roster…</div>
       ) : participants.length === 0 ? (
-        <div style={{
-          fontSize: 12, color: "var(--ink-500)",
-          padding: 14, background: "var(--ink-25)", borderRadius: 10, lineHeight: 1.5,
-        }}>
-          No named participants on this booking yet. Use <strong>"All"</strong> above to check in
-          all anonymous tickets, or have the guest sign a waiver to populate the roster.
-        </div>
+        <NameGuestsForm
+          bookingId={booking.bookingId}
+          totalGuests={totalCount}
+          onSaved={() => { refetchStatus(); onCheckedIn?.(); }}
+        />
       ) : (
         <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
           {participants.map((p) => {
@@ -448,6 +447,96 @@ function MiniStat({ label, value, tone }) {
       </div>
       <div style={{ fontSize: 18, fontWeight: 800, color: fg, marginTop: 2, fontVariantNumeric: "tabular-nums" }}>
         {value}
+      </div>
+    </div>
+  );
+}
+
+// ── Inline name-entry form for bookings with no named participants ──
+// Shows N text inputs (one per ticket), saves them as BookingParticipant
+// rows so the cashier can then check each guest in individually.
+function NameGuestsForm({ bookingId, totalGuests, onSaved }) {
+  const [names, setNames] = useState(() =>
+    Array.from({ length: Math.max(1, Number(totalGuests) || 1) }, () => ({ displayName: "", isMinor: false }))
+  );
+  const [upsert, { isLoading }] = useUpsertParticipantsMutation();
+
+  const updateName = (idx, patch) =>
+    setNames((prev) => prev.map((n, i) => (i === idx ? { ...n, ...patch } : n)));
+
+  const handleSave = async () => {
+    const filled = names.filter((n) => n.displayName.trim().length > 0);
+    if (filled.length === 0) {
+      toast.error("Type at least one guest name");
+      return;
+    }
+    const promise = upsert({ bookingId, participants: filled }).unwrap();
+    toast.promise(promise, {
+      loading: "Saving names…",
+      success: () => { onSaved?.(); return `Added ${filled.length} guest${filled.length === 1 ? "" : "s"}`; },
+      error: (err) => err?.data?.error || "Save failed",
+    });
+  };
+
+  return (
+    <div style={{
+      padding: 12, background: "var(--ink-25)",
+      border: "1.5px dashed var(--ink-300)", borderRadius: 10,
+    }}>
+      <div style={{ fontSize: 12, color: "var(--ink-700)", lineHeight: 1.5, marginBottom: 10 }}>
+        No named guests yet. Type a name for each ticket, then save to enable
+        per-guest check-in. (Or use <strong>"All"</strong> above to check in everyone anonymously.)
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+        {names.map((row, idx) => (
+          <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <span style={{
+              fontSize: 11, fontWeight: 800, color: "var(--ink-500)",
+              fontFamily: "var(--font-mono)", width: 22,
+            }}>{idx + 1}.</span>
+            <input
+              value={row.displayName}
+              onChange={(e) => updateName(idx, { displayName: e.target.value })}
+              placeholder={`Guest ${idx + 1} name`}
+              style={{
+                flex: 1, padding: "8px 10px",
+                borderRadius: 8, border: "1.5px solid var(--ink-200)",
+                fontSize: 13, fontWeight: 600, color: "var(--ink-900)",
+                background: "white", outline: "none",
+              }}
+            />
+            <label
+              title="Mark as minor"
+              style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--ink-600)", cursor: "pointer" }}
+            >
+              <input
+                type="checkbox"
+                checked={row.isMinor}
+                onChange={(e) => updateName(idx, { isMinor: e.target.checked })}
+              />
+              minor
+            </label>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <button
+          type="button"
+          onClick={() => setNames((prev) => [...prev, { displayName: "", isMinor: false }])}
+          className="a-btn a-btn--ghost a-btn--sm"
+          style={{ flex: 1, justifyContent: "center" }}
+        >
+          <Icon name="plus" size={12} /> Add row
+        </button>
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={isLoading}
+          className="a-btn a-btn--primary a-btn--sm"
+          style={{ flex: 2, justifyContent: "center" }}
+        >
+          <Icon name="save" size={12} /> Save names
+        </button>
       </div>
     </div>
   );

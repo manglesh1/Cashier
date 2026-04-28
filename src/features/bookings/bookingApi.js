@@ -75,6 +75,18 @@ export const bookingApi = baseApi.injectEndpoints({
         { type: "Booking", id: bookingId },
       ],
     }),
+    upsertParticipants: builder.mutation({
+      query: ({ bookingId, participants }) => ({
+        url: `/bookings/${bookingId}/participants/upsert`,
+        method: "POST",
+        body: { participants },
+      }),
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "CheckIn", id: bookingId },
+        { type: "Tickets", id: bookingId },
+        { type: "Booking", id: bookingId },
+      ],
+    }),
   }),
 });
 
@@ -89,4 +101,5 @@ export const {
   useGetCheckInStatusQuery,
   useCheckInParticipantsMutation,
   useUndoParticipantCheckInMutation,
+  useUpsertParticipantsMutation,
 } = bookingApi;
