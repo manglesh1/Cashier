@@ -23,6 +23,7 @@ import {
   useGetBookingTicketsQuery,
   useCheckInAllTicketsMutation,
   useRedeemTicketMutation,
+  useBindTicketHolderMutation,
 } from "../../features/tickets/ticketApi";
 import { useDebounceSearch } from "../../hooks/useDebounceSearch";
 import { getTerminal } from "../../lib/terminal";
@@ -241,9 +242,11 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   // Tickets are the source of truth — one row per redeemable line.
   const { data: ticketsData, isLoading: ticketsLoading, refetch: refetchTickets } =
     useGetBookingTicketsQuery(booking.bookingId, { skip: !booking.bookingId });
-  const { refetch: refetchStatus } = useGetCheckInStatusQuery(booking.bookingId, { skip: !booking.bookingId });
+  const { data: checkInData, refetch: refetchStatus } =
+    useGetCheckInStatusQuery(booking.bookingId, { skip: !booking.bookingId });
   const [redeemTicket, { isLoading: redeeming }] = useRedeemTicketMutation();
   const [checkInAll, { isLoading: checkingInAll }] = useCheckInAllTicketsMutation();
+  const [bindHolder, { isLoading: binding }] = useBindTicketHolderMutation();
   const [selectedCodes, setSelectedCodes] = useState(new Set());
   const [hideCheckedIn, setHideCheckedIn] = useState(false);
 
@@ -254,6 +257,58 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const remaining = Math.max(0, totalCount - redeemedCount);
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
   const [removeParticipant] = useRemoveParticipantMutation();
+
+  // Booking-wide pool of waiver-eligible holders. The candidate set per
+  // ticket is this pool minus participants already bound to other tickets.
+  const allParticipants = checkInData?.data?.participants || [];
+
+  // Map: bookingParticipantId → ticketId currently holding them.
+  // Used to remove a person from other tickets' candidate lists once picked.
+  const participantToTicket = useMemo(() => {
+    const m = new Map();
+    for (const t of tickets) {
+      if (t.participantId) m.set(Number(t.participantId), t.ticketId);
+    }
+    return m;
+  }, [tickets]);
+
+  const candidatesFor = (ticket) => {
+    if (ticket.participantId) return [];
+    return allParticipants.filter((p) => {
+      if (!p.hasValidWaiver) return false;
+      if (p.checkedInAt) return false;
+      const otherTicketId = participantToTicket.get(Number(p.bookingParticipantId));
+      if (otherTicketId && otherTicketId !== ticket.ticketId) return false;
+      return true;
+    });
+  };
+
+  const handleBind = async (ticketCode, participantId) => {
+    const promise = bindHolder({
+      ticketCode,
+      participantId,
+      bookingId: booking.bookingId,
+    }).unwrap();
+    toast.promise(promise, {
+      loading: "Linking holder…",
+      success: () => { refetchTickets(); refetchStatus(); return "Linked"; },
+      error: (err) => err?.data?.error || "Could not link",
+    });
+  };
+
+  const handleUnbind = async (ticketCode) => {
+    const promise = bindHolder({
+      ticketCode,
+      participantId: null,
+      bookingId: booking.bookingId,
+    }).unwrap();
+    toast.promise(promise, {
+      loading: "Unlinking…",
+      success: () => { refetchTickets(); refetchStatus(); return "Unlinked"; },
+      error: (err) => err?.data?.error || "Could not unlink",
+    });
+  };
+
 
   const visibleTickets = useMemo(
     () => (hideCheckedIn ? tickets.filter((t) => t.status !== "redeemed") : tickets),
@@ -405,9 +460,25 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       {ticketsLoading ? (
         <div style={{ fontSize: 13, color: "var(--ink-500)", padding: 12 }}>Loading tickets…</div>
       ) : visibleTickets.length === 0 ? (
-        <div style={{ fontSize: 13, color: "var(--ink-500)", padding: 16, textAlign: "center", background: "white", borderRadius: 10 }}>
-          {tickets.length === 0 ? "No tickets minted for this booking yet." : "All tickets redeemed."}
-        </div>
+        tickets.length === 0 ? (
+          <div style={{
+            padding: 20, textAlign: "center", background: "white",
+            border: "1.5px solid var(--color-warning, #F59E0B)",
+            borderRadius: 12,
+          }}>
+            <div style={{ fontSize: 13, color: "#8B6100", marginBottom: 4, fontWeight: 700 }}>
+              <Icon name="alert-triangle" size={13} style={{ marginRight: 6, verticalAlign: "-2px" }} />
+              This booking can't be checked in
+            </div>
+            <div style={{ fontSize: 12, color: "var(--ink-600)", lineHeight: 1.4 }}>
+              No entries were generated for this booking. This is unusual — please ask a manager to investigate the booking on the admin app.
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 13, color: "var(--ink-500)", padding: 16, textAlign: "center", background: "white", borderRadius: 10 }}>
+            All tickets redeemed.
+          </div>
+        )
       ) : (
         <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
           {visibleTickets.map((t, i) => {
@@ -452,13 +523,27 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                     {t.product?.name || t.activity?.name || activityNameFromBooking(booking)}
                     {t.variation?.name && <span style={{ marginLeft: 6, fontWeight: 600, color: "var(--ink-600)" }}>· {t.variation.name}</span>}
                   </div>
-                  <div style={{ fontSize: 11, color: "var(--ink-500)", display: "flex", gap: 8, marginTop: 2 }}>
+                  <div style={{ fontSize: 11, color: "var(--ink-500)", display: "flex", gap: 8, marginTop: 2, alignItems: "center", flexWrap: "wrap" }}>
                     <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, color: "var(--aero-orange-600)" }}>
                       {t.ticketCode}
                     </span>
-                    {t.participant?.displayName && <span>· {t.participant.displayName}</span>}
                     {time && <span>· {time}{dur ? ` (${dur}h)` : ""}</span>}
                   </div>
+                  {t.participantId && t.participant?.displayName && (
+                    <BoundHolderChip
+                      participant={t.participant}
+                      onUnbind={isRedeemed ? null : () => handleUnbind(t.ticketCode)}
+                      busy={binding}
+                    />
+                  )}
+                  {!isRedeemed && !t.participantId && t.activity?.captureTicketHolder !== false && (
+                    <HolderPicker
+                      candidates={candidatesFor(t)}
+                      onPick={(participantId) => handleBind(t.ticketCode, participantId)}
+                      onSearch={() => setWaiverModalOpen(true)}
+                      busy={binding}
+                    />
+                  )}
                 </div>
                 {t.participantId && !isRedeemed && (
                   <button
@@ -505,6 +590,163 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 
 function activityNameFromBooking(b) {
   return b?.activityName || "Item";
+}
+
+// BoundHolderChip — pill showing the currently-bound participant with a
+// small × that unbinds them from this ticket (without removing the participant
+// from the booking). After unbind, the row's HolderPicker reappears so the
+// cashier can pick a different person — that's the "replace" flow.
+function BoundHolderChip({ participant, onUnbind, busy }) {
+  return (
+    <div style={{ marginTop: 6, display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <span style={{ fontSize: 10, fontWeight: 800, color: "var(--ink-500)", textTransform: "uppercase", letterSpacing: "0.06em", marginRight: 4 }}>
+        Holder
+      </span>
+      <span style={{
+        display: "inline-flex", alignItems: "center", gap: 5,
+        padding: "4px 4px 4px 10px",
+        borderRadius: 999,
+        background: "var(--aero-orange-50, #FFF1E8)",
+        border: "1.5px solid var(--aero-orange-500, #F45B0A)",
+        fontSize: 11, fontWeight: 700, color: "var(--aero-orange-700, #B8400A)",
+      }}>
+        {participant.isMinor && <span style={{ fontSize: 9, opacity: 0.7 }}>👶</span>}
+        {participant.displayName}
+        {onUnbind && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onUnbind}
+            title="Unlink this holder — pick a different person for this ticket"
+            style={{
+              all: "unset",
+              cursor: busy ? "wait" : "pointer",
+              width: 16, height: 16, marginLeft: 2,
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              borderRadius: 999,
+              background: "rgba(244,91,10,0.15)",
+              color: "var(--aero-orange-700)",
+            }}
+            onMouseEnter={(e) => { if (!busy) e.currentTarget.style.background = "rgba(244,91,10,0.30)"; }}
+            onMouseLeave={(e) => { if (!busy) e.currentTarget.style.background = "rgba(244,91,10,0.15)"; }}
+          >
+            <Icon name="x" size={9} stroke={3} />
+          </button>
+        )}
+      </span>
+    </div>
+  );
+}
+
+// HolderPicker — surfaces waiver-eligible booking participants as one-tap
+// chips so the cashier doesn't have to open the search modal for the common
+// case (1–4 candidates already attached via signed waivers).
+function HolderPicker({ candidates, onPick, onSearch, busy }) {
+  const [showAll, setShowAll] = React.useState(false);
+
+  if (!candidates || candidates.length === 0) {
+    return (
+      <div style={{
+        marginTop: 6,
+        display: "inline-flex", alignItems: "center", gap: 8,
+        padding: "5px 10px",
+        background: "var(--color-warning-soft, #FEF3C7)",
+        border: "1.5px solid var(--color-warning, #F59E0B)",
+        borderRadius: 8,
+        fontSize: 11, fontWeight: 700, color: "#8B6100",
+      }}>
+        <Icon name="alert-triangle" size={11} />
+        No matching waiver
+        <button
+          type="button"
+          onClick={onSearch}
+          style={{
+            all: "unset", cursor: "pointer", marginLeft: 4,
+            padding: "2px 8px", borderRadius: 6,
+            background: "white", color: "var(--ink-900)",
+            fontSize: 11, fontWeight: 700,
+            border: "1.5px solid var(--ink-300)",
+          }}
+        >
+          Find waiver
+        </button>
+      </div>
+    );
+  }
+
+  const visible = showAll ? candidates : candidates.slice(0, 4);
+  const hiddenCount = Math.max(0, candidates.length - visible.length);
+  const isSingle = candidates.length === 1;
+
+  return (
+    <div style={{
+      marginTop: 6,
+      display: "flex", alignItems: "center", flexWrap: "wrap", gap: 6,
+    }}>
+      <span style={{ fontSize: 10, fontWeight: 800, color: "var(--ink-500)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+        {isSingle ? "Suggested" : "Pick holder"}
+      </span>
+      {visible.map((p) => (
+        <button
+          key={p.bookingParticipantId}
+          type="button"
+          disabled={busy}
+          onClick={() => onPick(p.bookingParticipantId)}
+          title={p.isMinor ? "Minor — covered by waiver" : "Adult — covered by waiver"}
+          style={{
+            all: "unset", cursor: busy ? "wait" : "pointer",
+            display: "inline-flex", alignItems: "center", gap: 5,
+            padding: "4px 10px", borderRadius: 999,
+            background: isSingle ? "var(--aero-orange-50, #FFF1E8)" : "white",
+            border: `1.5px solid ${isSingle ? "var(--aero-orange-500)" : "var(--ink-300)"}`,
+            fontSize: 11, fontWeight: 700,
+            color: isSingle ? "var(--aero-orange-700)" : "var(--ink-800)",
+          }}
+          onMouseEnter={(e) => {
+            if (busy) return;
+            e.currentTarget.style.borderColor = "var(--aero-orange-500)";
+            e.currentTarget.style.background = "var(--aero-orange-50)";
+          }}
+          onMouseLeave={(e) => {
+            if (busy) return;
+            e.currentTarget.style.borderColor = isSingle ? "var(--aero-orange-500)" : "var(--ink-300)";
+            e.currentTarget.style.background = isSingle ? "var(--aero-orange-50)" : "white";
+          }}
+        >
+          {p.isMinor && <span style={{ fontSize: 9, opacity: 0.7 }}>👶</span>}
+          {p.displayName}
+        </button>
+      ))}
+      {hiddenCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowAll(true)}
+          style={{
+            all: "unset", cursor: "pointer",
+            padding: "4px 10px", borderRadius: 999,
+            background: "transparent",
+            border: "1.5px dashed var(--ink-300)",
+            fontSize: 11, fontWeight: 700, color: "var(--ink-600)",
+          }}
+        >
+          +{hiddenCount} more
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={onSearch}
+        style={{
+          all: "unset", cursor: "pointer",
+          padding: "4px 10px", borderRadius: 999,
+          background: "transparent",
+          fontSize: 11, fontWeight: 600, color: "var(--ink-500)",
+        }}
+        title="Search all waivers (out of booking)"
+      >
+        Other…
+      </button>
+    </div>
+  );
 }
 
 // ── WaiverLookupModal — search signed waivers for this location and

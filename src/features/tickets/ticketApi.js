@@ -71,6 +71,19 @@ export const ticketApi = baseApi.injectEndpoints({
         return [{ type: "Tickets", id: result.data.bookingId }];
       },
     }),
+
+    // Cashier picks an existing booking participant as this ticket's holder
+    bindTicketHolder: builder.mutation({
+      query: ({ ticketCode, participantId }) => ({
+        url: `/tickets/${ticketCode}/bind`,
+        method: "POST",
+        body: { participantId },
+      }),
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "Tickets", id: bookingId },
+        { type: "CheckIn", id: bookingId },
+      ],
+    }),
   }),
 });
 
@@ -83,4 +96,5 @@ export const {
   useLazyGetTicketByCodeQuery,
   useRedeemTicketMutation,
   useVoidTicketMutation,
+  useBindTicketHolderMutation,
 } = ticketApi;
