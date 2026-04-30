@@ -17,8 +17,8 @@ bundle and ops folks can deploy / restart it on its own.
 
 ```bash
 npm install
-cp .env.example .env  # edit URLs if backend isn't on :3000 / admin not on :5173
-npm run dev           # http://localhost:5174
+cp .env.example .env  # edit URLs if backend/admin are on different hosts
+npm run dev           # http://localhost:5173
 ```
 
 ## Configuration
@@ -28,7 +28,7 @@ Two env vars (read at build time):
 | Var                  | Default                    | What it points at                         |
 |----------------------|----------------------------|-------------------------------------------|
 | `VITE_API_BASE_URL`  | `/api`                     | aeroSportsAdmin REST root                 |
-| `VITE_ADMIN_URL`     | `http://localhost:5173`    | The admin app — opened in a new tab for actions the cashier defers (take payment, send waiver) |
+| `VITE_ADMIN_URL`     | `http://localhost:5172`    | The admin app — opened in a new tab for actions the cashier defers (take payment, send waiver) |
 
 ## Architecture
 

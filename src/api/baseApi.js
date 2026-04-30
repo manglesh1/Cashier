@@ -2,7 +2,7 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import Cookies from "js-cookie";
 
 // Reads the API base from Vite env at build time:
-//   VITE_API_BASE_URL=http://localhost:3000/api
+//   VITE_API_BASE_URL=http://localhost:5171/api
 // Falls back to /api so the dev server's proxy can rewrite if you'd
 // rather configure one.
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
