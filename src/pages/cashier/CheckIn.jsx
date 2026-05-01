@@ -763,12 +763,25 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
     return () => clearTimeout(t);
   }, [query, trigger]);
 
-  const results = data?.data || [];
+  const results = React.useMemo(() => {
+    const rows = data?.data || [];
+    const bySignature = new Map();
+    for (const row of rows) {
+      const signatureId = row.signatureId ?? row.id;
+      if (!signatureId) continue;
+      const existing = bySignature.get(signatureId);
+      if (!existing || row.holderType === "adult") {
+        bySignature.set(signatureId, row);
+      }
+    }
+    return Array.from(bySignature.values());
+  }, [data]);
 
   const handlePick = async (sig) => {
+    const waiverSignatureId = sig.signatureId ?? sig.id;
     const promise = linkFromWaiver({
       bookingId,
-      waiverSignatureId: sig.id,
+      waiverSignatureId,
       includeMinors: true,
     }).unwrap();
     toast.promise(promise, {
@@ -845,10 +858,25 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
           ) : (
             <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
               {results.map((sig) => {
-                const minorCount = Array.isArray(sig.minors) ? sig.minors.length : 0;
+                const signatureId = sig.signatureId ?? sig.id;
+                const displayName =
+                  sig.guest?.guestName ||
+                  sig.name ||
+                  sig.signedByName ||
+                  sig.signedBy ||
+                  "Guest";
+                const contact =
+                  sig.guest?.guestEmail ||
+                  sig.email ||
+                  sig.guest?.guestPhone ||
+                  sig.phone ||
+                  "—";
+                const minorCount = Array.isArray(sig.minors)
+                  ? sig.minors.length
+                  : Number(sig.minorCount || 0);
                 const expired = sig.expiredAt && new Date(sig.expiredAt) < new Date();
                 return (
-                  <li key={sig.id}>
+                  <li key={signatureId}>
                     <button
                       type="button"
                       disabled={linking}
@@ -865,10 +893,10 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                         <div>
                           <div style={{ fontWeight: 700, fontSize: 14, color: "var(--ink-900)" }}>
-                            {sig.guest?.guestName || sig.signedByName || "Guest"}
+                            {displayName}
                           </div>
                           <div style={{ fontSize: 11, color: "var(--ink-500)", marginTop: 2 }}>
-                            {sig.guest?.guestEmail || sig.guest?.guestPhone || "—"}
+                            {contact}
                             {minorCount > 0 && <span> · {minorCount} minor{minorCount === 1 ? "" : "s"}</span>}
                             {sig.signedAt && <span> · signed {new Date(sig.signedAt).toLocaleDateString()}</span>}
                           </div>
