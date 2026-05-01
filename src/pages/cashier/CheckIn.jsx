@@ -18,6 +18,7 @@ import {
   useLazySearchWaiversQuery,
   useLinkParticipantFromWaiverMutation,
   useRemoveParticipantMutation,
+  useRecordPaymentMutation,
 } from "../../features/bookings/bookingApi";
 import {
   useGetBookingTicketsQuery,
@@ -30,6 +31,7 @@ import { getTerminal } from "../../lib/terminal";
 import { adminBookingDetailUrl } from "../../lib/adminLink";
 
 const today = new Date().toISOString().slice(0, 10);
+const moneyFmt = (value) => `$${(Number(value) || 0).toFixed(2)}`;
 
 const fmtTime = (range) => (range || "").split(/[–-]/)[0].trim() || "—";
 
@@ -50,6 +52,12 @@ export function CheckIn() {
 
   const bookings = data?.data || [];
   const stats = data?.stats || {};
+
+  useEffect(() => {
+    if (!selected?.bookingId) return;
+    const updated = bookings.find((b) => String(b.bookingId) === String(selected.bookingId));
+    if (updated && updated !== selected) setSelected(updated);
+  }, [bookings, selected?.bookingId]);
 
   const partition = useMemo(() => {
     const now = new Date();
@@ -251,12 +259,21 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const [selectedCodes, setSelectedCodes] = useState(new Set());
   const [hideCheckedIn, setHideCheckedIn] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [paymentOpen, setPaymentOpen] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState("card");
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [paymentNote, setPaymentNote] = useState("");
+  const [paymentComplete, setPaymentComplete] = useState(null);
+  const [recordPayment, { isLoading: recordingPayment }] = useRecordPaymentMutation();
 
   const tickets = ticketsData?.data || [];
   const summary = ticketsData?.summary || {};
   const redeemedCount = (summary.redeemed ?? 0);
   const totalCount = summary.total ?? tickets.length;
   const remaining = Math.max(0, totalCount - redeemedCount);
+  const balanceDue = Math.max(0, Number(booking.balance || 0));
+  const isFullyCheckedIn = totalCount > 0 && redeemedCount >= totalCount;
+  const canTakePayment = isFullyCheckedIn && balanceDue > 0;
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
   const [removeParticipant] = useRemoveParticipantMutation();
 
@@ -413,6 +430,40 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     });
   };
 
+  const openPayment = () => {
+    setPaymentAmount(balanceDue.toFixed(2));
+    setPaymentMethod("card");
+    setPaymentNote("");
+    setPaymentComplete(null);
+    setPaymentOpen(true);
+  };
+
+  const handleRecordPayment = async () => {
+    const amount = Number(paymentAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      toast.error("Enter a payment amount.");
+      return;
+    }
+    if (amount > balanceDue) {
+      toast.error(`Amount cannot exceed ${moneyFmt(balanceDue)}.`);
+      return;
+    }
+
+    try {
+      const res = await recordPayment({
+        bookingId: booking.bookingId,
+        amountPaid: amount,
+        paymentMethod,
+        remarks: paymentNote || "Payment recorded at POS check-in",
+      }).unwrap();
+      setPaymentComplete(res?.data || { amountPaid: amount, paymentMethod });
+      refresh();
+      toast.success("Payment recorded");
+    } catch (err) {
+      toast.error(err?.data?.message || err?.data?.error || "Could not record payment");
+    }
+  };
+
   return (
     <div>
       {/* Booking header */}
@@ -439,6 +490,59 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       </div>
 
       {/* Toolbar — ROLLER-style: select all + hide checked-in + batch redeem */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+        gap: 8,
+        marginBottom: 10,
+      }}>
+        <CloseoutPill label="Waivers" value="Ready" tone="success" />
+        <CloseoutPill
+          label="Check-in"
+          value={`${redeemedCount}/${totalCount}`}
+          tone={isFullyCheckedIn ? "success" : "warning"}
+        />
+        <CloseoutPill
+          label="Payment"
+          value={balanceDue > 0 ? `${moneyFmt(balanceDue)} due` : "Paid"}
+          tone={balanceDue > 0 ? "danger" : "success"}
+        />
+      </div>
+
+      {canTakePayment && (
+        <button
+          type="button"
+          className="a-btn a-btn--primary"
+          onClick={openPayment}
+          style={{
+            width: "100%",
+            justifyContent: "center",
+            marginBottom: 10,
+            minHeight: 42,
+            fontSize: 14,
+          }}
+        >
+          <Icon name="credit-card" size={16} /> Take payment {moneyFmt(balanceDue)}
+        </button>
+      )}
+
+      {paymentOpen && (
+        <CheckInPaymentModal
+          booking={booking}
+          balanceDue={balanceDue}
+          amount={paymentAmount}
+          method={paymentMethod}
+          note={paymentNote}
+          isSubmitting={recordingPayment}
+          complete={paymentComplete}
+          onAmountChange={setPaymentAmount}
+          onMethodChange={setPaymentMethod}
+          onNoteChange={setPaymentNote}
+          onSubmit={handleRecordPayment}
+          onClose={() => { setPaymentOpen(false); setPaymentComplete(null); refresh(); }}
+        />
+      )}
+
       {editorOpen && (
         <div
           role="dialog"
@@ -680,6 +784,159 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 
 function activityNameFromBooking(b) {
   return b?.activityName || "Item";
+}
+
+function CloseoutPill({ label, value, tone = "neutral" }) {
+  const colors = {
+    success: { bg: "#EAF8EF", border: "#8AD5A3", fg: "#137A35" },
+    warning: { bg: "#FFF7E5", border: "#F2CA65", fg: "#8A5A00" },
+    danger: { bg: "#FFF0EA", border: "#FFB199", fg: "#B83210" },
+    neutral: { bg: "white", border: "var(--ink-200)", fg: "var(--ink-700)" },
+  };
+  const c = colors[tone] || colors.neutral;
+  return (
+    <div style={{ background: c.bg, border: `1.5px solid ${c.border}`, borderRadius: 10, padding: "8px 10px", minWidth: 0 }}>
+      <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--ink-500)" }}>
+        {label}
+      </div>
+      <div style={{ marginTop: 3, fontSize: 13, fontWeight: 900, color: c.fg, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function CheckInPaymentModal({
+  booking,
+  balanceDue,
+  amount,
+  method,
+  note,
+  isSubmitting,
+  complete,
+  onAmountChange,
+  onMethodChange,
+  onNoteChange,
+  onSubmit,
+  onClose,
+}) {
+  const remaining = Math.max(0, balanceDue - (Number(amount) || 0));
+  const methods = [
+    { value: "card", label: "Card", icon: "credit-card" },
+    { value: "cash", label: "Cash", icon: "banknote" },
+    { value: "gift_card", label: "Gift", icon: "gift" },
+    { value: "complimentary", label: "Comp", icon: "badge-percent" },
+  ];
+
+  return (
+    <div role="dialog" aria-modal="true" style={{
+      position: "fixed", inset: 0, zIndex: 1200,
+      background: "rgba(26, 24, 20, 0.62)",
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 18,
+    }}>
+      <div style={{
+        width: "min(520px, 100%)", background: "white",
+        border: "2px solid var(--ink-900)", borderRadius: 14,
+        boxShadow: "0 20px 70px rgba(0,0,0,0.35)", overflow: "hidden",
+      }}>
+        <div style={{ padding: "16px 18px", borderBottom: "1.5px solid var(--ink-200)", display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 11, color: "var(--aero-orange-600)", fontWeight: 800, fontFamily: "var(--font-mono)" }}>
+              {booking.bookingNumber}
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 900, color: "var(--ink-900)", marginTop: 2 }}>
+              {complete ? "Payment complete" : "Take payment"}
+            </div>
+          </div>
+          <button type="button" className="a-btn a-btn--ghost a-btn--sm" onClick={onClose}>
+            <Icon name="x" size={14} /> Close
+          </button>
+        </div>
+
+        {complete ? (
+          <div style={{ padding: 20 }}>
+            <div style={{
+              border: "1.5px solid #8AD5A3", background: "#EAF8EF",
+              borderRadius: 12, padding: 16, color: "#137A35",
+              fontWeight: 900, display: "flex", alignItems: "center", gap: 10,
+            }}>
+              <Icon name="check-circle-2" size={20} />
+              {moneyFmt(complete.amountPaid)} paid
+            </div>
+            <div style={{ marginTop: 14, fontSize: 13, color: "var(--ink-600)", lineHeight: 1.5 }}>
+              Booking is checked in and payment is recorded.
+            </div>
+            <button type="button" className="a-btn a-btn--primary" onClick={onClose} style={{ width: "100%", justifyContent: "center", marginTop: 18 }}>
+              Done
+            </button>
+          </div>
+        ) : (
+          <div style={{ padding: 20 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: "var(--ink-500)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+              Amount due
+            </div>
+            <div style={{ fontSize: 34, fontWeight: 900, color: "var(--ink-900)", margin: "3px 0 16px" }}>
+              {moneyFmt(balanceDue)}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
+              {methods.map((m) => {
+                const active = method === m.value;
+                return (
+                  <button key={m.value} type="button" onClick={() => onMethodChange(m.value)} style={{
+                    border: active ? "2px solid var(--aero-orange-600)" : "1.5px solid var(--ink-200)",
+                    background: active ? "var(--aero-orange-50)" : "white",
+                    borderRadius: 10, padding: "10px 6px", fontWeight: 900,
+                    color: active ? "var(--aero-orange-700)" : "var(--ink-700)",
+                    cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 5,
+                  }}>
+                    <Icon name={m.icon} size={16} />
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <label style={{ display: "block", fontSize: 11, fontWeight: 800, color: "var(--ink-500)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+              Amount received
+            </label>
+            <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--ink-300)", borderRadius: 10, overflow: "hidden", marginBottom: 12 }}>
+              <span style={{ padding: "0 12px", color: "var(--ink-500)", fontWeight: 800 }}>$</span>
+              <input
+                type="number"
+                min="0"
+                max={balanceDue}
+                step="0.01"
+                value={amount}
+                onChange={(e) => onAmountChange(e.target.value)}
+                style={{ border: 0, outline: 0, padding: "12px 12px 12px 0", flex: 1, fontWeight: 800, color: "var(--ink-900)" }}
+              />
+            </div>
+
+            <label style={{ display: "block", fontSize: 11, fontWeight: 800, color: "var(--ink-500)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
+              Note
+            </label>
+            <input
+              value={note}
+              onChange={(e) => onNoteChange(e.target.value)}
+              placeholder="Optional"
+              style={{ width: "100%", border: "1.5px solid var(--ink-300)", borderRadius: 10, padding: "11px 12px", outline: 0, marginBottom: 12 }}
+            />
+
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 800, color: remaining > 0 ? "#B83210" : "#137A35", marginBottom: 16 }}>
+              <span>Balance after payment</span>
+              <span>{moneyFmt(remaining)}</span>
+            </div>
+
+            <button type="button" className="a-btn a-btn--primary" onClick={onSubmit} disabled={isSubmitting} style={{ width: "100%", justifyContent: "center", minHeight: 42 }}>
+              <Icon name="check" size={16} />
+              {isSubmitting ? "Recording..." : `Complete payment ${moneyFmt(Number(amount) || 0)}`}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // BoundHolderChip — pill showing the currently-bound participant with a

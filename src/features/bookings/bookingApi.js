@@ -35,6 +35,18 @@ export const bookingApi = baseApi.injectEndpoints({
     paymentSendPaymentLink: builder.mutation({
       query: (body) => ({ url: "/payment/send-payment-link", method: "POST", body }),
     }),
+    recordPayment: builder.mutation({
+      query: ({ bookingId, ...body }) => ({
+        url: `/payment/manual-payment/${bookingId}`,
+        method: "POST",
+        body,
+      }),
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "Booking", id: bookingId },
+        { type: "CheckIn", id: bookingId },
+        "Bookings",
+      ],
+    }),
     refundPayment: builder.mutation({
       query: ({ bookingId, ...body }) => ({
         url: `/payment/manual-refund/${bookingId}`,
@@ -127,6 +139,7 @@ export const {
   useCreateBookingMutation,
   useSendBookingConfirmationMutation,
   usePaymentSendPaymentLinkMutation,
+  useRecordPaymentMutation,
   useRefundPaymentMutation,
   useGetCheckInStatusQuery,
   useCheckInParticipantsMutation,
