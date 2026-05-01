@@ -5,7 +5,7 @@
 // pending tickets, mints redemption events, and respects waiver/expiry
 // rules — the exact same path the Redeem screen takes).
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
@@ -27,6 +27,7 @@ import {
 } from "../../features/tickets/ticketApi";
 import { useDebounceSearch } from "../../hooks/useDebounceSearch";
 import { getTerminal } from "../../lib/terminal";
+import { adminBookingDetailUrl } from "../../lib/adminLink";
 
 const today = new Date().toISOString().slice(0, 10);
 
@@ -249,6 +250,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const [bindHolder, { isLoading: binding }] = useBindTicketHolderMutation();
   const [selectedCodes, setSelectedCodes] = useState(new Set());
   const [hideCheckedIn, setHideCheckedIn] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
 
   const tickets = ticketsData?.data || [];
   const summary = ticketsData?.summary || {};
@@ -257,6 +259,25 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const remaining = Math.max(0, totalCount - redeemedCount);
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
   const [removeParticipant] = useRemoveParticipantMutation();
+
+  const refresh = () => {
+    refetchTickets();
+    refetchStatus();
+    onCheckedIn?.();
+  };
+
+  useEffect(() => {
+    if (!editorOpen) return undefined;
+
+    const handleMessage = (event) => {
+      if (event?.data?.type !== "movira:booking-editor-close") return;
+      setEditorOpen(false);
+      refresh();
+    };
+
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [editorOpen]);
 
   // Booking-wide pool of waiver-eligible holders. The candidate set per
   // ticket is this pool minus participants already bound to other tickets.
@@ -334,8 +355,6 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     else setSelectedCodes(new Set(allSelectableCodes));
   };
 
-  const refresh = () => { refetchTickets(); refetchStatus(); onCheckedIn?.(); };
-
   const handleUnlinkParticipant = async (participantId) => {
     if (!window.confirm("Remove this guest from the booking? Their tickets stay on the booking and can be re-assigned.")) return;
     const promise = removeParticipant({ bookingId: booking.bookingId, participantId }).unwrap();
@@ -397,7 +416,8 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   return (
     <div>
       {/* Booking header */}
-      <div style={{ marginBottom: 14 }}>
+      <div style={{ marginBottom: 14, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+        <div style={{ minWidth: 0 }}>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--aero-orange-600)", fontWeight: 700, letterSpacing: "0.05em" }}>
           {booking.bookingNumber}
         </div>
@@ -407,9 +427,79 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         <div style={{ fontSize: 13, color: "var(--ink-500)", marginTop: 4 }}>
           {booking.activityName} · {booking.totalGuests || totalCount} pax · {booking.timeRange || "—"}
         </div>
+        </div>
+        <button
+          type="button"
+          className="a-btn a-btn--secondary a-btn--sm"
+          onClick={() => setEditorOpen(true)}
+          style={{ justifyContent: "center", flex: "0 0 auto" }}
+        >
+          <Icon name="edit-3" size={13} /> Edit booking
+        </button>
       </div>
 
       {/* Toolbar — ROLLER-style: select all + hide checked-in + batch redeem */}
+      {editorOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            background: "rgba(26, 24, 20, 0.58)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "center",
+            padding: 18,
+            overflowY: "auto",
+          }}
+        >
+          <div
+            style={{
+              width: "min(1440px, 100%)",
+              height: "min(820px, calc(100vh - 36px))",
+              background: "var(--ink-25, #FAF7EE)",
+              border: "2px solid var(--ink-900)",
+              borderRadius: 14,
+              boxShadow: "0 20px 70px rgba(0,0,0,0.35)",
+              overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+            }}
+          >
+            <div
+              style={{
+                height: 46,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "0 12px 0 16px",
+                background: "white",
+                borderBottom: "1.5px solid var(--ink-200)",
+              }}
+            >
+              <div style={{ fontSize: 13, fontWeight: 800, color: "var(--ink-900)" }}>
+                Edit {booking.bookingNumber}
+              </div>
+              <button
+                type="button"
+                className="a-btn a-btn--ghost a-btn--sm"
+                onClick={() => { setEditorOpen(false); refresh(); }}
+              >
+                <Icon name="x" size={14} /> Close
+              </button>
+            </div>
+            <iframe
+              title={`Edit booking ${booking.bookingNumber}`}
+              src={adminBookingDetailUrl(booking.bookingId, "embedded=1&returnTo=pos-checkin")}
+              style={{ width: "100%", flex: 1, minHeight: 0, border: 0, background: "var(--ink-25, #FAF7EE)" }}
+            />
+          </div>
+        </div>
+      )}
+
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
         gap: 12, marginBottom: 10, padding: "10px 12px",
