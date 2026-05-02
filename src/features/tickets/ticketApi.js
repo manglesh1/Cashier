@@ -31,10 +31,10 @@ export const ticketApi = baseApi.injectEndpoints({
     }),
 
     checkInAllTickets: builder.mutation({
-      query: ({ bookingId, terminalDeviceId, gateOrZone }) => ({
+      query: ({ bookingId, terminalDeviceId, gateOrZone, allowEarlyCheckIn = false }) => ({
         url: `/bookings/${bookingId}/tickets/check-in-all`,
         method: "POST",
-        body: { terminalDeviceId, gateOrZone },
+        body: { terminalDeviceId, gateOrZone, allowEarlyCheckIn },
       }),
       invalidatesTags: (result, error, { bookingId }) => [
         { type: "Tickets", id: bookingId },
@@ -49,10 +49,10 @@ export const ticketApi = baseApi.injectEndpoints({
 
     // Redemption — single ticket scan
     redeemTicket: builder.mutation({
-      query: ({ ticketCode, terminalDeviceId, gateOrZone, notes, managerOverride }) => ({
+      query: ({ ticketCode, terminalDeviceId, gateOrZone, notes, managerOverride, allowEarlyCheckIn = false }) => ({
         url: `/tickets/${ticketCode}/redeem`,
         method: "POST",
-        body: { terminalDeviceId, gateOrZone, notes, managerOverride },
+        body: { terminalDeviceId, gateOrZone, notes, managerOverride, allowEarlyCheckIn },
       }),
       invalidatesTags: (result) => {
         if (!result?.data?.bookingId) return [];

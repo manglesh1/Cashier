@@ -19,6 +19,7 @@ import {
   useLinkParticipantFromWaiverMutation,
   useRemoveParticipantMutation,
   useRecordPaymentMutation,
+  useSendBookingConfirmationMutation,
 } from "../../features/bookings/bookingApi";
 import {
   useGetBookingTicketsQuery,
@@ -26,14 +27,38 @@ import {
   useRedeemTicketMutation,
   useBindTicketHolderMutation,
 } from "../../features/tickets/ticketApi";
+import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discountApi";
+import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import { useDebounceSearch } from "../../hooks/useDebounceSearch";
 import { getTerminal } from "../../lib/terminal";
 import { adminBookingDetailUrl } from "../../lib/adminLink";
 
-const today = new Date().toISOString().slice(0, 10);
+const localIsoDate = (date = new Date()) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+const today = localIsoDate();
 const moneyFmt = (value) => `$${(Number(value) || 0).toFixed(2)}`;
+const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
 
 const fmtTime = (range) => (range || "").split(/[–-]/)[0].trim() || "—";
+
+function triggerCashDrawer({ bookingId, terminal }) {
+  const payload = {
+    bookingId,
+    terminalDeviceId: terminal?.deviceId || null,
+    terminalName: terminal?.deviceName || terminal?.name || null,
+    openedAt: new Date().toISOString(),
+  };
+  window.dispatchEvent(new CustomEvent("cashier:open-cash-drawer", { detail: payload }));
+  try {
+    localStorage.setItem("cashier:lastDrawerOpen", JSON.stringify(payload));
+  } catch {
+    // best effort only
+  }
+}
 
 export function CheckIn() {
   const { searchTerm, inputValue, setDebouncedSearch } = useDebounceSearch(400);
@@ -264,7 +289,9 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const [paymentAmount, setPaymentAmount] = useState("");
   const [paymentNote, setPaymentNote] = useState("");
   const [paymentComplete, setPaymentComplete] = useState(null);
+  const [paymentDiscount, setPaymentDiscount] = useState(null);
   const [recordPayment, { isLoading: recordingPayment }] = useRecordPaymentMutation();
+  const [sendBookingConfirmation, { isLoading: sendingReceipt }] = useSendBookingConfirmationMutation();
 
   const tickets = ticketsData?.data || [];
   const summary = ticketsData?.summary || {};
@@ -388,6 +415,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       ticketCode: code,
       terminalDeviceId: terminal?.deviceId || null,
       gateOrZone: terminal?.deviceName || "Cashier check-in",
+      allowEarlyCheckIn: true,
     }).unwrap();
     toast.promise(promise, {
       loading: "Redeeming…",
@@ -407,6 +435,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           ticketCode: code,
           terminalDeviceId: terminal?.deviceId || null,
           gateOrZone: terminal?.deviceName || "Cashier check-in",
+          allowEarlyCheckIn: true,
         }).unwrap();
         ok++;
       } catch { fail++; }
@@ -422,6 +451,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       bookingId: booking.bookingId,
       terminalDeviceId: terminal?.deviceId || null,
       gateOrZone: terminal?.deviceName || "Cashier check-in",
+      allowEarlyCheckIn: true,
     }).unwrap();
     toast.promise(promise, {
       loading: "Redeeming all…",
@@ -434,34 +464,97 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     setPaymentAmount(balanceDue.toFixed(2));
     setPaymentMethod("card");
     setPaymentNote("");
+    setPaymentDiscount(null);
     setPaymentComplete(null);
     setPaymentOpen(true);
   };
 
   const handleRecordPayment = async () => {
-    const amount = Number(paymentAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      toast.error("Enter a payment amount.");
+    const discountAmount = roundMoney(Math.min(Number(paymentDiscount?.amount || 0), balanceDue));
+    const payableBalance = roundMoney(Math.max(0, balanceDue - discountAmount));
+    const tenderedAmount = Number(paymentAmount);
+    if (payableBalance > 0 && (!Number.isFinite(tenderedAmount) || tenderedAmount <= 0)) {
+      toast.error(paymentMethod === "cash" ? "Enter cash received." : "Enter a payment amount.");
       return;
     }
-    if (amount > balanceDue) {
-      toast.error(`Amount cannot exceed ${moneyFmt(balanceDue)}.`);
+    if (paymentMethod === "cash" && tenderedAmount < payableBalance) {
+      toast.error(`Cash received must cover ${moneyFmt(payableBalance)}.`);
+      return;
+    }
+    if (paymentMethod !== "cash" && tenderedAmount > payableBalance) {
+      toast.error(`Amount cannot exceed ${moneyFmt(payableBalance)}.`);
       return;
     }
 
+    const recordAmount = paymentMethod === "cash" ? payableBalance : tenderedAmount;
+    const changeDue = paymentMethod === "cash"
+      ? Math.max(0, Number((tenderedAmount - payableBalance).toFixed(2)))
+      : 0;
+    const terminal = getTerminal();
+    const cashRemark = paymentMethod === "cash"
+      ? `Cash tendered ${moneyFmt(tenderedAmount)}; change due ${moneyFmt(changeDue)}.`
+      : "";
+
     try {
-      const res = await recordPayment({
-        bookingId: booking.bookingId,
-        amountPaid: amount,
+      let discountRes = null;
+      if (discountAmount > 0) {
+        discountRes = await recordPayment({
+          bookingId: booking.bookingId,
+          amountPaid: discountAmount,
+          paymentMethod: "complimentary",
+          terminalDeviceId: terminal?.deviceId || null,
+          remarks: [
+            `POS discount applied: ${paymentDiscount?.label || "Discount"}`,
+            paymentDiscount?.code ? `Code ${paymentDiscount.code}.` : "",
+            paymentDiscount?.managerName ? `Approved by ${paymentDiscount.managerName}.` : "",
+          ].filter(Boolean).join(" "),
+        }).unwrap();
+      }
+      let res = discountRes;
+      if (recordAmount > 0) {
+        res = await recordPayment({
+          bookingId: booking.bookingId,
+          amountPaid: recordAmount,
+          paymentMethod,
+          tenderedAmount,
+          changeDue,
+          terminalDeviceId: terminal?.deviceId || null,
+          remarks: [paymentNote || "Payment recorded at POS check-in", cashRemark].filter(Boolean).join(" "),
+        }).unwrap();
+      }
+      if (paymentMethod === "cash" && recordAmount > 0) {
+        triggerCashDrawer({ bookingId: booking.bookingId, terminal });
+      }
+      setPaymentComplete({
+        ...(res?.data || {}),
+        amountPaid: roundMoney(recordAmount + discountAmount),
+        discountAmount,
+        discountLabel: paymentDiscount?.label || null,
+        paymentAmount: recordAmount,
         paymentMethod,
-        remarks: paymentNote || "Payment recorded at POS check-in",
-      }).unwrap();
-      setPaymentComplete(res?.data || { amountPaid: amount, paymentMethod });
+        tenderedAmount,
+        changeDue,
+        drawerOpened: paymentMethod === "cash" && recordAmount > 0,
+      });
       refresh();
       toast.success("Payment recorded");
     } catch (err) {
       toast.error(err?.data?.message || err?.data?.error || "Could not record payment");
     }
+  };
+
+  const handlePrintReceipt = () => {
+    window.print();
+  };
+
+  const handleEmailReceipt = async () => {
+    if (!booking?.bookingId) return;
+    const promise = sendBookingConfirmation({ bookingId: booking.bookingId }).unwrap();
+    toast.promise(promise, {
+      loading: "Sending receipt...",
+      success: "Receipt emailed",
+      error: (err) => err?.data?.message || err?.data?.error || "Could not email receipt",
+    });
   };
 
   return (
@@ -509,22 +602,13 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         />
       </div>
 
-      {canTakePayment && (
-        <button
-          type="button"
-          className="a-btn a-btn--primary"
-          onClick={openPayment}
-          style={{
-            width: "100%",
-            justifyContent: "center",
-            marginBottom: 10,
-            minHeight: 42,
-            fontSize: 14,
-          }}
-        >
-          <Icon name="credit-card" size={16} /> Take payment {moneyFmt(balanceDue)}
-        </button>
-      )}
+      <CheckInSettlementPanel
+        balanceDue={balanceDue}
+        isFullyCheckedIn={isFullyCheckedIn}
+        redeemedCount={redeemedCount}
+        totalCount={totalCount}
+        onTakePayment={openPayment}
+      />
 
       {paymentOpen && (
         <CheckInPaymentModal
@@ -533,12 +617,17 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           amount={paymentAmount}
           method={paymentMethod}
           note={paymentNote}
+          discount={paymentDiscount}
           isSubmitting={recordingPayment}
           complete={paymentComplete}
           onAmountChange={setPaymentAmount}
           onMethodChange={setPaymentMethod}
           onNoteChange={setPaymentNote}
+          onDiscountChange={setPaymentDiscount}
           onSubmit={handleRecordPayment}
+          onPrintReceipt={handlePrintReceipt}
+          onEmailReceipt={handleEmailReceipt}
+          isSendingReceipt={sendingReceipt}
           onClose={() => { setPaymentOpen(false); setPaymentComplete(null); refresh(); }}
         />
       )}
@@ -806,27 +895,196 @@ function CloseoutPill({ label, value, tone = "neutral" }) {
   );
 }
 
+function CheckInSettlementPanel({
+  balanceDue,
+  isFullyCheckedIn,
+  redeemedCount,
+  totalCount,
+  onTakePayment,
+}) {
+  const isPaid = balanceDue <= 0;
+  const canTakePayment = isFullyCheckedIn && !isPaid;
+  const panel = isPaid
+    ? {
+        icon: "check-circle-2",
+        title: "Paid in full",
+        body: "No balance remains for this booking.",
+        bg: "#EAF8EF",
+        border: "#8AD5A3",
+        fg: "#137A35",
+      }
+    : canTakePayment
+    ? {
+        icon: "credit-card",
+        title: "Ready to take payment",
+        body: "All guests are checked in. Collect the remaining balance to finish arrival.",
+        bg: "var(--aero-orange-50)",
+        border: "var(--aero-orange-500)",
+        fg: "var(--aero-orange-700)",
+      }
+    : {
+        icon: "clock",
+        title: "Payment after check-in",
+        body: `${redeemedCount}/${totalCount} guests checked in. Finish check-in before collecting the balance.`,
+        bg: "#FFF7E6",
+        border: "#F3C96A",
+        fg: "#8A5A00",
+      };
+
+  return (
+    <div
+      style={{
+        marginBottom: 10,
+        padding: 14,
+        borderRadius: 14,
+        border: `1.5px solid ${panel.border}`,
+        background: panel.bg,
+        color: panel.fg,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <Icon name={panel.icon} size={18} stroke={2.2} style={{ flex: "0 0 auto", marginTop: 1 }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 900 }}>{panel.title}</div>
+          <div style={{ marginTop: 4, fontSize: 12, lineHeight: 1.45, color: "var(--ink-700)" }}>
+            {panel.body}
+          </div>
+        </div>
+        {!isPaid && (
+          <div style={{ textAlign: "right", flex: "0 0 auto" }}>
+            <div style={{ fontSize: 10, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+              Due
+            </div>
+            <div style={{ marginTop: 2, fontSize: 18, fontWeight: 950, color: "var(--ink-900)" }}>
+              {moneyFmt(balanceDue)}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {!isPaid && (
+        <button
+          type="button"
+          className={canTakePayment ? "a-btn a-btn--primary" : "a-btn a-btn--secondary"}
+          onClick={canTakePayment ? onTakePayment : undefined}
+          disabled={!canTakePayment}
+          style={{
+            width: "100%",
+            justifyContent: "center",
+            marginTop: 12,
+            minHeight: 42,
+            fontSize: 14,
+            opacity: canTakePayment ? 1 : 0.65,
+            cursor: canTakePayment ? "pointer" : "not-allowed",
+          }}
+        >
+          <Icon name="credit-card" size={16} />
+          {canTakePayment ? `Take payment ${moneyFmt(balanceDue)}` : "Check in guests first"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function CheckInPaymentModal({
   booking,
   balanceDue,
   amount,
   method,
   note,
+  discount,
   isSubmitting,
   complete,
   onAmountChange,
   onMethodChange,
   onNoteChange,
+  onDiscountChange,
   onSubmit,
+  onPrintReceipt,
+  onEmailReceipt,
+  isSendingReceipt,
   onClose,
 }) {
-  const remaining = Math.max(0, balanceDue - (Number(amount) || 0));
+  const [couponCode, setCouponCode] = useState("");
+  const [manualDiscount, setManualDiscount] = useState("");
+  const [managerOpen, setManagerOpen] = useState(false);
+  const [validateDiscountCode, { isFetching: validatingCoupon }] = useLazyValidateDiscountCodeQuery();
+  const discountAmount = roundMoney(Math.min(Number(discount?.amount || 0), balanceDue));
+  const payableBalance = roundMoney(Math.max(0, balanceDue - discountAmount));
+  const tendered = Number(amount) || 0;
+  const isCash = method === "cash";
+  const recordAmount = isCash ? Math.min(payableBalance, tendered) : tendered;
+  const remaining = Math.max(0, payableBalance - recordAmount);
+  const changeDue = isCash ? Math.max(0, tendered - payableBalance) : 0;
+  const taxAmount = Number(booking?.taxAmount ?? booking?.tax ?? 0) || 0;
+  const subTotal = roundMoney(Math.max(0, Number(booking?.subTotal ?? booking?.subtotal ?? booking?.totalAmount ?? balanceDue) || 0));
+  const existingDiscount = Number(booking?.discountAmount || 0) || 0;
   const methods = [
-    { value: "card", label: "Card", icon: "credit-card" },
-    { value: "cash", label: "Cash", icon: "banknote" },
-    { value: "gift_card", label: "Gift", icon: "gift" },
-    { value: "complimentary", label: "Comp", icon: "badge-percent" },
+    { value: "cash", label: "Cash", icon: "banknote", bg: "#F23B20" },
+    { value: "card", label: "Credit / Debit", icon: "credit-card", bg: "#FF8A00" },
+    { value: "gift_card", label: "Gift Card", icon: "gift", bg: "#1687F5" },
+    { value: "check", label: "Check", icon: "receipt", bg: "#D8D8D8", fg: "#111" },
   ];
+  const quickCash = [1, 5, 10, 20, 50, 100];
+  const coinTender = [
+    { label: "Loonie", value: 1 },
+    { label: "Toonie", value: 2 },
+    { label: "Dime", value: 0.1 },
+    { label: "Qtt", value: 0.25 },
+  ];
+  const keypad = ["7", "8", "9", "4", "5", "6", "1", "2", "3", "0", "00", "."];
+  const applyAmount = (next) => onAmountChange(String(next));
+  const addTender = (value) => {
+    const next = roundMoney((Number(amount) || 0) + value);
+    onAmountChange(next.toFixed(2));
+  };
+  const handleMethodChange = (nextMethod) => {
+    onMethodChange(nextMethod);
+    onAmountChange(nextMethod === "cash" ? "" : payableBalance.toFixed(2));
+  };
+  const appendDigit = (digit) => {
+    const current = String(amount || "");
+    if (digit === "." && current.includes(".")) return;
+    const next = current === "0" && digit !== "." ? digit : `${current}${digit}`;
+    onAmountChange(next);
+  };
+  const applyCoupon = async () => {
+    const code = couponCode.trim();
+    if (!code) {
+      toast.error("Enter coupon code.");
+      return;
+    }
+    try {
+      const res = await validateDiscountCode(code).unwrap();
+      const promo = res?.data || {};
+      const rawValue = Number(promo.value || 0);
+      const calculated = Number(promo.discountType) === 1
+        ? roundMoney(Math.min(payableBalance, (balanceDue * rawValue) / 100, Number(promo.maxValue || Infinity)))
+        : roundMoney(Math.min(payableBalance, rawValue));
+      if (calculated <= 0) {
+        toast.error("Coupon has no value for this balance.");
+        return;
+      }
+      onDiscountChange({
+        amount: calculated,
+        label: promo.name || `Coupon ${code}`,
+        code: promo.code || code,
+        source: "coupon",
+      });
+      onAmountChange(method === "cash" ? "" : roundMoney(Math.max(0, balanceDue - calculated)).toFixed(2));
+      toast.success(`Coupon applied: ${moneyFmt(calculated)}`);
+    } catch (err) {
+      toast.error(err?.data?.message || err?.data?.error || "Coupon not valid.");
+    }
+  };
+  const requestManagerDiscount = () => {
+    const amt = roundMoney(Math.min(Number(manualDiscount), balanceDue));
+    if (!amt || amt <= 0) {
+      toast.error("Enter discount amount.");
+      return;
+    }
+    setManagerOpen(true);
+  };
 
   return (
     <div role="dialog" aria-modal="true" style={{
@@ -835,9 +1093,9 @@ function CheckInPaymentModal({
       display: "flex", alignItems: "center", justifyContent: "center", padding: 18,
     }}>
       <div style={{
-        width: "min(520px, 100%)", background: "white",
+        width: "min(980px, 100%)", maxHeight: "calc(100vh - 24px)", background: "#F6F1E8",
         border: "2px solid var(--ink-900)", borderRadius: 14,
-        boxShadow: "0 20px 70px rgba(0,0,0,0.35)", overflow: "hidden",
+        boxShadow: "0 20px 70px rgba(0,0,0,0.35)", overflow: "auto",
       }}>
         <div style={{ padding: "16px 18px", borderBottom: "1.5px solid var(--ink-200)", display: "flex", justifyContent: "space-between", gap: 12 }}>
           <div>
@@ -854,7 +1112,7 @@ function CheckInPaymentModal({
         </div>
 
         {complete ? (
-          <div style={{ padding: 20 }}>
+          <div style={{ padding: 18 }}>
             <div style={{
               border: "1.5px solid #8AD5A3", background: "#EAF8EF",
               borderRadius: 12, padding: 16, color: "#137A35",
@@ -863,78 +1121,194 @@ function CheckInPaymentModal({
               <Icon name="check-circle-2" size={20} />
               {moneyFmt(complete.amountPaid)} paid
             </div>
+            {complete.discountAmount > 0 && (
+              <div style={{ marginTop: 12, border: "1.5px solid var(--ink-200)", borderRadius: 10, padding: 10, fontSize: 13, fontWeight: 800, color: "var(--ink-700)" }}>
+                Discount applied: {moneyFmt(complete.discountAmount)} {complete.discountLabel ? `(${complete.discountLabel})` : ""}
+              </div>
+            )}
+            {complete.paymentMethod === "cash" && (
+              <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div style={{ border: "1.5px solid var(--ink-200)", borderRadius: 10, padding: 12 }}>
+                  <div style={{ fontSize: 10, fontWeight: 900, color: "var(--ink-500)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Cash received</div>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: "var(--ink-900)", marginTop: 4 }}>{moneyFmt(complete.tenderedAmount)}</div>
+                </div>
+                <div style={{ border: "2px solid #B83210", background: "#FFF3EE", borderRadius: 10, padding: 12 }}>
+                  <div style={{ fontSize: 10, fontWeight: 900, color: "#B83210", textTransform: "uppercase", letterSpacing: "0.08em" }}>Return change</div>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: "#B83210", marginTop: 4 }}>{moneyFmt(complete.changeDue)}</div>
+                </div>
+              </div>
+            )}
+            {complete.drawerOpened && (
+              <div style={{ marginTop: 12, border: "1.5px solid var(--ink-200)", borderRadius: 10, padding: 10, display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 800, color: "var(--ink-700)" }}>
+                <Icon name="archive" size={16} />
+                Cash drawer signal sent.
+              </div>
+            )}
             <div style={{ marginTop: 14, fontSize: 13, color: "var(--ink-600)", lineHeight: 1.5 }}>
               Booking is checked in and payment is recorded.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 16 }}>
+              <button type="button" className="a-btn a-btn--secondary" onClick={onPrintReceipt} style={{ justifyContent: "center" }}>
+                <Icon name="printer" size={15} /> Print
+              </button>
+              <button type="button" className="a-btn a-btn--secondary" onClick={onEmailReceipt} disabled={isSendingReceipt} style={{ justifyContent: "center" }}>
+                <Icon name="mail" size={15} /> {isSendingReceipt ? "Sending..." : "Email"}
+              </button>
             </div>
             <button type="button" className="a-btn a-btn--primary" onClick={onClose} style={{ width: "100%", justifyContent: "center", marginTop: 18 }}>
               Done
             </button>
           </div>
         ) : (
-          <div style={{ padding: 20 }}>
-            <div style={{ fontSize: 12, fontWeight: 800, color: "var(--ink-500)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-              Amount due
-            </div>
-            <div style={{ fontSize: 34, fontWeight: 900, color: "var(--ink-900)", margin: "3px 0 16px" }}>
-              {moneyFmt(balanceDue)}
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
+          <div style={{ padding: 8, display: "grid", gridTemplateColumns: "130px minmax(260px, 1fr) minmax(280px, 340px)", gap: 12 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {methods.map((m) => {
                 const active = method === m.value;
                 return (
-                  <button key={m.value} type="button" onClick={() => onMethodChange(m.value)} style={{
-                    border: active ? "2px solid var(--aero-orange-600)" : "1.5px solid var(--ink-200)",
-                    background: active ? "var(--aero-orange-50)" : "white",
-                    borderRadius: 10, padding: "10px 6px", fontWeight: 900,
-                    color: active ? "var(--aero-orange-700)" : "var(--ink-700)",
-                    cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 5,
+                  <button key={m.value} type="button" onClick={() => handleMethodChange(m.value)} style={{
+                    border: active ? "3px solid var(--ink-900)" : "1.5px solid var(--ink-400)",
+                    background: m.bg,
+                    borderRadius: 6, padding: "14px 8px", fontWeight: 900,
+                    color: m.fg || "white", minHeight: 58,
+                    cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7,
                   }}>
                     <Icon name={m.icon} size={16} />
                     {m.label}
                   </button>
                 );
               })}
+              <div style={{ height: 18 }} />
+              <button type="button" onClick={applyCoupon} disabled={validatingCoupon} style={{ border: "1.5px solid var(--ink-500)", background: "#F529C8", color: "white", borderRadius: 6, padding: "13px 8px", fontWeight: 900, cursor: "pointer" }}>
+                Customer Coupon
+              </button>
+              <button type="button" onClick={requestManagerDiscount} style={{ border: "1.5px solid var(--ink-500)", background: "#FF78A5", color: "#111", borderRadius: 6, padding: "13px 8px", fontWeight: 900, cursor: "pointer" }}>
+                Manager Discount
+              </button>
+              <button type="button" onClick={() => {
+                const amt = roundMoney(Math.min(Number(manualDiscount), balanceDue));
+                if (amt <= 0) return toast.error("Enter discount amount.");
+                onDiscountChange({ amount: amt, label: "Employee discount", source: "employee" });
+                onAmountChange(method === "cash" ? "" : roundMoney(Math.max(0, balanceDue - amt)).toFixed(2));
+              }} style={{ border: "1.5px solid var(--ink-500)", background: "#F8287D", color: "white", borderRadius: 6, padding: "13px 8px", fontWeight: 900, cursor: "pointer" }}>
+                Employee Discount
+              </button>
+              <button type="button" className="a-btn a-btn--secondary" onClick={onClose} style={{ marginTop: "auto", justifyContent: "center", minHeight: 46 }}>
+                Continue Ordering
+              </button>
             </div>
 
-            <label style={{ display: "block", fontSize: 11, fontWeight: 800, color: "var(--ink-500)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
-              Amount received
-            </label>
-            <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--ink-300)", borderRadius: 10, overflow: "hidden", marginBottom: 12 }}>
-              <span style={{ padding: "0 12px", color: "var(--ink-500)", fontWeight: 800 }}>$</span>
-              <input
-                type="number"
-                min="0"
-                max={balanceDue}
-                step="0.01"
-                value={amount}
-                onChange={(e) => onAmountChange(e.target.value)}
-                style={{ border: 0, outline: 0, padding: "12px 12px 12px 0", flex: 1, fontWeight: 800, color: "var(--ink-900)" }}
+            <div>
+              <textarea
+                value={note}
+                onChange={(e) => onNoteChange(e.target.value)}
+                placeholder="Payment note"
+                style={{ width: "100%", height: 76, resize: "vertical", border: "1.5px solid var(--ink-400)", background: "white", borderRadius: 4, padding: 10, outline: 0, boxSizing: "border-box", marginBottom: 8 }}
               />
+              <div style={{ background: "#FFFDD1", border: "1.5px solid var(--ink-400)", padding: 12, fontSize: 14, fontWeight: 800 }}>
+                <TotalLine label="Order Total" value={moneyFmt(subTotal)} />
+                <TotalLine label="Existing Discounts" value={moneyFmt(existingDiscount)} />
+                <TotalLine label="POS Discount" value={moneyFmt(discountAmount)} tone={discountAmount > 0 ? "#F45B0A" : undefined} />
+                <div style={{ borderTop: "3px solid var(--ink-900)", margin: "8px 0" }} />
+                <TotalLine label="Sub Total" value={moneyFmt(Math.max(0, subTotal - existingDiscount - discountAmount))} />
+                <TotalLine label="Plus Tax" value={moneyFmt(taxAmount)} />
+                <div style={{ borderTop: "3px solid var(--ink-900)", margin: "8px 0" }} />
+                <TotalLine label="Grand Total" value={moneyFmt(balanceDue)} tone="#08A5E8" />
+                <TotalLine label="Tender Due" value={moneyFmt(payableBalance)} tone="#F45B0A" />
+                <TotalLine label="Tendered" value={moneyFmt(tendered)} />
+                <TotalLine label={isCash ? "Change" : "Balance Remaining"} value={moneyFmt(isCash ? changeDue : remaining)} tone={isCash && changeDue > 0 ? "#B83210" : "#08A5E8"} />
+                {discount?.label && (
+                  <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", fontSize: 12 }}>
+                    <span>{discount.label}</span>
+                    <button type="button" className="a-btn a-btn--ghost a-btn--sm" onClick={() => onDiscountChange(null)}>
+                      Clear
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
+                <button type="button" className="a-btn a-btn--secondary" onClick={() => applyAmount(payableBalance.toFixed(2))} style={{ justifyContent: "center" }}>
+                  Exact Change
+                </button>
+                <button type="button" className="a-btn a-btn--secondary" onClick={() => { onAmountChange(""); onDiscountChange(null); setCouponCode(""); setManualDiscount(""); }} style={{ justifyContent: "center" }}>
+                  Clear Payments
+                </button>
+              </div>
+              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <input value={couponCode} onChange={(e) => setCouponCode(e.target.value)} placeholder="Coupon code" style={{ border: "1.5px solid var(--ink-300)", borderRadius: 8, padding: 10 }} />
+                <input value={manualDiscount} onChange={(e) => setManualDiscount(e.target.value)} type="number" min="0" step="0.01" placeholder="Discount $" style={{ border: "1.5px solid var(--ink-300)", borderRadius: 8, padding: 10 }} />
+              </div>
             </div>
 
-            <label style={{ display: "block", fontSize: 11, fontWeight: 800, color: "var(--ink-500)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>
-              Note
-            </label>
-            <input
-              value={note}
-              onChange={(e) => onNoteChange(e.target.value)}
-              placeholder="Optional"
-              style={{ width: "100%", border: "1.5px solid var(--ink-300)", borderRadius: 10, padding: "11px 12px", outline: 0, marginBottom: 12 }}
-            />
-
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 800, color: remaining > 0 ? "#B83210" : "#137A35", marginBottom: 16 }}>
-              <span>Balance after payment</span>
-              <span>{moneyFmt(remaining)}</span>
+            <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+              <div style={{ flex: 1, minHeight: 138, background: "#E9F3F6", border: "1.5px solid var(--ink-300)", marginBottom: 8, padding: 8, fontSize: 13, fontWeight: 800 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", color: "#0A75D9" }}>
+                  <span>{method === "cash" ? "Cash" : methods.find((m) => m.value === method)?.label || method}</span>
+                  <span>{moneyFmt(tendered)}</span>
+                </div>
+                {discountAmount > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", color: "#F45B0A", marginTop: 6 }}>
+                    <span>{discount?.label || "Discount"}</span>
+                    <span>-{moneyFmt(discountAmount)}</span>
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr) 1fr 1fr", gap: 4 }}>
+                {keypad.map((key) => (
+                  <button key={key} type="button" onClick={() => appendDigit(key)} style={{ minHeight: 54, border: "1px solid var(--ink-200)", background: "white", borderRadius: 7, fontSize: 22, fontWeight: 900, cursor: "pointer" }}>
+                    {key}
+                  </button>
+                ))}
+                {quickCash.map((cash) => (
+                  <button key={cash} type="button" onClick={() => isCash ? addTender(cash) : applyAmount(cash.toFixed(2))} style={{ minHeight: 54, border: "1.5px solid #51B800", background: "#65E600", borderRadius: 7, fontSize: 20, fontWeight: 900, cursor: "pointer" }}>
+                    ${cash}
+                  </button>
+                ))}
+                {coinTender.map((coin) => (
+                  <button key={coin.label} type="button" onClick={() => isCash ? addTender(coin.value) : applyAmount(coin.value.toFixed(2))} style={{ minHeight: 54, border: "1.5px solid #A96D00", background: "#D99316", color: "#111", borderRadius: 7, fontSize: 15, fontWeight: 900, cursor: "pointer" }}>
+                    {coin.label}
+                  </button>
+                ))}
+                <button type="button" onClick={() => onAmountChange("")} style={{ minHeight: 54, border: "1px solid var(--ink-200)", background: "white", borderRadius: 7, fontSize: 20, fontWeight: 900, cursor: "pointer" }}>
+                  Clear
+                </button>
+                <button type="button" onClick={() => onAmountChange(String(amount || "").slice(0, -1))} style={{ minHeight: 54, border: "1px solid var(--ink-200)", background: "white", borderRadius: 7, fontSize: 18, fontWeight: 900, cursor: "pointer" }}>
+                  <Icon name="delete" size={18} />
+                </button>
+              </div>
+              <button type="button" className="a-btn a-btn--primary" onClick={onSubmit} disabled={isSubmitting} style={{ width: "100%", justifyContent: "center", minHeight: 52, marginTop: 8, fontSize: 16 }}>
+                <Icon name="check" size={16} />
+                {isSubmitting ? "Recording..." : "Complete The Order"}
+              </button>
             </div>
-
-            <button type="button" className="a-btn a-btn--primary" onClick={onSubmit} disabled={isSubmitting} style={{ width: "100%", justifyContent: "center", minHeight: 42 }}>
-              <Icon name="check" size={16} />
-              {isSubmitting ? "Recording..." : `Complete payment ${moneyFmt(Number(amount) || 0)}`}
-            </button>
           </div>
         )}
       </div>
+      <ManagerOverridePrompt
+        open={managerOpen}
+        title="Approve manager discount"
+        description={`Apply ${moneyFmt(Math.min(Number(manualDiscount), balanceDue))} discount to ${booking.bookingNumber}.`}
+        action="pos_manager_discount"
+        targetType="booking"
+        targetId={booking.bookingId}
+        payload={{ amount: roundMoney(Math.min(Number(manualDiscount), balanceDue)) }}
+        defaultReason="POS check-in manager discount"
+        onCancel={() => setManagerOpen(false)}
+        onApprove={(audit) => {
+          const amt = roundMoney(Math.min(Number(manualDiscount), balanceDue));
+          onDiscountChange({ amount: amt, label: "Manager discount", source: "manager", managerName: audit?.managerName });
+          onAmountChange(method === "cash" ? "" : roundMoney(Math.max(0, balanceDue - amt)).toFixed(2));
+          setManagerOpen(false);
+        }}
+      />
+    </div>
+  );
+}
+
+function TotalLine({ label, value, tone }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, color: tone || "var(--ink-900)", margin: "3px 0" }}>
+      <span>{label}</span>
+      <span>{value}</span>
     </div>
   );
 }
