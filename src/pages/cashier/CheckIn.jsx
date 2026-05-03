@@ -381,7 +381,11 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   );
 
   const allSelectableCodes = useMemo(
-    () => visibleTickets.filter((t) => t.status === "issued").map((t) => t.ticketCode),
+    () => visibleTickets
+      .filter((t) => t.status === "issued")
+      // Exclude tickets blocked by missing waiver — server would reject these
+      .filter((t) => !(t.requiresWaiver && !t.participantId))
+      .map((t) => t.ticketCode),
     [visibleTickets]
   );
   const allSelected = allSelectableCodes.length > 0 && allSelectableCodes.every((c) => selectedCodes.has(c));
@@ -424,6 +428,21 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     });
   };
 
+  // Tickets whose product requires a waiver but no participant is bound.
+  // These are blocked at redeem time both server-side (returns
+  // requires_waiver) and here in the UI (button disabled). The cashier
+  // must use HolderPicker / "Add from waiver" before they can check in.
+  const waiverBlocked = useMemo(
+    () => tickets.filter(
+      (t) =>
+        t.requiresWaiver &&
+        !t.participantId &&
+        t.status !== "redeemed" &&
+        t.status !== "partially_redeemed"
+    ),
+    [tickets]
+  );
+
   const handleRedeemSelected = async () => {
     if (selectedCodes.size === 0) return;
     const terminal = getTerminal();
@@ -446,6 +465,13 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   };
 
   const handleRedeemAll = async () => {
+    if (waiverBlocked.length > 0) {
+      // Soft-warn (server still enforces). Bulk endpoint already skips these,
+      // so this is purely so the cashier knows what won't get checked in.
+      toast.warning(
+        `${waiverBlocked.length} ticket${waiverBlocked.length === 1 ? "" : "s"} need a waiver — link guests first or use "Add from waiver"`
+      );
+    }
     const terminal = getTerminal();
     const promise = checkInAll({
       bookingId: booking.bookingId,
@@ -455,7 +481,14 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     }).unwrap();
     toast.promise(promise, {
       loading: "Redeeming all…",
-      success: (res) => { refresh(); return `Redeemed ${res?.succeeded ?? 0} of ${res?.attempted ?? 0}`; },
+      success: (res) => {
+        refresh();
+        const succ = res?.succeeded ?? 0;
+        const att = res?.attempted ?? 0;
+        const blocked = (res?.results || []).filter((r) => r.reason === "requires_waiver").length;
+        const tail = blocked > 0 ? ` · ${blocked} blocked by waiver` : "";
+        return `Redeemed ${succ} of ${att}${tail}`;
+      },
       error: (err) => err?.data?.error || "Redeem failed",
     });
   };
@@ -767,6 +800,10 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           {visibleTickets.map((t, i) => {
             const isRedeemed = t.status === "redeemed" || t.status === "partially_redeemed";
             const isSelected = selectedCodes.has(t.ticketCode);
+            // Block redemption when the product requires a waiver but no
+            // waiver-bound participant is linked yet. Cashier must use the
+            // HolderPicker / "Add from waiver" flow first.
+            const needsWaiver = !!t.requiresWaiver && !t.participantId && !isRedeemed;
             const time = t.validFrom
               ? new Date(t.validFrom).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
               : null;
@@ -787,9 +824,14 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                 <input
                   type="checkbox"
                   checked={isSelected}
-                  disabled={isRedeemed}
+                  disabled={isRedeemed || needsWaiver}
                   onChange={() => toggleSelect(t.ticketCode)}
-                  style={{ width: 16, height: 16, cursor: isRedeemed ? "not-allowed" : "pointer", flexShrink: 0 }}
+                  title={needsWaiver ? "Waiver required — link a guest first" : undefined}
+                  style={{
+                    width: 16, height: 16,
+                    cursor: (isRedeemed || needsWaiver) ? "not-allowed" : "pointer",
+                    flexShrink: 0,
+                  }}
                 />
                 <div style={{
                   width: 28, height: 28, borderRadius: 6, flexShrink: 0,
@@ -811,6 +853,18 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                       {t.ticketCode}
                     </span>
                     {time && <span>· {time}{dur ? ` (${dur}h)` : ""}</span>}
+                    {needsWaiver && (
+                      <span style={{
+                        display: "inline-flex", alignItems: "center", gap: 4,
+                        padding: "2px 6px", borderRadius: 6,
+                        background: "#FFF0EA", color: "#B83210",
+                        border: "1px solid #FFB199",
+                        fontWeight: 700, fontSize: 10,
+                      }}>
+                        <Icon name="alert-triangle" size={10} stroke={2.5} />
+                        Waiver required
+                      </span>
+                    )}
                   </div>
                   {t.participantId && t.participant?.displayName && (
                     <BoundHolderChip
@@ -846,20 +900,26 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                 )}
                 <button
                   type="button"
-                  onClick={() => !isRedeemed && handleRedeemOne(t.ticketCode)}
-                  disabled={isRedeemed || redeeming}
-                  title={isRedeemed ? "Already redeemed" : "Redeem this ticket"}
+                  onClick={() => !isRedeemed && !needsWaiver && handleRedeemOne(t.ticketCode)}
+                  disabled={isRedeemed || redeeming || needsWaiver}
+                  title={
+                    isRedeemed
+                      ? "Already redeemed"
+                      : needsWaiver
+                        ? "Waiver required — link a guest first"
+                        : "Redeem this ticket"
+                  }
                   style={{
                     width: 36, height: 36, flexShrink: 0,
                     borderRadius: 8, border: "1.5px solid",
-                    borderColor: isRedeemed ? "var(--color-success)" : "var(--ink-200)",
-                    background: isRedeemed ? "var(--color-success)" : "white",
-                    color: isRedeemed ? "white" : "var(--ink-700)",
-                    cursor: isRedeemed ? "default" : "pointer",
+                    borderColor: isRedeemed ? "var(--color-success)" : needsWaiver ? "#FFB199" : "var(--ink-200)",
+                    background: isRedeemed ? "var(--color-success)" : needsWaiver ? "#FFF0EA" : "white",
+                    color: isRedeemed ? "white" : needsWaiver ? "#B83210" : "var(--ink-700)",
+                    cursor: (isRedeemed || needsWaiver) ? "not-allowed" : "pointer",
                     display: "flex", alignItems: "center", justifyContent: "center",
                   }}
                 >
-                  <Icon name="check" size={16} stroke={3} />
+                  <Icon name={needsWaiver ? "alert-triangle" : "check"} size={16} stroke={3} />
                 </button>
               </li>
             );
