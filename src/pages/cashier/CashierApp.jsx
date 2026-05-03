@@ -11,6 +11,7 @@ import React, { useMemo, useState } from "react";
 import Cookies from "js-cookie";
 import { useDispatch, useSelector } from "react-redux";
 import { toast } from "sonner";
+import { baseApi } from "../../api/baseApi";
 import { adminBookingDetailUrl, openInAdmin } from "../../lib/adminLink";
 import { useLogoutMutation } from "../../features/auth/authApi";
 import { logout as logoutAction } from "../../features/auth/authSlice";
@@ -114,9 +115,11 @@ export function CashierApp() {
 
   const dispatch = useDispatch();
   const [logoutCall] = useLogoutMutation();
-  const handleSignOut = async () => {
+  const handleEndShift = async () => {
     try { await logoutCall().unwrap(); } catch { /* noop */ }
+    dispatch(baseApi.util.resetApiState());
     dispatch(logoutAction());
+    toast.success("Shift ended. Please clock in for the next cashier session.");
   };
 
   const [screen, setScreen] = useState("sell");
@@ -448,8 +451,8 @@ export function CashierApp() {
           ))}
         </div>
         <button
-          onClick={handleSignOut}
-          title="Sign out"
+          onClick={handleEndShift}
+          title="End shift"
           style={{
             all: "unset",
             cursor: "pointer",
@@ -462,7 +465,7 @@ export function CashierApp() {
           }}
         >
           <Icon name="log-out" size={22} />
-          <span style={{ fontSize: 10, fontWeight: 700 }}>Sign out</span>
+          <span style={{ fontSize: 10, fontWeight: 700 }}>End shift</span>
         </button>
       </aside>
       <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
