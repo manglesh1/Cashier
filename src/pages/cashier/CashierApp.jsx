@@ -89,6 +89,8 @@ function normalizePresetSections(preset) {
       icon: pickItemIcon(p.productType || p.type),
       badge: p.featured ? "POPULAR" : undefined,
       featured: p.featured,
+      // Activity-level waiver requirement. Drives cart waiver gating.
+      requiresWaiver: !!p.requiresWaiver,
       raw: p,
     })),
   }));
