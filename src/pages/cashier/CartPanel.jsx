@@ -33,8 +33,9 @@ export function CartPanel({
   variant = "default",
   isSubmitting = false,
   onPricingChange,         // (pricing) => void — parent uses for createBooking payload
-  waiversAttached = [],    // array of waiver signature IDs already linked
+  waiversAttached = [],    // [{ signatureId, name, coverage, minors: [{name}], ... }]
   onCollectWaivers,        // () => void — opens waiver collection modal
+  onChangeWaivers,         // (next) => void — full replacement of waiver list
 }) {
   // Discount can be one of three modes — same as PaymentTab on All Bookings.
   // Code: typed string → validated against /promos/validate → server-defined value
@@ -70,6 +71,50 @@ export function CartPanel({
     ? waiversAttached.reduce((n, a) => n + Math.max(1, Number(a.coverage) || 1), 0)
     : 0;
   const waiversMissing = Math.max(0, waiversNeeded - waiversCount);
+
+  // Build a flat list of waiver-required spots (one entry per qty per item).
+  // We render one "ticket row" for each, matching the check-in screen pattern.
+  const waiverSpots = React.useMemo(() => {
+    const list = [];
+    for (const it of items) {
+      if (!it.requiresWaiver) continue;
+      for (let i = 0; i < it.qty; i += 1) {
+        list.push({ itemId: it.id, itemName: it.name });
+      }
+    }
+    return list;
+  }, [items]);
+
+  // Walk attached waivers in order; each one fills its signer slot then a
+  // slot per minor on it. spotCoverage[i] tells the row at index i how
+  // it is covered (or undefined when still unfilled).
+  const spotCoverage = React.useMemo(() => {
+    const out = [];
+    for (const chip of waiversAttached) {
+      out.push({
+        kind: "signer",
+        name: chip.name,
+        signatureId: chip.signatureId,
+      });
+      const minors = Array.isArray(chip.minors) ? chip.minors : [];
+      for (const m of minors) {
+        out.push({
+          kind: "minor",
+          name: m?.name || "Minor",
+          signatureId: chip.signatureId,
+        });
+      }
+    }
+    return out;
+  }, [waiversAttached]);
+
+  const primaryCustomer = waiversAttached[0] || null;
+  const removeWaiver = (signatureId) => {
+    if (!onChangeWaivers) return;
+    onChangeWaivers(
+      waiversAttached.filter((a) => Number(a.signatureId) !== Number(signatureId))
+    );
+  };
 
   const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
   const discountAmount = computeDiscountAmount(promo, subtotal);
@@ -296,6 +341,64 @@ export function CartPanel({
         </div>
       </div>
 
+      {/* Customer slot — top right of the cart panel. Shows the primary
+          guest attached to this sale (or an Add customer button when
+          none). All other waivers attach as additional rows in the
+          ticket list below. */}
+      {(waiversNeeded > 0 || waiversAttached.length > 0) && (
+        <div style={{
+          padding: "10px 18px", display: "flex", alignItems: "center", gap: 10,
+          background: primaryCustomer ? "#EAF8EF" : "var(--ink-25)",
+          borderBottom: "1px solid var(--ink-100)",
+        }}>
+          <div style={{
+            width: 30, height: 30, borderRadius: 999, flexShrink: 0,
+            background: primaryCustomer ? "#137A35" : "var(--ink-200)",
+            color: "white", display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <Icon name="user-round" size={16} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".06em",
+              textTransform: "uppercase", color: "var(--ink-500)" }}>
+              Customer
+            </div>
+            {primaryCustomer ? (
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ink-900)" }}>
+                {primaryCustomer.name}
+                {primaryCustomer.coverage > 1 && (
+                  <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 600, color: "var(--ink-500)" }}>
+                    · waiver covers {primaryCustomer.coverage}
+                  </span>
+                )}
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, color: "var(--ink-600)" }}>Add a guest with a signed waiver</div>
+            )}
+          </div>
+          {primaryCustomer ? (
+            <button
+              type="button"
+              onClick={() => removeWaiver(primaryCustomer.signatureId)}
+              className="a-btn a-btn--ghost a-btn--sm"
+              title="Remove customer"
+              style={{ flexShrink: 0 }}
+            >
+              <Icon name="x" size={14} />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onCollectWaivers}
+              className="a-btn a-btn--primary a-btn--sm"
+              style={{ flexShrink: 0 }}
+            >
+              <Icon name="user-plus" size={14} /> Add customer
+            </button>
+          )}
+        </div>
+      )}
+
       {/* items */}
       <div style={{ flex: 1, overflowY: "auto", padding: "14px 18px", display: "flex", flexDirection: "column", gap: 10 }}>
         {items.length === 0 && (
@@ -308,6 +411,79 @@ export function CartPanel({
         {items.map((it, idx) => (
           <CartRow key={idx} item={it} onRemove={() => onRemove?.(idx)} onQty={(d) => onQty?.(idx, d)} />
         ))}
+
+        {/* Per-ticket coverage rows — one row per waiver-required spot,
+            mirroring the check-in screen's flat ticket list. Each row
+            is either auto-bound to the customer's waiver coverage
+            (signer, then minors), or unbound and offering "Find waiver". */}
+        {waiverSpots.length > 0 && (
+          <div style={{ marginTop: 4 }}>
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              fontSize: 11, fontWeight: 800, letterSpacing: ".06em",
+              textTransform: "uppercase", color: "var(--ink-500)",
+              padding: "8px 4px 6px",
+            }}>
+              <span>Tickets · waiver coverage</span>
+              <span style={{ color: waiversMissing > 0 ? "#B83210" : "#137A35" }}>
+                {waiversCount} of {waiverSpots.length} covered
+              </span>
+            </div>
+            <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
+              {waiverSpots.map((spot, i) => {
+                const cov = spotCoverage[i];
+                return (
+                  <li
+                    key={`${spot.itemId}-${i}`}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 10,
+                      padding: "10px 12px", borderRadius: 10, background: "white",
+                      border: `1.5px solid ${cov ? "#8AD5A3" : "#FFB199"}`,
+                    }}
+                  >
+                    <div style={{
+                      width: 28, height: 28, borderRadius: 6, flexShrink: 0,
+                      background: cov ? "#EAF8EF" : "#FFF0EA",
+                      color: cov ? "#137A35" : "#B83210",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                    }}>
+                      <Icon name={cov ? "check-circle-2" : "alert-triangle"} size={14} />
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13, color: "var(--ink-900)",
+                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {spot.itemName}
+                      </div>
+                      <div style={{ fontSize: 11, color: "var(--ink-500)", marginTop: 2 }}>
+                        {cov ? (
+                          <>
+                            <Icon name="user-round" size={10} style={{ verticalAlign: "-1px", marginRight: 4 }} />
+                            {cov.name}
+                            {cov.kind === "minor" && (
+                              <span style={{ marginLeft: 4, color: "var(--ink-400)" }}>· minor</span>
+                            )}
+                          </>
+                        ) : (
+                          <span style={{ color: "#B83210", fontWeight: 600 }}>No waiver linked</span>
+                        )}
+                      </div>
+                    </div>
+                    {!cov && (
+                      <button
+                        type="button"
+                        onClick={onCollectWaivers}
+                        className="a-btn a-btn--ghost a-btn--sm"
+                        style={{ flexShrink: 0 }}
+                      >
+                        <Icon name="search" size={12} /> Find waiver
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
 
         {member && (
           <div style={{
@@ -464,44 +640,6 @@ export function CartPanel({
             </button>
           )}
         </div>
-        {waiversNeeded > 0 && (
-          <div
-            style={{
-              marginTop: 10,
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: `1.5px solid ${waiversMissing > 0 ? "#FFB199" : "#8AD5A3"}`,
-              background: waiversMissing > 0 ? "#FFF0EA" : "#EAF8EF",
-              display: "flex", alignItems: "center", gap: 10,
-            }}
-          >
-            <Icon
-              name={waiversMissing > 0 ? "alert-triangle" : "check-circle-2"}
-              size={18}
-              stroke={2.5}
-              style={{ color: waiversMissing > 0 ? "#B83210" : "#137A35", flexShrink: 0 }}
-            />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: waiversMissing > 0 ? "#B83210" : "#137A35" }}>
-                {waiversMissing > 0
-                  ? `${waiversMissing} guest${waiversMissing === 1 ? "" : "s"} need waivers`
-                  : "All guests covered"}
-              </div>
-              <div style={{ fontSize: 11, color: "var(--ink-600)", marginTop: 2 }}>
-                {waiversCount} of {waiversNeeded} covered
-              </div>
-            </div>
-            <button
-              type="button"
-              className="a-btn a-btn--primary a-btn--sm"
-              onClick={onCollectWaivers}
-              style={{ flexShrink: 0 }}
-            >
-              <Icon name={waiversMissing > 0 ? "user-plus" : "users"} size={14} />
-              {waiversMissing > 0 ? "Add guest" : "Manage"}
-            </button>
-          </div>
-        )}
         <button
           type="button"
           className="a-btn a-btn--primary"

@@ -75,14 +75,24 @@ export function CartWaiverModal({
     const contactEmail = sig.guest?.guestEmail || sig.email || "";
     const contactPhone = sig.guest?.guestPhone || sig.phone || "";
     const contact = contactEmail || contactPhone || "";
-    const minorCount = Array.isArray(sig.minors)
-      ? sig.minors.length
-      : Number(sig.minorCount || 0);
+    const minorList = Array.isArray(sig.minors) ? sig.minors : [];
+    const minorCount = sig.includesMinors === false ? 0 : minorList.length;
     // One waiver covers the signer + any minors on it.
-    const coverage = 1 + (sig.includesMinors === false ? 0 : minorCount);
+    const coverage = 1 + minorCount;
     onChange([
       ...attached,
-      { signatureId, name, contact, contactEmail, contactPhone, minorCount, coverage },
+      {
+        signatureId,
+        name,
+        contact,
+        contactEmail,
+        contactPhone,
+        minorCount,
+        coverage,
+        // Preserve minor names so the per-ticket row in the cart can
+        // show "Liam Jr" etc. instead of a generic "minor 1" label.
+        minors: minorList.slice(0, minorCount),
+      },
     ]);
     toast.success(`Added: ${name}${coverage > 1 ? ` · covers ${coverage} guests` : ""}`);
   };

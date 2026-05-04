@@ -356,6 +356,7 @@ export function CashierApp() {
           isSubmitting={isCreating}
           waiversAttached={waiversAttached}
           onCollectWaivers={() => setWaiverModalOpen(true)}
+          onChangeWaivers={setWaiversAttached}
         />
       </>
     );
