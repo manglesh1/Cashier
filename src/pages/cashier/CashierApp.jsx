@@ -21,6 +21,7 @@ import { StatusPill } from "./StatusPill";
 import { Icon } from "./Icon";
 import { CartPanel } from "./CartPanel";
 import { CartWaiverModal } from "./CartWaiverModal";
+import CashierPaymentDialog from "./CashierPaymentDialog";
 import { CatalogGrid } from "./CatalogGrid";
 import { WaveBoard } from "./WaveBoard";
 import { QuickBuilder } from "./QuickBuilder";
@@ -129,14 +130,82 @@ export function CashierApp() {
   const [variant, setVariant] = useState("A");
   const [items, setItems] = useState([]);
   const [createdBookingId, setCreatedBookingId] = useState(null);
+  // When a sale is committed, the new booking + summary lands here and
+  // CashierPaymentDialog opens. Same UX as the check-in screen's "Take
+  // payment" modal.
+  const [paymentBooking, setPaymentBooking] = useState(null);
   const [cartPricing, setCartPricing] = useState(null);
   const [member] = useState(null);
   // Waivers attached to the current cart. Populated by the waiver-collection
   // modal (search existing / send link). Sent as waiverSignatureIds on
-  // createBooking; backend rejects 400 if count is short of waiver-required
-  // quantity.
+  // createBooking; backend rejects 400 if total spot coverage is short.
   const [waiversAttached, setWaiversAttached] = useState([]);
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
+  // Per-ticket assignment of waiver-pool people to waiver-required spots.
+  // Map<ticketIndex, "signatureId:role"> where role is "signer" or
+  // "minor:N". Auto-filled when a waiver is attached, but the cashier
+  // can detach + reassign any row from the cart UI.
+  const [ticketAssignments, setTicketAssignments] = useState({});
+
+  // Pool of waiver-covered people available for the cart. One waiver
+  // contributes the signer plus each minor on it. The order here is
+  // the natural assignment order when auto-filling.
+  const waiverPool = useMemo(() => {
+    const out = [];
+    for (const w of waiversAttached) {
+      out.push({
+        key: `${w.signatureId}:signer`,
+        signatureId: w.signatureId,
+        kind: "signer",
+        name: w.name,
+        primaryName: w.name,
+      });
+      const minors = Array.isArray(w.minors) ? w.minors : [];
+      for (let i = 0; i < minors.length; i += 1) {
+        out.push({
+          key: `${w.signatureId}:minor:${i}`,
+          signatureId: w.signatureId,
+          kind: "minor",
+          name: minors[i]?.name || `Minor ${i + 1}`,
+          primaryName: w.name,
+        });
+      }
+    }
+    return out;
+  }, [waiversAttached]);
+
+  const waiverSpotCount = useMemo(
+    () => items.reduce((n, it) => n + (it.requiresWaiver ? it.qty : 0), 0),
+    [items]
+  );
+
+  // Reconcile assignments whenever the pool or spot count changes.
+  // Drops keys for waivers that have been detached, then auto-fills
+  // any still-empty spots with the next available pool member.
+  // Cashier overrides (manual detach/reassign) survive as long as the
+  // referenced person is still in the pool.
+  React.useEffect(() => {
+    setTicketAssignments((prev) => {
+      const validKeys = new Set(waiverPool.map((p) => p.key));
+      const next = {};
+      const used = new Set();
+      for (let i = 0; i < waiverSpotCount; i += 1) {
+        const k = prev[i];
+        if (k && validKeys.has(k) && !used.has(k)) {
+          next[i] = k;
+          used.add(k);
+        }
+      }
+      for (let i = 0; i < waiverSpotCount; i += 1) {
+        if (next[i]) continue;
+        const free = waiverPool.find((p) => !used.has(p.key));
+        if (!free) break;
+        next[i] = free.key;
+        used.add(free.key);
+      }
+      return next;
+    });
+  }, [waiverPool, waiverSpotCount]);
 
   const [createBooking, { isLoading: isCreating }] = useCreateBookingMutation();
 
@@ -258,6 +327,23 @@ export function CashierApp() {
     // booking. That gives the booking a real name/email/phone instead
     // of "Walk-in XYZ", and matches what the cashier saw on screen.
     const primaryGuest = waiversAttached[0] || null;
+    // Only send signature IDs that are actually bound to a ticket.
+    // The pool can hold extra people (e.g. cashier added a waiver
+    // covering 3 but only 2 spots needed); the backend should only
+    // see the waivers we're actually using.
+    const usedSignatureIds = Array.from(
+      new Set(
+        Object.values(ticketAssignments)
+          .map((k) => Number(String(k).split(":")[0]))
+          .filter((n) => Number.isFinite(n) && n > 0)
+      )
+    );
+    const guestName =
+      primaryGuest?.name ||
+      member?.name ||
+      `Walk-in ${Math.random().toString(36).slice(-4).toUpperCase()}`;
+    const guestEmail = primaryGuest?.contactEmail || member?.email || "";
+    const guestPhone = primaryGuest?.contactPhone || member?.phone || "";
     const payload = {
       locationId,
       date: new Date().toISOString().slice(0, 10),
@@ -265,13 +351,18 @@ export function CashierApp() {
       sessions,
       // Backend (createBooking) recomputes coverage from these IDs and
       // rejects 400 if total spots covered < waiver-required quantity.
-      waiverSignatureIds: waiversAttached.map((a) => a.signatureId),
-      guestName:
-        primaryGuest?.name ||
-        member?.name ||
-        `Walk-in ${Math.random().toString(36).slice(-4).toUpperCase()}`,
-      guestEmail: primaryGuest?.contactEmail || member?.email || "",
-      guestPhone: primaryGuest?.contactPhone || member?.phone || "",
+      waiverSignatureIds: usedSignatureIds,
+      // createBooking expects a guestInfo object (find-or-create the
+      // Guest record). Flat top-level fields are also kept for any
+      // legacy callers that read them.
+      guestInfo: {
+        guestName,
+        guestEmail,
+        guestPhone,
+      },
+      guestName,
+      guestEmail,
+      guestPhone,
       bookingName: primaryGuest?.name || member?.name || "Walk-in",
       source: "cashier",
       notes: `Created by ${user?.first_name || user?.name || "cashier"} at terminal ${myDevice?.deviceName || myDevice?.name || "—"}`,
@@ -297,10 +388,19 @@ export function CashierApp() {
       setCreatedBookingId(bookingId);
       setItems([]);
       setWaiversAttached([]); // clear after a successful sale
+      setTicketAssignments({});
       toast.success(`Booking ${res?.data?.bookingNumber || ""} created`);
-      // Hand off to the Payment screen which can finalize via the existing
-      // booking-detail flow (link / refund). Capture endpoint comes later.
-      setScreen("payment");
+      // Open the same payment dialog that check-in uses. Booking object
+      // carries everything the dialog needs (id, number, totals).
+      const data = res?.data || {};
+      setPaymentBooking({
+        bookingId,
+        bookingNumber: data.bookingNumber || "",
+        totalAmount: Number(data.totalAmount ?? cartPricing?.total ?? 0),
+        balanceDue: Number(data.balanceDue ?? data.totalAmount ?? cartPricing?.total ?? 0),
+        subTotal: Number(data.subTotal ?? cartPricing?.subtotal ?? 0),
+        taxAmount: Number(data.taxAmount ?? cartPricing?.tax ?? 0),
+      });
     } catch (err) {
       const msg = err?.data?.message || err?.data?.error || err?.message || "Failed to create booking";
       toast.error(msg);
@@ -357,6 +457,27 @@ export function CashierApp() {
           waiversAttached={waiversAttached}
           onCollectWaivers={() => setWaiverModalOpen(true)}
           onChangeWaivers={setWaiversAttached}
+          waiverPool={waiverPool}
+          ticketAssignments={ticketAssignments}
+          onAssignTicket={(idx, key) =>
+            setTicketAssignments((prev) => {
+              // Replacing a row: free up whoever was there, and free up
+              // anyone else currently holding the new key.
+              const next = { ...prev };
+              for (const [k, v] of Object.entries(next)) {
+                if (v === key) delete next[k];
+              }
+              next[idx] = key;
+              return next;
+            })
+          }
+          onDetachTicket={(idx) =>
+            setTicketAssignments((prev) => {
+              const next = { ...prev };
+              delete next[idx];
+              return next;
+            })
+          }
         />
       </>
     );
@@ -516,6 +637,15 @@ export function CashierApp() {
         attached={waiversAttached}
         onChange={setWaiversAttached}
         onClose={() => setWaiverModalOpen(false)}
+      />
+      <CashierPaymentDialog
+        open={!!paymentBooking}
+        booking={paymentBooking}
+        onClose={() => setPaymentBooking(null)}
+        onComplete={() => {
+          setPaymentBooking(null);
+          setCreatedBookingId(null);
+        }}
       />
     </div>
   );

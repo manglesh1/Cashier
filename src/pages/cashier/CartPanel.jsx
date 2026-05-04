@@ -36,6 +36,10 @@ export function CartPanel({
   waiversAttached = [],    // [{ signatureId, name, coverage, minors: [{name}], ... }]
   onCollectWaivers,        // () => void — opens waiver collection modal
   onChangeWaivers,         // (next) => void — full replacement of waiver list
+  waiverPool = [],         // [{ key, name, kind, signatureId, primaryName }]
+  ticketAssignments = {},  // { [ticketIndex]: poolKey }
+  onAssignTicket,          // (ticketIndex, poolKey) => void
+  onDetachTicket,          // (ticketIndex) => void
 }) {
   // Discount can be one of three modes — same as PaymentTab on All Bookings.
   // Code: typed string → validated against /promos/validate → server-defined value
@@ -67,11 +71,6 @@ export function CartPanel({
     (n, it) => n + (it.requiresWaiver ? it.qty : 0),
     0
   );
-  const waiversCount = Array.isArray(waiversAttached)
-    ? waiversAttached.reduce((n, a) => n + Math.max(1, Number(a.coverage) || 1), 0)
-    : 0;
-  const waiversMissing = Math.max(0, waiversNeeded - waiversCount);
-
   // Build a flat list of waiver-required spots (one entry per qty per item).
   // We render one "ticket row" for each, matching the check-in screen pattern.
   const waiverSpots = React.useMemo(() => {
@@ -85,28 +84,26 @@ export function CartPanel({
     return list;
   }, [items]);
 
-  // Walk attached waivers in order; each one fills its signer slot then a
-  // slot per minor on it. spotCoverage[i] tells the row at index i how
-  // it is covered (or undefined when still unfilled).
-  const spotCoverage = React.useMemo(() => {
-    const out = [];
-    for (const chip of waiversAttached) {
-      out.push({
-        kind: "signer",
-        name: chip.name,
-        signatureId: chip.signatureId,
-      });
-      const minors = Array.isArray(chip.minors) ? chip.minors : [];
-      for (const m of minors) {
-        out.push({
-          kind: "minor",
-          name: m?.name || "Minor",
-          signatureId: chip.signatureId,
-        });
-      }
-    }
-    return out;
-  }, [waiversAttached]);
+  // Pool indexed by key for quick lookup, and a Set of keys already in
+  // use so the dropdown on empty rows only offers free people.
+  const poolByKey = React.useMemo(() => {
+    const m = new Map();
+    for (const p of waiverPool) m.set(p.key, p);
+    return m;
+  }, [waiverPool]);
+
+  const usedKeys = React.useMemo(
+    () => new Set(Object.values(ticketAssignments)),
+    [ticketAssignments]
+  );
+
+  // Count covered spots = number of waiver-required spots with an
+  // assignment. Drives "Take payment" gate.
+  const waiversCount = waiverSpots.reduce(
+    (n, _, i) => n + (ticketAssignments[i] ? 1 : 0),
+    0
+  );
+  const waiversMissing = Math.max(0, waiversNeeded - waiversCount);
 
   const primaryCustomer = waiversAttached[0] || null;
   const removeWaiver = (signatureId) => {
@@ -341,60 +338,100 @@ export function CartPanel({
         </div>
       </div>
 
-      {/* Customer slot — top right of the cart panel. Shows the primary
-          guest attached to this sale (or an Add customer button when
-          none). All other waivers attach as additional rows in the
-          ticket list below. */}
+      {/* Customer slot — top of the cart panel. Renders each attached
+          waiver as a small tree (signer + their minors), so the cashier
+          sees the pool of waiver-covered people available to fill
+          ticket rows below. Each leaf shows whether it is already
+          assigned to a ticket. Cashier can detach the whole waiver
+          (× on the header) or add another guest at any time. */}
       {(waiversNeeded > 0 || waiversAttached.length > 0) && (
         <div style={{
-          padding: "10px 18px", display: "flex", alignItems: "center", gap: 10,
+          padding: "12px 18px",
           background: primaryCustomer ? "#EAF8EF" : "var(--ink-25)",
           borderBottom: "1px solid var(--ink-100)",
         }}>
           <div style={{
-            width: 30, height: 30, borderRadius: 999, flexShrink: 0,
-            background: primaryCustomer ? "#137A35" : "var(--ink-200)",
-            color: "white", display: "flex", alignItems: "center", justifyContent: "center",
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+            marginBottom: waiversAttached.length > 0 ? 8 : 0,
           }}>
-            <Icon name="user-round" size={16} />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".06em",
               textTransform: "uppercase", color: "var(--ink-500)" }}>
-              Customer
+              Customer{waiversAttached.length > 1 ? "s" : ""}
             </div>
-            {primaryCustomer ? (
-              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ink-900)" }}>
-                {primaryCustomer.name}
-                {primaryCustomer.coverage > 1 && (
-                  <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 600, color: "var(--ink-500)" }}>
-                    · waiver covers {primaryCustomer.coverage}
-                  </span>
-                )}
-              </div>
-            ) : (
-              <div style={{ fontSize: 13, color: "var(--ink-600)" }}>Add a guest with a signed waiver</div>
-            )}
-          </div>
-          {primaryCustomer ? (
-            <button
-              type="button"
-              onClick={() => removeWaiver(primaryCustomer.signatureId)}
-              className="a-btn a-btn--ghost a-btn--sm"
-              title="Remove customer"
-              style={{ flexShrink: 0 }}
-            >
-              <Icon name="x" size={14} />
-            </button>
-          ) : (
             <button
               type="button"
               onClick={onCollectWaivers}
               className="a-btn a-btn--primary a-btn--sm"
               style={{ flexShrink: 0 }}
             >
-              <Icon name="user-plus" size={14} /> Add customer
+              <Icon name="user-plus" size={14} />
+              {waiversAttached.length === 0 ? "Add customer" : "Add another"}
             </button>
+          </div>
+
+          {waiversAttached.length === 0 ? (
+            <div style={{ fontSize: 13, color: "var(--ink-600)" }}>
+              Add a guest with a signed waiver to start covering tickets.
+            </div>
+          ) : (
+            <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
+              {waiversAttached.map((w) => {
+                const minors = Array.isArray(w.minors) ? w.minors : [];
+                const signerKey = `${w.signatureId}:signer`;
+                const signerAssigned = usedKeys.has(signerKey);
+                return (
+                  <li key={w.signatureId} style={{
+                    background: "white", borderRadius: 10, padding: "8px 10px",
+                    border: "1.5px solid var(--ink-200)",
+                  }}>
+                    {/* Signer row */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <Icon name="user-round" size={14} style={{ color: "var(--ink-700)" }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink-900)" }}>
+                          {w.name}
+                        </div>
+                        <div style={{ fontSize: 10, color: signerAssigned ? "#137A35" : "var(--ink-500)" }}>
+                          {signerAssigned ? "✓ assigned to a ticket" : "available"}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removeWaiver(w.signatureId)}
+                        title="Remove customer (frees their tickets)"
+                        style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)", padding: 4 }}
+                      >
+                        <Icon name="x" size={14} />
+                      </button>
+                    </div>
+                    {/* Minor leaves */}
+                    {minors.length > 0 && (
+                      <ul style={{ margin: "6px 0 0 18px", padding: 0, listStyle: "none",
+                        borderLeft: "1.5px solid var(--ink-200)", paddingLeft: 10,
+                        display: "flex", flexDirection: "column", gap: 4 }}>
+                        {minors.map((m, mi) => {
+                          const minorKey = `${w.signatureId}:minor:${mi}`;
+                          const assigned = usedKeys.has(minorKey);
+                          return (
+                            <li key={mi} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <Icon name="user-round" size={11} style={{ color: "var(--ink-500)" }} />
+                              <span style={{ fontSize: 12, color: "var(--ink-700)", fontWeight: 600 }}>
+                                {m?.name || `Minor ${mi + 1}`}
+                              </span>
+                              <span style={{ fontSize: 10, color: "var(--ink-400)" }}>· minor</span>
+                              <span style={{ flex: 1 }} />
+                              <span style={{ fontSize: 10, color: assigned ? "#137A35" : "var(--ink-500)" }}>
+                                {assigned ? "✓ assigned" : "available"}
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
           )}
         </div>
       )}
@@ -431,51 +468,91 @@ export function CartPanel({
             </div>
             <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
               {waiverSpots.map((spot, i) => {
-                const cov = spotCoverage[i];
+                const assignedKey = ticketAssignments[i];
+                const assigned = assignedKey ? poolByKey.get(assignedKey) : null;
+                // Available pool members: not yet bound to a ticket,
+                // OR currently bound to THIS ticket (so the dropdown
+                // shows them as the current selection).
+                const candidates = waiverPool.filter(
+                  (p) => p.key === assignedKey || !usedKeys.has(p.key)
+                );
                 return (
                   <li
                     key={`${spot.itemId}-${i}`}
                     style={{
                       display: "flex", alignItems: "center", gap: 10,
                       padding: "10px 12px", borderRadius: 10, background: "white",
-                      border: `1.5px solid ${cov ? "#8AD5A3" : "#FFB199"}`,
+                      border: `1.5px solid ${assigned ? "#8AD5A3" : "#FFB199"}`,
                     }}
                   >
                     <div style={{
                       width: 28, height: 28, borderRadius: 6, flexShrink: 0,
-                      background: cov ? "#EAF8EF" : "#FFF0EA",
-                      color: cov ? "#137A35" : "#B83210",
+                      background: assigned ? "#EAF8EF" : "#FFF0EA",
+                      color: assigned ? "#137A35" : "#B83210",
                       display: "flex", alignItems: "center", justifyContent: "center",
                     }}>
-                      <Icon name={cov ? "check-circle-2" : "alert-triangle"} size={14} />
+                      <Icon name={assigned ? "check-circle-2" : "alert-triangle"} size={14} />
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontWeight: 700, fontSize: 13, color: "var(--ink-900)",
                         whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {spot.itemName}
                       </div>
-                      <div style={{ fontSize: 11, color: "var(--ink-500)", marginTop: 2 }}>
-                        {cov ? (
-                          <>
-                            <Icon name="user-round" size={10} style={{ verticalAlign: "-1px", marginRight: 4 }} />
-                            {cov.name}
-                            {cov.kind === "minor" && (
-                              <span style={{ marginLeft: 4, color: "var(--ink-400)" }}>· minor</span>
-                            )}
-                          </>
-                        ) : (
-                          <span style={{ color: "#B83210", fontWeight: 600 }}>No waiver linked</span>
-                        )}
-                      </div>
+                      {assigned ? (
+                        <div style={{ fontSize: 11, color: "var(--ink-500)", marginTop: 2 }}>
+                          <Icon name="user-round" size={10} style={{ verticalAlign: "-1px", marginRight: 4 }} />
+                          {assigned.name}
+                          {assigned.kind === "minor" && (
+                            <span style={{ marginLeft: 4, color: "var(--ink-400)" }}>· minor</span>
+                          )}
+                        </div>
+                      ) : (
+                        <select
+                          value=""
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            if (!v) return;
+                            if (v === "__search") {
+                              onCollectWaivers?.();
+                              return;
+                            }
+                            onAssignTicket?.(i, v);
+                          }}
+                          style={{
+                            marginTop: 4, width: "100%",
+                            fontSize: 12, padding: "4px 6px",
+                            background: "white",
+                            border: "1.5px solid var(--ink-200)",
+                            borderRadius: 6,
+                          }}
+                        >
+                          <option value="">
+                            {candidates.length > 0
+                              ? `Pick a guest (${candidates.length} available)…`
+                              : "No guest available — search waiver…"}
+                          </option>
+                          {candidates.map((p) => (
+                            <option key={p.key} value={p.key}>
+                              {p.name}
+                              {p.kind === "minor" ? " (minor)" : ""}
+                              {p.kind === "minor" ? ` · child of ${p.primaryName}` : ""}
+                            </option>
+                          ))}
+                          <option value="__search">+ Search another waiver…</option>
+                        </select>
+                      )}
                     </div>
-                    {!cov && (
+                    {assigned && (
                       <button
                         type="button"
-                        onClick={onCollectWaivers}
-                        className="a-btn a-btn--ghost a-btn--sm"
-                        style={{ flexShrink: 0 }}
+                        onClick={() => onDetachTicket?.(i)}
+                        title="Detach guest from this ticket"
+                        style={{
+                          all: "unset", cursor: "pointer", flexShrink: 0,
+                          padding: 4, color: "var(--ink-500)",
+                        }}
                       >
-                        <Icon name="search" size={12} /> Find waiver
+                        <Icon name="x" size={14} />
                       </button>
                     )}
                   </li>
