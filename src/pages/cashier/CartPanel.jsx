@@ -58,14 +58,17 @@ export function CartPanel({
   const skipPin = !!settings.allowCustomDiscountWithoutPin;
 
   // Waiver gating — sum quantities of every cart item whose product
-  // requires a waiver. The cashier must collect that many signed waivers
-  // (via lookup or send-link flow) before "Take payment" enables. The
-  // backend createBooking enforces the same rule as a safety net.
+  // requires a waiver, then compare against total spots covered by the
+  // attached guests. One guest can cover multiple spots (signer + their
+  // minors), so we count coverage not chip count. Backend createBooking
+  // recomputes from server-trusted data as a safety net.
   const waiversNeeded = items.reduce(
     (n, it) => n + (it.requiresWaiver ? it.qty : 0),
     0
   );
-  const waiversCount = Array.isArray(waiversAttached) ? waiversAttached.length : 0;
+  const waiversCount = Array.isArray(waiversAttached)
+    ? waiversAttached.reduce((n, a) => n + Math.max(1, Number(a.coverage) || 1), 0)
+    : 0;
   const waiversMissing = Math.max(0, waiversNeeded - waiversCount);
 
   const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
@@ -481,23 +484,22 @@ export function CartPanel({
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: waiversMissing > 0 ? "#B83210" : "#137A35" }}>
                 {waiversMissing > 0
-                  ? `${waiversMissing} waiver${waiversMissing === 1 ? "" : "s"} needed`
-                  : "All waivers collected"}
+                  ? `${waiversMissing} guest${waiversMissing === 1 ? "" : "s"} need waivers`
+                  : "All guests covered"}
               </div>
               <div style={{ fontSize: 11, color: "var(--ink-600)", marginTop: 2 }}>
-                {waiversCount} of {waiversNeeded} attached
+                {waiversCount} of {waiversNeeded} covered
               </div>
             </div>
-            {waiversMissing > 0 && (
-              <button
-                type="button"
-                className="a-btn a-btn--primary a-btn--sm"
-                onClick={onCollectWaivers}
-                style={{ flexShrink: 0 }}
-              >
-                <Icon name="search" size={14} /> Collect
-              </button>
-            )}
+            <button
+              type="button"
+              className="a-btn a-btn--primary a-btn--sm"
+              onClick={onCollectWaivers}
+              style={{ flexShrink: 0 }}
+            >
+              <Icon name={waiversMissing > 0 ? "user-plus" : "users"} size={14} />
+              {waiversMissing > 0 ? "Add guest" : "Manage"}
+            </button>
           </div>
         )}
         <button
@@ -506,13 +508,13 @@ export function CartPanel({
           style={{ marginTop: 10, width: "100%", justifyContent: "center", padding: "14px 18px", fontSize: 16 }}
           onClick={onCheckout}
           disabled={items.length === 0 || isSubmitting || waiversMissing > 0}
-          title={waiversMissing > 0 ? `Collect ${waiversMissing} waiver${waiversMissing === 1 ? "" : "s"} before taking payment` : undefined}
+          title={waiversMissing > 0 ? `Add ${waiversMissing} more guest${waiversMissing === 1 ? "" : "s"} with signed waivers before taking payment` : undefined}
         >
           <Icon name="credit-card" size={20} />
           {isSubmitting
             ? "Creating…"
             : waiversMissing > 0
-              ? `Collect waivers first (${waiversMissing} needed)`
+              ? `Add ${waiversMissing} more guest${waiversMissing === 1 ? "" : "s"}`
               : `Take payment · $${total.toFixed(2)}`}
         </button>
       </div>

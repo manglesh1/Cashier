@@ -254,17 +254,25 @@ export function CashierApp() {
         isAddon: String(it.productType || "").toLowerCase().includes("add"),
       }));
 
+    // Use the first attached guest as the customer-of-record on the
+    // booking. That gives the booking a real name/email/phone instead
+    // of "Walk-in XYZ", and matches what the cashier saw on screen.
+    const primaryGuest = waiversAttached[0] || null;
     const payload = {
       locationId,
       date: new Date().toISOString().slice(0, 10),
       bookingDate: new Date().toISOString().slice(0, 10),
       sessions,
-      // Backend (createBooking) gates on this for waiver-required activities.
-      waiverSignatureIds: waiversAttached,
-      guestName: member?.name || `Walk-in ${Math.random().toString(36).slice(-4).toUpperCase()}`,
-      guestEmail: member?.email || "",
-      guestPhone: member?.phone || "",
-      bookingName: member?.name || "Walk-in",
+      // Backend (createBooking) recomputes coverage from these IDs and
+      // rejects 400 if total spots covered < waiver-required quantity.
+      waiverSignatureIds: waiversAttached.map((a) => a.signatureId),
+      guestName:
+        primaryGuest?.name ||
+        member?.name ||
+        `Walk-in ${Math.random().toString(36).slice(-4).toUpperCase()}`,
+      guestEmail: primaryGuest?.contactEmail || member?.email || "",
+      guestPhone: primaryGuest?.contactPhone || member?.phone || "",
+      bookingName: primaryGuest?.name || member?.name || "Walk-in",
       source: "cashier",
       notes: `Created by ${user?.first_name || user?.name || "cashier"} at terminal ${myDevice?.deviceName || myDevice?.name || "—"}`,
       // Pricing — includes promo code if the cashier applied one in CartPanel.

@@ -3,15 +3,18 @@ import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { useLazySearchWaiversQuery } from "../../features/bookings/bookingApi";
 
-// Cart waiver collection — pre-booking version of CheckIn's WaiverLookupModal.
-// Cashier collects signed waivers (search existing or fall back to a
-// shareable link) before clicking Take payment. Selections accumulate
-// in `attached`; createBooking ships them as waiverSignatureIds and the
-// backend gates the sale on count.
+// Add-guest modal for the POS sell flow — mirrors CheckIn's
+// "Add from waiver". Cashier searches by name/phone/email, picks a
+// guest, and the guest's signed waiver attaches to the cart. Each
+// guest brings their own coverage: one waiver covers the signer plus
+// any minors listed on it, so attaching a parent with two kids fills
+// three waiver-required slots in one click. createBooking ships the
+// signature IDs as waiverSignatureIds; the backend recomputes coverage
+// from trusted data and rejects 400 if short.
 export function CartWaiverModal({
   open,
-  needed,         // total waivers required for current cart
-  attached = [],  // [{ signatureId, name, contact, minorCount }]
+  needed,         // total waivers required for current cart (= total spots)
+  attached = [],  // [{ signatureId, name, contact, coverage, minorCount, contactEmail, contactPhone }]
   onChange,       // (next) => void  (full replacement of attached array)
   onClose,
 }) {
@@ -47,6 +50,11 @@ export function CartWaiverModal({
     [attached]
   );
 
+  const totalCovered = useMemo(
+    () => attached.reduce((n, a) => n + Math.max(1, Number(a.coverage) || 1), 0),
+    [attached]
+  );
+
   const handlePick = (sig) => {
     const signatureId = Number(sig.signatureId ?? sig.id);
     if (!signatureId) return;
@@ -54,8 +62,8 @@ export function CartWaiverModal({
       toast.info("Already attached");
       return;
     }
-    if (attached.length >= needed) {
-      toast.info(`Cart only needs ${needed} waiver${needed === 1 ? "" : "s"}`);
+    if (totalCovered >= needed) {
+      toast.info(`Cart only needs ${needed} guest${needed === 1 ? "" : "s"}`);
       return;
     }
     const name =
@@ -64,13 +72,19 @@ export function CartWaiverModal({
       sig.signedByName ||
       sig.signedBy ||
       "Guest";
-    const contact =
-      sig.guest?.guestEmail || sig.email || sig.guest?.guestPhone || sig.phone || "";
+    const contactEmail = sig.guest?.guestEmail || sig.email || "";
+    const contactPhone = sig.guest?.guestPhone || sig.phone || "";
+    const contact = contactEmail || contactPhone || "";
     const minorCount = Array.isArray(sig.minors)
       ? sig.minors.length
       : Number(sig.minorCount || 0);
-    onChange([...attached, { signatureId, name, contact, minorCount }]);
-    toast.success(`Attached: ${name}`);
+    // One waiver covers the signer + any minors on it.
+    const coverage = 1 + (sig.includesMinors === false ? 0 : minorCount);
+    onChange([
+      ...attached,
+      { signatureId, name, contact, contactEmail, contactPhone, minorCount, coverage },
+    ]);
+    toast.success(`Added: ${name}${coverage > 1 ? ` · covers ${coverage} guests` : ""}`);
   };
 
   const handleRemove = (signatureId) => {
@@ -104,7 +118,7 @@ export function CartWaiverModal({
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
           <h2 style={{ margin: 0, fontFamily: "var(--font-display)", fontSize: 20, fontWeight: 800, color: "var(--ink-900)" }}>
-            Collect waivers
+            Add guest
           </h2>
           <button
             type="button"
@@ -116,7 +130,7 @@ export function CartWaiverModal({
           </button>
         </div>
         <div style={{ fontSize: 12, color: "var(--ink-500)", marginBottom: 14 }}>
-          {attached.length} of {needed} attached. Search a name, email or phone.
+          {totalCovered} of {needed} guest{needed === 1 ? "" : "s"} covered. Search a name, email or phone.
         </div>
 
         {/* Already-attached chips */}
@@ -137,9 +151,9 @@ export function CartWaiverModal({
               >
                 <Icon name="check-circle-2" size={12} style={{ color: "#137A35" }} />
                 <span>{a.name}</span>
-                {a.minorCount > 0 && (
+                {(a.coverage || 1) > 1 && (
                   <span style={{ color: "var(--ink-500)", fontWeight: 500 }}>
-                    +{a.minorCount} minor{a.minorCount === 1 ? "" : "s"}
+                    covers {a.coverage}
                   </span>
                 )}
                 <button
@@ -198,6 +212,7 @@ export function CartWaiverModal({
                 const contact =
                   sig.guest?.guestEmail || sig.email || sig.guest?.guestPhone || sig.phone || "—";
                 const minorCount = Array.isArray(sig.minors) ? sig.minors.length : Number(sig.minorCount || 0);
+                const coverage = 1 + (sig.includesMinors === false ? 0 : minorCount);
                 const expired = sig.expiredAt && new Date(sig.expiredAt) < new Date();
                 return (
                   <li key={signatureId}>
@@ -225,13 +240,21 @@ export function CartWaiverModal({
                         </div>
                         <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 1 }}>
                           {contact}
-                          {minorCount > 0 ? ` · +${minorCount} minor${minorCount === 1 ? "" : "s"}` : ""}
+                          {coverage > 1 ? ` · covers ${coverage} guests` : ""}
                           {expired ? " · expired" : ""}
                         </div>
                       </div>
-                      {isAttached && (
+                      {isAttached ? (
                         <span style={{ fontSize: 11, fontWeight: 700, color: "#137A35" }}>
-                          Attached
+                          Added
+                        </span>
+                      ) : (
+                        <span style={{
+                          fontSize: 11, fontWeight: 700, color: "var(--ink-600)",
+                          padding: "2px 8px", background: "var(--ink-25)",
+                          border: "1.5px solid var(--ink-200)", borderRadius: 999,
+                        }}>
+                          {coverage > 1 ? `+${coverage} spots` : "+1 spot"}
                         </span>
                       )}
                     </button>
@@ -293,11 +316,11 @@ export function CartWaiverModal({
             type="button"
             onClick={onClose}
             className="a-btn a-btn--primary"
-            disabled={attached.length < needed}
+            disabled={totalCovered < needed}
           >
-            {attached.length >= needed
+            {totalCovered >= needed
               ? "Done"
-              : `${needed - attached.length} more needed`}
+              : `${needed - totalCovered} more needed`}
           </button>
         </div>
       </div>
