@@ -20,6 +20,7 @@ import { Header } from "./Header";
 import { StatusPill } from "./StatusPill";
 import { Icon } from "./Icon";
 import { CartPanel } from "./CartPanel";
+import { CartWaiverModal } from "./CartWaiverModal";
 import { CatalogGrid } from "./CatalogGrid";
 import { WaveBoard } from "./WaveBoard";
 import { QuickBuilder } from "./QuickBuilder";
@@ -500,6 +501,13 @@ export function CashierApp() {
         })}
         <div style={{ flex: 1, display: "flex", minHeight: 0 }}>{body}</div>
       </main>
+      <CartWaiverModal
+        open={waiverModalOpen}
+        needed={items.reduce((n, it) => n + (it.requiresWaiver ? it.qty : 0), 0)}
+        attached={waiversAttached}
+        onChange={setWaiversAttached}
+        onClose={() => setWaiverModalOpen(false)}
+      />
     </div>
   );
 }
