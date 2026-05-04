@@ -130,6 +130,12 @@ export function CashierApp() {
   const [createdBookingId, setCreatedBookingId] = useState(null);
   const [cartPricing, setCartPricing] = useState(null);
   const [member] = useState(null);
+  // Waivers attached to the current cart. Populated by the waiver-collection
+  // modal (search existing / send link). Sent as waiverSignatureIds on
+  // createBooking; backend rejects 400 if count is short of waiver-required
+  // quantity.
+  const [waiversAttached, setWaiversAttached] = useState([]);
+  const [waiverModalOpen, setWaiverModalOpen] = useState(false);
 
   const [createBooking, { isLoading: isCreating }] = useCreateBookingMutation();
 
@@ -211,6 +217,7 @@ export function CashierApp() {
           qty: 1,
           icon: productItem.icon,
           featured: productItem.featured,
+          requiresWaiver: !!productItem.requiresWaiver,
         },
       ];
     });
@@ -248,8 +255,11 @@ export function CashierApp() {
 
     const payload = {
       locationId,
+      date: new Date().toISOString().slice(0, 10),
       bookingDate: new Date().toISOString().slice(0, 10),
       sessions,
+      // Backend (createBooking) gates on this for waiver-required activities.
+      waiverSignatureIds: waiversAttached,
       guestName: member?.name || `Walk-in ${Math.random().toString(36).slice(-4).toUpperCase()}`,
       guestEmail: member?.email || "",
       guestPhone: member?.phone || "",
@@ -277,6 +287,7 @@ export function CashierApp() {
       const bookingId = res?.data?.bookingId || res?.data?.bookingMasterId || res?.bookingId || res?.bookingMasterId || res?.id;
       setCreatedBookingId(bookingId);
       setItems([]);
+      setWaiversAttached([]); // clear after a successful sale
       toast.success(`Booking ${res?.data?.bookingNumber || ""} created`);
       // Hand off to the Payment screen which can finalize via the existing
       // booking-detail flow (link / refund). Capture endpoint comes later.
@@ -334,6 +345,8 @@ export function CashierApp() {
           onPricingChange={setCartPricing}
           variant={v.cartVariant}
           isSubmitting={isCreating}
+          waiversAttached={waiversAttached}
+          onCollectWaivers={() => setWaiverModalOpen(true)}
         />
       </>
     );

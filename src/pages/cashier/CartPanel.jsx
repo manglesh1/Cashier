@@ -33,6 +33,8 @@ export function CartPanel({
   variant = "default",
   isSubmitting = false,
   onPricingChange,         // (pricing) => void — parent uses for createBooking payload
+  waiversAttached = [],    // array of waiver signature IDs already linked
+  onCollectWaivers,        // () => void — opens waiver collection modal
 }) {
   // Discount can be one of three modes — same as PaymentTab on All Bookings.
   // Code: typed string → validated against /promos/validate → server-defined value
@@ -54,6 +56,17 @@ export function CartPanel({
   const pctLimit = Number(settings.cashierDiscountPercentLimit ?? 20);
   const amtLimit = Number(settings.cashierDiscountAmountLimit ?? 20);
   const skipPin = !!settings.allowCustomDiscountWithoutPin;
+
+  // Waiver gating — sum quantities of every cart item whose product
+  // requires a waiver. The cashier must collect that many signed waivers
+  // (via lookup or send-link flow) before "Take payment" enables. The
+  // backend createBooking enforces the same rule as a safety net.
+  const waiversNeeded = items.reduce(
+    (n, it) => n + (it.requiresWaiver ? it.qty : 0),
+    0
+  );
+  const waiversCount = Array.isArray(waiversAttached) ? waiversAttached.length : 0;
+  const waiversMissing = Math.max(0, waiversNeeded - waiversCount);
 
   const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
   const discountAmount = computeDiscountAmount(promo, subtotal);
@@ -448,15 +461,59 @@ export function CartPanel({
             </button>
           )}
         </div>
+        {waiversNeeded > 0 && (
+          <div
+            style={{
+              marginTop: 10,
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: `1.5px solid ${waiversMissing > 0 ? "#FFB199" : "#8AD5A3"}`,
+              background: waiversMissing > 0 ? "#FFF0EA" : "#EAF8EF",
+              display: "flex", alignItems: "center", gap: 10,
+            }}
+          >
+            <Icon
+              name={waiversMissing > 0 ? "alert-triangle" : "check-circle-2"}
+              size={18}
+              stroke={2.5}
+              style={{ color: waiversMissing > 0 ? "#B83210" : "#137A35", flexShrink: 0 }}
+            />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: waiversMissing > 0 ? "#B83210" : "#137A35" }}>
+                {waiversMissing > 0
+                  ? `${waiversMissing} waiver${waiversMissing === 1 ? "" : "s"} needed`
+                  : "All waivers collected"}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--ink-600)", marginTop: 2 }}>
+                {waiversCount} of {waiversNeeded} attached
+              </div>
+            </div>
+            {waiversMissing > 0 && (
+              <button
+                type="button"
+                className="a-btn a-btn--primary a-btn--sm"
+                onClick={onCollectWaivers}
+                style={{ flexShrink: 0 }}
+              >
+                <Icon name="search" size={14} /> Collect
+              </button>
+            )}
+          </div>
+        )}
         <button
           type="button"
           className="a-btn a-btn--primary"
           style={{ marginTop: 10, width: "100%", justifyContent: "center", padding: "14px 18px", fontSize: 16 }}
           onClick={onCheckout}
-          disabled={items.length === 0 || isSubmitting}
+          disabled={items.length === 0 || isSubmitting || waiversMissing > 0}
+          title={waiversMissing > 0 ? `Collect ${waiversMissing} waiver${waiversMissing === 1 ? "" : "s"} before taking payment` : undefined}
         >
           <Icon name="credit-card" size={20} />
-          {isSubmitting ? "Creating…" : `Take payment · $${total.toFixed(2)}`}
+          {isSubmitting
+            ? "Creating…"
+            : waiversMissing > 0
+              ? `Collect waivers first (${waiversMissing} needed)`
+              : `Take payment · $${total.toFixed(2)}`}
         </button>
       </div>
 
