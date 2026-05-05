@@ -32,6 +32,7 @@ import { ShiftClose } from "./ShiftClose";
 import { Refund } from "./Refund";
 import { WaiverDetail } from "./WaiverDetail";
 import { Redeem } from "./Redeem";
+import { VoucherCounter } from "./VoucherCounter";
 import BookingDetail from "./BookingDetail";
 import {
   useGetAllPosDevicesQuery,
@@ -429,6 +430,7 @@ export function CashierApp() {
     { id: "sell", label: "Sell", icon: "ticket" },
     { id: "find", label: "Find", icon: "search" },
     { id: "redeem", label: "Redeem", icon: "qr-code" },
+    { id: "vouchers", label: "Vouchers", icon: "ticket" },
     { id: "checkin", label: "Check-in", icon: "log-in" },
     { id: "guest", label: "Guest", icon: "user-round" },
     { id: "waiver", label: "Waiver", icon: "shield-alert" },
@@ -505,6 +507,15 @@ export function CashierApp() {
         breadcrumb="GATE · REDEMPTION"
         title="Scan ticket"
         subtitle="Wristband / QR / typed code"
+      />
+    );
+  } else if (screen === "vouchers") {
+    body = <VoucherCounter />;
+    header = (
+      <Header
+        breadcrumb="COUNTER · VOUCHERS"
+        title="Voucher counter"
+        subtitle="Stock-item credits + slot-bound voucher lookup"
       />
     );
   } else if (screen === "checkin") {
