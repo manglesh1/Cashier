@@ -24,6 +24,30 @@ export const voucherApi = baseApi.injectEndpoints({
         body: { quantity },
       }),
     }),
+
+    // Membership scan + redeem (digital-pass flow).
+    redeemMembership: builder.mutation({
+      query: ({ membershipId, activityId = null }) => ({
+        url: `/memberships/${membershipId}/redeem`,
+        method: "POST",
+        body: { activityId },
+      }),
+    }),
+
+    // Gift card lookup + redeem (apply-at-checkout flow).
+    lookupGiftCard: builder.query({
+      query: ({ code, pin = null }) => ({
+        url: "/gift-cards/lookup",
+        params: pin ? { code, pin } : { code },
+      }),
+    }),
+    redeemGiftCard: builder.mutation({
+      query: (body) => ({
+        url: "/gift-cards/redeem",
+        method: "POST",
+        body,
+      }),
+    }),
   }),
 });
 
@@ -31,4 +55,7 @@ export const {
   useLookupVoucherByTokenQuery,
   useLazyLookupVoucherByTokenQuery,
   useRedeemEntitlementMutation,
+  useRedeemMembershipMutation,
+  useLazyLookupGiftCardQuery,
+  useRedeemGiftCardMutation,
 } = voucherApi;
