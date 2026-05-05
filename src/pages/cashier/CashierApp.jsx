@@ -68,6 +68,7 @@ function pickItemIcon(productType = "") {
   const t = String(productType).toLowerCase();
   if (t.includes("session")) return "user-round";
   if (t.includes("party")) return "cake";
+  if (t.includes("voucher")) return "gift";
   if (t.includes("add")) return "plus-circle";
   if (t.includes("stock")) return "shopping-bag";
   return "ticket";
@@ -79,23 +80,51 @@ function normalizePresetSections(preset) {
     title: sec.sectionName || sec.name || `Section ${i + 1}`,
     icon: pickSectionIcon(sec.sectionName || sec.name || ""),
     tone: SECTION_TONES[i % SECTION_TONES.length],
-    items: (sec.activities || sec.products || sec.items || []).map((p) => ({
-      // Preserve every backend identifier we'll need to build a booking payload
-      id: p.productItemId || p.id || `${sec.sectionId}-${p.activityId || p.productId}`,
-      activityId: p.activityId || p.productId,
-      variationId: p.variationId,
-      productItemId: p.productItemId,
-      productType: p.productType || p.type,
-      name: p.displayName || p.activityName || p.productName || p.name || "Untitled",
-      sub: p.description || p.subtitle || "",
-      price: Number(p.price ?? p.unitPrice ?? p.basePrice ?? NaN),
-      icon: pickItemIcon(p.productType || p.type),
-      badge: p.featured ? "POPULAR" : undefined,
-      featured: p.featured,
-      // Activity-level waiver requirement. Drives cart waiver gating.
-      requiresWaiver: !!p.requiresWaiver,
-      raw: p,
-    })),
+    items: (sec.activities || sec.products || sec.items || []).map((p) => {
+      const productType = p.productType || p.type;
+      const isVoucherPack = productType === "voucher_pack";
+      const voucherMeta = isVoucherPack ? p.voucherMeta : null;
+
+      // Voucher pack subtitle = inclusion summary (e.g. "5× Jump Pass + 1× Pizza")
+      // or fall back to whatever description the activity has.
+      const sub = voucherMeta?.inclusionSummary
+        ? voucherMeta.inclusionSummary
+        : p.description || p.subtitle || "";
+
+      // Badge precedence:
+      //   featured → "POPULAR"
+      //   voucher pack with meaningful savings → "SAVE $N"
+      //   voucher pack with no/zero savings   → "BUNDLE"
+      let badge;
+      if (p.featured) {
+        badge = "POPULAR";
+      } else if (isVoucherPack && voucherMeta?.savings > 0) {
+        badge = `SAVE $${Math.round(voucherMeta.savings)}`;
+      } else if (isVoucherPack) {
+        badge = "BUNDLE";
+      }
+
+      return {
+        // Preserve every backend identifier we'll need to build a booking payload
+        id: p.productItemId || p.id || `${sec.sectionId}-${p.activityId || p.productId}`,
+        activityId: p.activityId || p.productId,
+        variationId: p.variationId,
+        productItemId: p.productItemId,
+        productType,
+        name: p.displayName || p.activityName || p.productName || p.name || "Untitled",
+        sub,
+        price: Number(p.price ?? p.unitPrice ?? p.basePrice ?? NaN),
+        icon: pickItemIcon(productType),
+        badge,
+        featured: p.featured,
+        // Activity-level waiver requirement. Drives cart waiver gating.
+        requiresWaiver: !!p.requiresWaiver,
+        // Voucher pack hint: cart logic skips date/slot picker for these.
+        isVoucherPack,
+        voucherMeta,
+        raw: p,
+      };
+    }),
   }));
 }
 
