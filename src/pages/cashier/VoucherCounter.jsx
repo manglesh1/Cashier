@@ -531,6 +531,89 @@ export function VoucherCounter() {
               {redeemingMembership ? "Checking in…" : "Check in"}
             </button>
           </div>
+
+          {Array.isArray(active.todaysBenefits) &&
+            active.todaysBenefits.length > 0 && (
+              <div
+                style={{
+                  marginTop: 16,
+                  paddingTop: 12,
+                  borderTop: "1px dashed rgba(99,102,241,0.3)",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 800,
+                    letterSpacing: "0.08em",
+                    textTransform: "uppercase",
+                    color: "var(--text-muted)",
+                    marginBottom: 8,
+                  }}
+                >
+                  Today's benefits
+                </div>
+                <div style={{ display: "grid", gap: 6 }}>
+                  {active.todaysBenefits.map((b, i) => {
+                    const exhausted =
+                      b.qtyPerDay && b.remainingToday === 0;
+                    return (
+                      <div
+                        key={i}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "8px 12px",
+                          borderRadius: 8,
+                          background: exhausted
+                            ? "rgba(0,0,0,0.04)"
+                            : "rgba(99,102,241,0.08)",
+                          border: `1.5px solid ${
+                            exhausted
+                              ? "rgba(0,0,0,0.08)"
+                              : "rgba(99,102,241,0.2)"
+                          }`,
+                          opacity: exhausted ? 0.5 : 1,
+                        }}
+                      >
+                        <div style={{ fontSize: 13 }}>
+                          <div style={{ fontWeight: 600 }}>{b.label}</div>
+                          <div
+                            style={{
+                              fontSize: 11,
+                              color: "var(--text-muted)",
+                              marginTop: 2,
+                            }}
+                          >
+                            {b.discountPct === 100
+                              ? "Free"
+                              : `${b.discountPct}% off`}
+                            {b.validFrom || b.validUntil
+                              ? ` · ${b.validFrom || "—"}–${b.validUntil || "—"}`
+                              : ""}
+                          </div>
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 12,
+                            color: exhausted
+                              ? "var(--color-danger, #c00)"
+                              : "var(--text-muted)",
+                            fontWeight: 600,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {b.qtyPerDay
+                            ? `${b.remainingToday} of ${b.qtyPerDay} left`
+                            : "Unlimited"}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
         </div>
       )}
 
