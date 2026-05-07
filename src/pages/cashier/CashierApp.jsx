@@ -164,12 +164,14 @@ export function CashierApp() {
   // CashierPaymentDialog opens. Same UX as the check-in screen's "Take
   // payment" modal.
   const [paymentBooking, setPaymentBooking] = useState(null);
+  const [pendingPaymentBooking, setPendingPaymentBooking] = useState(null);
   const [cartPricing, setCartPricing] = useState(null);
   const [member] = useState(null);
   // Waivers attached to the current cart. Populated by the waiver-collection
   // modal (search existing / send link). Sent as waiverSignatureIds on
   // createBooking; backend rejects 400 if total spot coverage is short.
   const [waiversAttached, setWaiversAttached] = useState([]);
+  const [cartCustomer, setCartCustomer] = useState(null);
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
   // Per-ticket assignment of waiver-pool people to waiver-required spots.
   // Map<ticketIndex, "signatureId:role"> where role is "signer" or
@@ -183,16 +185,17 @@ export function CashierApp() {
   const waiverPool = useMemo(() => {
     const out = [];
     for (const w of waiversAttached) {
-      out.push({
+      const signer = {
         key: `${w.signatureId}:signer`,
         signatureId: w.signatureId,
         kind: "signer",
         name: w.name,
         primaryName: w.name,
-      });
+      };
       const minors = Array.isArray(w.minors) ? w.minors : [];
+      const minorPeople = [];
       for (let i = 0; i < minors.length; i += 1) {
-        out.push({
+        minorPeople.push({
           key: `${w.signatureId}:minor:${i}`,
           signatureId: w.signatureId,
           kind: "minor",
@@ -200,6 +203,15 @@ export function CashierApp() {
           primaryName: w.name,
         });
       }
+      const people = [signer, ...minorPeople];
+      const preferredIndex = people.findIndex(
+        (person) => person.key === w.preferredAssignmentKey
+      );
+      if (preferredIndex > 0) {
+        const [preferred] = people.splice(preferredIndex, 1);
+        people.unshift(preferred);
+      }
+      out.push(...people);
     }
     return out;
   }, [waiversAttached]);
@@ -343,6 +355,10 @@ export function CashierApp() {
       toast.error("No location selected");
       return;
     }
+    if (pendingPaymentBooking?.bookingId) {
+      setPaymentBooking(pendingPaymentBooking);
+      return;
+    }
 
     const sessions = items
       .filter((it) => it.activityId)
@@ -356,7 +372,7 @@ export function CashierApp() {
     // Use the first attached guest as the customer-of-record on the
     // booking. That gives the booking a real name/email/phone instead
     // of "Walk-in XYZ", and matches what the cashier saw on screen.
-    const primaryGuest = waiversAttached[0] || null;
+    const primaryGuest = cartCustomer || waiversAttached[0] || null;
     // Only send signature IDs that are actually bound to a ticket.
     // The pool can hold extra people (e.g. cashier added a waiver
     // covering 3 but only 2 spots needed); the backend should only
@@ -416,21 +432,20 @@ export function CashierApp() {
       const res = await createBooking(payload).unwrap();
       const bookingId = res?.data?.bookingId || res?.data?.bookingMasterId || res?.bookingId || res?.bookingMasterId || res?.id;
       setCreatedBookingId(bookingId);
-      setItems([]);
-      setWaiversAttached([]); // clear after a successful sale
-      setTicketAssignments({});
-      toast.success(`Booking ${res?.data?.bookingNumber || ""} created`);
+      toast.success(`Booking ${res?.data?.bookingNumber || res?.bookingNumber || ""} created`);
       // Open the same payment dialog that check-in uses. Booking object
       // carries everything the dialog needs (id, number, totals).
       const data = res?.data || {};
-      setPaymentBooking({
+      const bookingForPayment = {
         bookingId,
-        bookingNumber: data.bookingNumber || "",
-        totalAmount: Number(data.totalAmount ?? cartPricing?.total ?? 0),
-        balanceDue: Number(data.balanceDue ?? data.totalAmount ?? cartPricing?.total ?? 0),
+        bookingNumber: data.bookingNumber || res?.bookingNumber || "",
+        totalAmount: Number(data.totalAmount ?? res?.totalAmount ?? cartPricing?.total ?? 0),
+        balanceDue: Number(data.balanceDue ?? res?.balanceDue ?? data.totalAmount ?? res?.totalAmount ?? cartPricing?.total ?? 0),
         subTotal: Number(data.subTotal ?? cartPricing?.subtotal ?? 0),
         taxAmount: Number(data.taxAmount ?? cartPricing?.tax ?? 0),
-      });
+      };
+      setPendingPaymentBooking(bookingForPayment);
+      setPaymentBooking(bookingForPayment);
     } catch (err) {
       const msg = err?.data?.message || err?.data?.error || err?.message || "Failed to create booking";
       toast.error(msg);
@@ -486,6 +501,7 @@ export function CashierApp() {
           variant={v.cartVariant}
           isSubmitting={isCreating}
           waiversAttached={waiversAttached}
+          cartCustomer={cartCustomer}
           onCollectWaivers={() => setWaiverModalOpen(true)}
           onChangeWaivers={setWaiversAttached}
           waiverPool={waiverPool}
@@ -654,7 +670,7 @@ export function CashierApp() {
           <span style={{ fontSize: 10, fontWeight: 700 }}>End shift</span>
         </button>
       </aside>
-      <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+      <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
         {/* Inject location + terminal name into every Header so the cashier
             always sees which location / lane they're operating from. Falls
             back to the auth locations list when an older paired snapshot
@@ -669,13 +685,16 @@ export function CashierApp() {
           ),
           terminal: header.props.terminal ?? (myDevice?.deviceName || myDevice?.name),
         })}
-        <div style={{ flex: 1, display: "flex", minHeight: 0 }}>{body}</div>
+        <div style={{ flex: 1, display: "flex", minHeight: 0, overflow: "auto" }}>{body}</div>
       </main>
       <CartWaiverModal
         open={waiverModalOpen}
         needed={items.reduce((n, it) => n + (it.requiresWaiver ? it.qty : 0), 0)}
         attached={waiversAttached}
-        onChange={setWaiversAttached}
+        onChange={(next) => {
+          setWaiversAttached(next);
+          setCartCustomer((current) => current || next[0] || null);
+        }}
         onClose={() => setWaiverModalOpen(false)}
       />
       <CashierPaymentDialog
@@ -683,7 +702,12 @@ export function CashierApp() {
         booking={paymentBooking}
         onClose={() => setPaymentBooking(null)}
         onComplete={() => {
+          setItems([]);
+          setWaiversAttached([]);
+          setCartCustomer(null);
+          setTicketAssignments({});
           setPaymentBooking(null);
+          setPendingPaymentBooking(null);
           setCreatedBookingId(null);
         }}
       />

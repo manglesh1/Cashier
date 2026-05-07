@@ -101,9 +101,9 @@ export const bookingApi = baseApi.injectEndpoints({
     }),
     // Lookup signed waivers in this location (cashier search modal)
     searchWaivers: builder.query({
-      query: ({ search = "", limit = 12 } = {}) => ({
+      query: ({ search = "", limit = 12, contactOnly = false } = {}) => ({
         url: "/waivers/holders",
-        params: { search, limit, status: "active" },
+        params: { search, limit, status: "active", contactOnly: contactOnly ? 1 : undefined },
       }),
     }),
     linkParticipantFromWaiver: builder.mutation({

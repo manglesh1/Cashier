@@ -34,6 +34,7 @@ export function CartPanel({
   isSubmitting = false,
   onPricingChange,         // (pricing) => void — parent uses for createBooking payload
   waiversAttached = [],    // [{ signatureId, name, coverage, minors: [{name}], ... }]
+  cartCustomer = null,
   onCollectWaivers,        // () => void — opens waiver collection modal
   onChangeWaivers,         // (next) => void — full replacement of waiver list
   waiverPool = [],         // [{ key, name, kind, signatureId, primaryName }]
@@ -105,7 +106,7 @@ export function CartPanel({
   );
   const waiversMissing = Math.max(0, waiversNeeded - waiversCount);
 
-  const primaryCustomer = waiversAttached[0] || null;
+  const primaryCustomer = cartCustomer || waiversAttached[0] || null;
   const removeWaiver = (signatureId) => {
     if (!onChangeWaivers) return;
     onChangeWaivers(
@@ -308,6 +309,8 @@ export function CartPanel({
   const isBold = variant === "bold";
   const panelStyle = {
     width: 460, flexShrink: 0,
+    minHeight: 0,
+    alignSelf: "stretch",
     background: "var(--ink-0)",
     border: isBold ? "2px solid var(--ink-800)" : "1px solid var(--ink-100)",
     borderRadius: isBold ? 24 : 20,
@@ -325,6 +328,7 @@ export function CartPanel({
         color: isBold ? "#fff" : "var(--ink-800)",
         display: "flex", alignItems: "center", justifyContent: "space-between",
         borderBottom: isBold ? "2px solid var(--ink-800)" : "1px solid var(--ink-100)",
+        flexShrink: 0,
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <Icon name="shopping-bag" size={22} />
@@ -349,6 +353,7 @@ export function CartPanel({
           padding: "12px 18px",
           background: primaryCustomer ? "#EAF8EF" : "var(--ink-25)",
           borderBottom: "1px solid var(--ink-100)",
+          flexShrink: 0,
         }}>
           <div style={{
             display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
@@ -356,7 +361,7 @@ export function CartPanel({
           }}>
             <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".06em",
               textTransform: "uppercase", color: "var(--ink-500)" }}>
-              Customer{waiversAttached.length > 1 ? "s" : ""}
+              Customer
             </div>
             <button
               type="button"
@@ -365,17 +370,22 @@ export function CartPanel({
               style={{ flexShrink: 0 }}
             >
               <Icon name="user-plus" size={14} />
-              {waiversAttached.length === 0 ? "Add customer" : "Add another"}
+              {primaryCustomer ? "Add waiver" : "Add customer"}
             </button>
           </div>
 
-          {waiversAttached.length === 0 ? (
+          {!primaryCustomer ? (
             <div style={{ fontSize: 13, color: "var(--ink-600)" }}>
-              Add a guest with a signed waiver to start covering tickets.
+              Add the booking customer with a signed waiver to start covering tickets.
             </div>
           ) : (
             <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
-              {waiversAttached.map((w) => {
+              {(() => {
+                const w =
+                  waiversAttached.find(
+                    (waiver) =>
+                      Number(waiver.signatureId) === Number(primaryCustomer.signatureId)
+                  ) || primaryCustomer;
                 const minors = Array.isArray(w.minors) ? w.minors : [];
                 const signerKey = `${w.signatureId}:signer`;
                 const signerAssigned = usedKeys.has(signerKey);
@@ -390,6 +400,9 @@ export function CartPanel({
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink-900)" }}>
                           {w.name}
+                          <span style={{ marginLeft: 6, fontSize: 10, color: "var(--ink-500)", fontWeight: 700 }}>
+                            customer
+                          </span>
                         </div>
                         <div style={{ fontSize: 10, color: signerAssigned ? "#137A35" : "var(--ink-500)" }}>
                           {signerAssigned ? "✓ assigned to a ticket" : "available"}
@@ -398,7 +411,7 @@ export function CartPanel({
                       <button
                         type="button"
                         onClick={() => removeWaiver(w.signatureId)}
-                        title="Remove customer (frees their tickets)"
+                        title="Remove waiver coverage; booking customer stays"
                         style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)", padding: 4 }}
                       >
                         <Icon name="x" size={14} />
@@ -430,14 +443,14 @@ export function CartPanel({
                     )}
                   </li>
                 );
-              })}
+              })()}
             </ul>
           )}
         </div>
       )}
 
       {/* items */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "14px 18px", display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ flex: "1 1 0", minHeight: 0, overflowY: "auto", padding: "14px 18px", display: "flex", flexDirection: "column", gap: 10 }}>
         {items.length === 0 && (
           <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--ink-400)" }}>
             <Icon name="shopping-bag" size={42} stroke={1.5} />
@@ -696,6 +709,7 @@ export function CartPanel({
         padding: "16px 22px",
         background: "var(--ink-50)",
         borderTop: "1px solid var(--ink-100)",
+        flexShrink: 0,
       }}>
         <Totals
           subtotal={subtotal}

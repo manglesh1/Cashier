@@ -45,6 +45,28 @@ const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
 
 const fmtTime = (range) => (range || "").split(/[–-]/)[0].trim() || "—";
 
+
+const redeemReasonLabel = (reason) => {
+  const labels = {
+    requires_waiver: "waiver required",
+    not_yet_valid: "too early",
+    expired: "expired",
+    voided: "voided",
+    refunded: "refunded",
+    already_redeemed: "already redeemed",
+    requires_manager_override: "manager override required",
+  };
+  return labels[reason] || reason || "failed";
+};
+
+const completedWithinHours = (booking, hours = 2) => {
+  const value = booking.lastCheckedInAt || booking.completedAt || booking.checkedInAt;
+  if (!value) return false;
+  const completedAt = new Date(value);
+  if (Number.isNaN(completedAt.getTime())) return false;
+  return Date.now() - completedAt.getTime() <= hours * 60 * 60 * 1000;
+};
+
 function triggerCashDrawer({ bookingId, terminal }) {
   const payload = {
     bookingId,
@@ -63,6 +85,7 @@ function triggerCashDrawer({ bookingId, terminal }) {
 export function CheckIn() {
   const { searchTerm, inputValue, setDebouncedSearch } = useDebounceSearch(400);
   const [selected, setSelected] = useState(null);
+  const [bookingBucket, setBookingBucket] = useState("upcoming");
 
   const { data, isLoading, refetch } = useGetAllBookingQuery({
     page: 1,
@@ -92,14 +115,34 @@ export function CheckIn() {
         _arrival: parseTime(b.timeRange),
         _waiverComplete: !b.waiverRequired || (b.signedWaivers ?? 0) >= (b.totalGuests ?? 0),
         _isPaid: String(b.paymentStatus || "").toLowerCase() === "paid",
+        _totalGuests: Number(b.totalGuests || 0),
+        _checkedInGuests: Number(b.checkedInGuests || 0),
       }))
       .sort((a, b) => (a._arrival || 9e15) - (b._arrival || 9e15))
       .map((b) => ({
         ...b,
         _isUpcoming: b._arrival && b._arrival > now,
         _isLate: b._arrival && b._arrival < now,
+        _isCompleted: b._totalGuests > 0 && b._checkedInGuests >= b._totalGuests,
+        _isInProgress: b._checkedInGuests > 0 && b._checkedInGuests < b._totalGuests,
       }));
   }, [bookings]);
+
+  const bookingBuckets = useMemo(() => {
+    const buckets = {
+      upcoming: [],
+      inProgress: [],
+      completed: [],
+    };
+    partition.forEach((b) => {
+      if (b._isCompleted && completedWithinHours(b, 2)) buckets.completed.push(b);
+      else if (b._isInProgress) buckets.inProgress.push(b);
+      else buckets.upcoming.push(b);
+    });
+    return buckets;
+  }, [partition]);
+
+  const visibleBookings = bookingBuckets[bookingBucket] || [];
 
   const totalToday = stats.total ?? bookings.length;
   // Cheap proxy for "checked in" — bookings whose all participants are checked in.
@@ -150,15 +193,50 @@ export function CheckIn() {
 
       {/* Body — list (left) + selected detail (right) */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
-        <div style={{ flex: 1, overflowY: "auto", padding: "16px 28px", borderRight: "1px solid var(--ink-100)" }}>
+        <div style={{
+          width: 360,
+          flex: "0 0 360px",
+          overflowY: "auto",
+          padding: "12px 14px 12px 18px",
+          borderRight: "1px solid var(--ink-100)",
+          background: "var(--ink-25)",
+        }}>
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+            gap: 6,
+            marginBottom: 10,
+          }}>
+            <BookingBucketTab
+              label="Upcoming"
+              count={bookingBuckets.upcoming.length}
+              active={bookingBucket === "upcoming"}
+              onClick={() => setBookingBucket("upcoming")}
+            />
+            <BookingBucketTab
+              label="In Progress"
+              count={bookingBuckets.inProgress.length}
+              active={bookingBucket === "inProgress"}
+              onClick={() => setBookingBucket("inProgress")}
+            />
+            <BookingBucketTab
+              label="Completed"
+              count={bookingBuckets.completed.length}
+              active={bookingBucket === "completed"}
+              onClick={() => setBookingBucket("completed")}
+            />
+          </div>
+
           {isLoading ? (
             <div style={{ padding: 32, textAlign: "center", color: "var(--ink-500)" }}>Loading…</div>
-          ) : partition.length === 0 ? (
+          ) : visibleBookings.length === 0 ? (
             <div style={{ padding: 32, textAlign: "center", color: "var(--ink-500)" }}>
-              No bookings match.
+              {bookingBucket === "completed"
+                ? "No bookings completed in the last 2 hours."
+                : `No ${bookingBucket === "inProgress" ? "in progress" : bookingBucket} bookings.`}
             </div>
           ) : (
-            partition.map((b) => (
+            visibleBookings.map((b) => (
               <BookingRow
                 key={b.bookingId}
                 b={b}
@@ -168,7 +246,18 @@ export function CheckIn() {
             ))
           )}
         </div>
-        <aside style={{ width: 720, overflowY: "auto", padding: "16px 22px", background: "var(--ink-25)" }}>
+        <aside
+          style={{
+            flex: 1,
+            overflow: "hidden",
+            padding: 0,
+            background: "var(--ink-25)",
+            display: "flex",
+            flexDirection: "column",
+            minHeight: 0,
+            minWidth: 0,
+          }}
+        >
           {selected ? (
             <SelectedBookingDetail booking={selected} onCheckedIn={() => { refetch(); }} />
           ) : (
@@ -215,6 +304,35 @@ function Stat({ label, value, fg }) {
   );
 }
 
+function BookingBucketTab({ label, count, active, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        appearance: "none",
+        border: active ? "2px solid var(--aero-orange-500)" : "1.5px solid var(--ink-200)",
+        borderRadius: 10,
+        background: active ? "var(--aero-orange-50)" : "white",
+        color: active ? "var(--aero-orange-700)" : "var(--ink-700)",
+        padding: "8px 6px",
+        cursor: "pointer",
+        display: "grid",
+        gap: 2,
+        justifyItems: "center",
+        minWidth: 0,
+      }}
+    >
+      <span style={{ fontSize: 10, fontWeight: 900, lineHeight: 1.1, whiteSpace: "nowrap" }}>
+        {label}
+      </span>
+      <span style={{ fontSize: 17, fontWeight: 950, fontFamily: "var(--font-display, inherit)", lineHeight: 1 }}>
+        {count}
+      </span>
+    </button>
+  );
+}
+
 function BookingRow({ b, isSelected, onClick }) {
   const tone = b._waiverComplete ? "success" : "danger";
   const waiverLabel = b._waiverComplete
@@ -225,14 +343,17 @@ function BookingRow({ b, isSelected, onClick }) {
     <div
       onClick={onClick}
       style={{
-        display: "flex",
+        display: "grid",
+        gridTemplateColumns: "54px minmax(0, 1fr) 18px",
+        gridTemplateRows: "auto auto auto",
+        columnGap: 10,
+        rowGap: 7,
         alignItems: "center",
-        gap: 14,
-        padding: "14px 16px",
-        marginBottom: 10,
+        padding: "12px 12px",
+        marginBottom: 8,
         background: isSelected ? "var(--aero-orange-50)" : "#fff",
         border: isSelected ? "2px solid var(--aero-orange-500)" : "1.5px solid var(--ink-200)",
-        borderRadius: 14,
+        borderRadius: 12,
         cursor: "pointer",
       }}
     >
@@ -242,22 +363,53 @@ function BookingRow({ b, isSelected, onClick }) {
           fontWeight: 700,
           fontSize: 13,
           color: b._isLate ? "var(--color-danger)" : b._isUpcoming ? "var(--aero-orange-600)" : "var(--ink-700)",
-          minWidth: 56,
+          gridColumn: "1",
+          gridRow: "1 / span 3",
+          alignSelf: "center",
         }}
       >
         {fmtTime(b.timeRange)}
       </div>
-      <div style={{ flex: 1, lineHeight: 1.3, minWidth: 0 }}>
-        <div style={{ fontWeight: 700, fontSize: 15, color: "var(--ink-900)" }}>
+      <div style={{ gridColumn: "2", gridRow: "1", lineHeight: 1.25, minWidth: 0 }}>
+        <div style={{
+          fontWeight: 800,
+          fontSize: 14,
+          color: "var(--ink-900)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}>
           {b.bookingName || "Walk-in"}
         </div>
-        <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 2 }}>
-          {b.bookingNumber} · {b.totalGuests || 0} pax · {b.activityName || "—"}
-        </div>
       </div>
-      <StatusPill tone={tone}>{waiverLabel}</StatusPill>
-      {!b._isPaid && <StatusPill tone="danger">Unpaid</StatusPill>}
-      <Icon name="chevron-right" size={20} style={{ color: "var(--ink-400)" }} />
+      <div style={{
+        gridColumn: "2",
+        gridRow: "2",
+        fontSize: 11,
+        lineHeight: 1.25,
+        color: "var(--ink-500)",
+        display: "flex",
+        gap: 6,
+        minWidth: 0,
+      }}>
+        <span style={{ fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {b.bookingNumber}
+        </span>
+        <span style={{ flexShrink: 0 }}>{b.totalGuests || 0} pax</span>
+      </div>
+      <div style={{
+        gridColumn: "2",
+        gridRow: "3",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        minWidth: 0,
+        overflow: "hidden",
+      }}>
+        <StatusPill tone={tone}>{waiverLabel}</StatusPill>
+        {!b._isPaid && <StatusPill tone="danger">Unpaid</StatusPill>}
+      </div>
+      <Icon name="chevron-right" size={18} style={{ color: "var(--ink-400)", gridColumn: "3", gridRow: "1 / span 3", justifySelf: "end" }} />
     </div>
   );
 }
@@ -300,7 +452,6 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const remaining = Math.max(0, totalCount - redeemedCount);
   const balanceDue = Math.max(0, Number(booking.balance || 0));
   const isFullyCheckedIn = totalCount > 0 && redeemedCount >= totalCount;
-  const canTakePayment = isFullyCheckedIn && balanceDue > 0;
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
   const [removeParticipant] = useRemoveParticipantMutation();
 
@@ -447,7 +598,8 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     if (selectedCodes.size === 0) return;
     const terminal = getTerminal();
     const codes = [...selectedCodes];
-    let ok = 0; let fail = 0;
+    let ok = 0;
+    const failures = [];
     for (const code of codes) {
       try {
         await redeemTicket({
@@ -457,11 +609,23 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           allowEarlyCheckIn: true,
         }).unwrap();
         ok++;
-      } catch { fail++; }
+      } catch (err) {
+        failures.push({
+          code,
+          reason: err?.data?.reason || err?.data?.error || err?.data?.message || "failed",
+        });
+      }
     }
     setSelectedCodes(new Set());
     refresh();
-    toast.success(`Redeemed ${ok}${fail ? ` · ${fail} failed` : ""}`);
+    if (failures.length === 0) {
+      toast.success(`Redeemed ${ok}`);
+      return;
+    }
+    const firstReason = redeemReasonLabel(failures[0]?.reason);
+    const message = `Redeemed ${ok} - ${failures.length} failed (${firstReason})`;
+    if (ok > 0) toast.warning(message);
+    else toast.error(message);
   };
 
   const handleRedeemAll = async () => {
@@ -473,24 +637,28 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       );
     }
     const terminal = getTerminal();
-    const promise = checkInAll({
-      bookingId: booking.bookingId,
-      terminalDeviceId: terminal?.deviceId || null,
-      gateOrZone: terminal?.deviceName || "Cashier check-in",
-      allowEarlyCheckIn: true,
-    }).unwrap();
-    toast.promise(promise, {
-      loading: "Redeeming all…",
-      success: (res) => {
-        refresh();
-        const succ = res?.succeeded ?? 0;
-        const att = res?.attempted ?? 0;
-        const blocked = (res?.results || []).filter((r) => r.reason === "requires_waiver").length;
-        const tail = blocked > 0 ? ` · ${blocked} blocked by waiver` : "";
-        return `Redeemed ${succ} of ${att}${tail}`;
-      },
-      error: (err) => err?.data?.error || "Redeem failed",
-    });
+    const toastId = toast.loading("Redeeming all...");
+    try {
+      const res = await checkInAll({
+        bookingId: booking.bookingId,
+        terminalDeviceId: terminal?.deviceId || null,
+        gateOrZone: terminal?.deviceName || "Cashier check-in",
+        allowEarlyCheckIn: true,
+      }).unwrap();
+      refresh();
+      const succ = res?.succeeded ?? 0;
+      const att = res?.attempted ?? 0;
+      const failures = (res?.results || []).filter((r) => !r.ok);
+      const blocked = failures.filter((r) => r.reason === "requires_waiver").length;
+      const firstReason = redeemReasonLabel(failures[0]?.reason);
+      const tail = blocked > 0 ? ` - ${blocked} blocked by waiver` : failures.length > 0 ? ` - ${failures.length} failed (${firstReason})` : "";
+      const message = `Redeemed ${succ} of ${att}${tail}`;
+      if (succ === 0 && failures.length > 0) toast.error(message, { id: toastId });
+      else if (failures.length > 0) toast.warning(message, { id: toastId });
+      else toast.success(message, { id: toastId });
+    } catch (err) {
+      toast.error(err?.data?.error || err?.data?.message || err?.message || "Redeem failed", { id: toastId });
+    }
   };
 
   const openPayment = () => {
@@ -591,7 +759,17 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   };
 
   return (
-    <div>
+    <div style={{ height: "100%", minHeight: 0, display: "flex", overflow: "hidden" }}>
+      <section
+        style={{
+          flex: 1,
+          minWidth: 0,
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+          padding: "12px 14px",
+        }}
+      >
       {/* Booking header */}
       <div style={{ marginBottom: 14, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
         <div style={{ minWidth: 0 }}>
@@ -616,11 +794,12 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       </div>
 
       {/* Toolbar — ROLLER-style: select all + hide checked-in + batch redeem */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 12 }}>
       <div style={{
         display: "grid",
         gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-        gap: 8,
-        marginBottom: 10,
+        gap: 7,
+        marginBottom: 8,
       }}>
         <CloseoutPill label="Waivers" value="Ready" tone="success" />
         <CloseoutPill
@@ -634,14 +813,6 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           tone={balanceDue > 0 ? "danger" : "success"}
         />
       </div>
-
-      <CheckInSettlementPanel
-        balanceDue={balanceDue}
-        isFullyCheckedIn={isFullyCheckedIn}
-        redeemedCount={redeemedCount}
-        totalCount={totalCount}
-        onTakePayment={openPayment}
-      />
 
       {paymentOpen && (
         <CheckInPaymentModal
@@ -728,7 +899,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
-        gap: 12, marginBottom: 10, padding: "10px 12px",
+        gap: 10, marginBottom: 8, padding: "8px 10px",
         background: "white", border: "1.5px solid var(--ink-200)", borderRadius: 12,
       }}>
         <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, fontWeight: 600, color: "var(--ink-700)" }}>
@@ -926,6 +1097,30 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           })}
         </ul>
       )}
+      </div>
+      </section>
+
+      <aside
+        style={{
+          width: 370,
+          flex: "0 0 370px",
+          minHeight: 0,
+          padding: "12px 14px 12px 0",
+          display: "flex",
+          flexDirection: "column",
+          overflowY: "auto",
+        }}
+      >
+        <CheckInSettlementPanel
+          balanceDue={balanceDue}
+          isFullyCheckedIn={isFullyCheckedIn}
+          redeemedCount={redeemedCount}
+          totalCount={totalCount}
+          booking={booking}
+          tickets={tickets}
+          onTakePayment={openPayment}
+        />
+      </aside>
 
     </div>
   );
@@ -944,11 +1139,11 @@ function CloseoutPill({ label, value, tone = "neutral" }) {
   };
   const c = colors[tone] || colors.neutral;
   return (
-    <div style={{ background: c.bg, border: `1.5px solid ${c.border}`, borderRadius: 10, padding: "8px 10px", minWidth: 0 }}>
+    <div style={{ background: c.bg, border: `1.5px solid ${c.border}`, borderRadius: 9, padding: "7px 9px", minWidth: 0 }}>
       <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--ink-500)" }}>
         {label}
       </div>
-      <div style={{ marginTop: 3, fontSize: 13, fontWeight: 900, color: c.fg, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <div style={{ marginTop: 2, fontSize: 12, fontWeight: 900, color: c.fg, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {value}
       </div>
     </div>
@@ -960,10 +1155,71 @@ function CheckInSettlementPanel({
   isFullyCheckedIn,
   redeemedCount,
   totalCount,
+  booking,
+  tickets = [],
   onTakePayment,
 }) {
   const isPaid = balanceDue <= 0;
-  const canTakePayment = isFullyCheckedIn && !isPaid;
+  const canTakePayment = !isPaid;
+  const subtotal = Number(booking?.subTotal ?? booking?.subtotal ?? booking?.subtotalAmount ?? booking?.totalAmount ?? balanceDue) || 0;
+  const tax = Number(booking?.taxAmount ?? booking?.tax ?? 0) || 0;
+  const total = Number(booking?.totalAmount ?? booking?.total ?? balanceDue) || 0;
+  const discount = Number(booking?.discountAmount ?? 0) || 0;
+  const amountPaid = Math.max(
+    0,
+    Number(
+      booking?.amountPaid ??
+      booking?.paidAmount ??
+      booking?.totalPaid ??
+      Math.max(0, total - balanceDue)
+    ) || 0
+  );
+  const invoiceItems = useMemo(() => {
+    const rows = Array.isArray(tickets) ? tickets : [];
+    if (rows.length === 0) {
+      return [{
+        key: "booking",
+        name: booking?.activityName || booking?.bookingName || "Booking",
+        detail: booking?.timeRange || "",
+        qty: Number(booking?.totalGuests || 1) || 1,
+        amount: subtotal || null,
+      }];
+    }
+
+    const groups = new Map();
+    rows.forEach((ticket) => {
+      const productName = ticket.product?.name || ticket.activity?.name || activityNameFromBooking(booking);
+      const variationName = ticket.variation?.name || ticket.ticketTypeName || ticket.priceName || "";
+      const key = `${productName}|${variationName}`;
+      const unitAmount = Number(
+        ticket.unitPrice ??
+        ticket.price ??
+        ticket.amount ??
+        ticket.totalAmount ??
+        ticket.product?.price ??
+        ticket.variation?.price
+      );
+      const existing = groups.get(key) || {
+        key,
+        name: productName,
+        detail: variationName,
+        qty: 0,
+        amount: 0,
+        hasAmount: false,
+      };
+      existing.qty += 1;
+      if (Number.isFinite(unitAmount) && unitAmount > 0) {
+        existing.amount += unitAmount;
+        existing.hasAmount = true;
+      }
+      groups.set(key, existing);
+    });
+
+    return Array.from(groups.values()).map((item) => ({
+      ...item,
+      amount: item.hasAmount ? item.amount : null,
+    }));
+  }, [booking, subtotal, tickets]);
   const panel = isPaid
     ? {
         icon: "check-circle-2",
@@ -973,74 +1229,141 @@ function CheckInSettlementPanel({
         border: "#8AD5A3",
         fg: "#137A35",
       }
-    : canTakePayment
+    : isFullyCheckedIn
     ? {
         icon: "credit-card",
-        title: "Ready to take payment",
-        body: "All guests are checked in. Collect the remaining balance to finish arrival.",
+        title: "Payment available",
+        body: "All guests are checked in. Collect any remaining balance when ready.",
         bg: "var(--aero-orange-50)",
         border: "var(--aero-orange-500)",
         fg: "var(--aero-orange-700)",
       }
     : {
-        icon: "clock",
-        title: "Payment after check-in",
-        body: `${redeemedCount}/${totalCount} guests checked in. Finish check-in before collecting the balance.`,
-        bg: "#FFF7E6",
-        border: "#F3C96A",
-        fg: "#8A5A00",
+        icon: "credit-card",
+        title: "Payment available",
+        body: `${redeemedCount}/${totalCount} guests checked in. Payments can be taken before, during, or after check-in.`,
+        bg: "var(--aero-orange-50)",
+        border: "var(--aero-orange-500)",
+        fg: "var(--aero-orange-700)",
       };
 
   return (
     <div
       style={{
-        marginBottom: 10,
-        padding: 14,
+        marginBottom: 0,
+        padding: "16px 18px",
         borderRadius: 14,
-        border: `1.5px solid ${panel.border}`,
-        background: panel.bg,
-        color: panel.fg,
+        border: "1.5px solid var(--ink-200)",
+        background: "white",
+        color: "var(--ink-900)",
       }}
     >
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 12 }}>
         <Icon name={panel.icon} size={18} stroke={2.2} style={{ flex: "0 0 auto", marginTop: 1 }} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 900 }}>{panel.title}</div>
+          <div style={{ fontSize: 13, fontWeight: 900, color: panel.fg }}>{panel.title}</div>
           <div style={{ marginTop: 4, fontSize: 12, lineHeight: 1.45, color: "var(--ink-700)" }}>
             {panel.body}
           </div>
         </div>
-        {!isPaid && (
-          <div style={{ textAlign: "right", flex: "0 0 auto" }}>
-            <div style={{ fontSize: 10, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.08em" }}>
-              Due
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--ink-500)", marginBottom: 7 }}>
+          Invoice items
+        </div>
+        <div style={{ display: "grid", gap: 7 }}>
+          {invoiceItems.map((item) => (
+            <div
+              key={item.key}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1fr) auto",
+                gap: 10,
+                padding: "9px 10px",
+                border: "1.5px solid var(--ink-100)",
+                borderRadius: 10,
+                background: "var(--ink-25)",
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 850, color: "var(--ink-900)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {item.name}
+                </div>
+                <div style={{ marginTop: 2, fontSize: 11, color: "var(--ink-500)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  x{item.qty}{item.detail ? ` - ${item.detail}` : ""}
+                </div>
+              </div>
+              <div style={{ fontSize: 12, fontWeight: 850, color: "var(--ink-900)", alignSelf: "center" }}>
+                {item.amount != null ? moneyFmt(item.amount) : ""}
+              </div>
             </div>
-            <div style={{ marginTop: 2, fontSize: 18, fontWeight: 950, color: "var(--ink-900)" }}>
-              {moneyFmt(balanceDue)}
-            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gap: 8, marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, fontWeight: 700 }}>
+          <span>Subtotal</span>
+          <span>{moneyFmt(subtotal)}</span>
+        </div>
+        {discount > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, fontWeight: 700, color: "#137A35" }}>
+            <span>Discount</span>
+            <span>-{moneyFmt(discount)}</span>
           </div>
         )}
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, fontWeight: 700 }}>
+          <span>Tax</span>
+          <span>{moneyFmt(tax)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, fontWeight: 700 }}>
+          <span>Amount paid</span>
+          <span>{moneyFmt(amountPaid)}</span>
+        </div>
+        <div style={{ borderTop: "1px dashed var(--ink-200)", paddingTop: 8, display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
+          <span style={{ fontSize: 14, fontWeight: 800 }}>Balance due</span>
+          <span style={{ fontSize: 22, fontWeight: 950, fontFamily: "var(--font-display, inherit)" }}>
+            {moneyFmt(balanceDue)}
+          </span>
+        </div>
       </div>
 
       {!isPaid && (
+        <>
         <button
           type="button"
-          className={canTakePayment ? "a-btn a-btn--primary" : "a-btn a-btn--secondary"}
+          className="a-btn a-btn--ghost a-btn--sm"
+          disabled
+          style={{
+            width: "100%",
+            justifyContent: "center",
+            marginBottom: 8,
+            cursor: "not-allowed",
+            opacity: 0.85,
+          }}
+        >
+          <Icon name="gift" size={16} /> Promo code
+        </button>
+        <button
+          type="button"
+          className="a-btn a-btn--primary"
           onClick={canTakePayment ? onTakePayment : undefined}
           disabled={!canTakePayment}
           style={{
             width: "100%",
             justifyContent: "center",
             marginTop: 12,
-            minHeight: 42,
-            fontSize: 14,
+            padding: "14px 18px",
+            fontSize: 16,
             opacity: canTakePayment ? 1 : 0.65,
             cursor: canTakePayment ? "pointer" : "not-allowed",
           }}
         >
-          <Icon name="credit-card" size={16} />
-          {canTakePayment ? `Take payment ${moneyFmt(balanceDue)}` : "Check in guests first"}
+          <Icon name="credit-card" size={20} />
+          Take payment &middot; {moneyFmt(balanceDue)}
         </button>
+        </>
       )}
     </div>
   );
@@ -1537,6 +1860,11 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
   const [trigger, { data, isFetching }] = useLazySearchWaiversQuery();
   const [linkFromWaiver, { isLoading: linking }] = useLinkParticipantFromWaiverMutation();
 
+  const closeModal = () => {
+    setQuery("");
+    onClose?.();
+  };
+
   React.useEffect(() => {
     const t = setTimeout(() => {
       if (query.trim().length >= 2) trigger({ search: query.trim(), limit: 12 });
@@ -1545,6 +1873,7 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
   }, [query, trigger]);
 
   const results = React.useMemo(() => {
+    if (query.trim().length < 2) return [];
     const rows = data?.data || [];
     const bySignature = new Map();
     for (const row of rows) {
@@ -1556,7 +1885,7 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
       }
     }
     return Array.from(bySignature.values());
-  }, [data]);
+  }, [data, query]);
 
   const handlePick = async (sig) => {
     const waiverSignatureId = sig.signatureId ?? sig.id;
@@ -1569,9 +1898,12 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
       loading: "Linking…",
       success: (res) => {
         onLinked?.();
-        onClose();
+        closeModal();
         const n = res?.data?.created || 0;
-        return n > 0 ? `Linked ${n} guest${n === 1 ? "" : "s"}` : "Already linked";
+        const covered = res?.data?.covered || 0;
+        if (n > 0) return `Linked ${n} guest${n === 1 ? "" : "s"}`;
+        if (covered > 0) return `Attached waiver coverage`;
+        return "Already linked";
       },
       error: (err) => err?.data?.error || "Could not link",
     });
@@ -1579,7 +1911,7 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
 
   return (
     <div
-      onClick={onClose}
+      onClick={closeModal}
       style={{
         position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,0.4)",
         display: "flex", alignItems: "center", justifyContent: "center",
@@ -1600,7 +1932,7 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
           </h2>
           <button
             type="button"
-            onClick={onClose}
+            onClick={closeModal}
             style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)", padding: 4 }}
             title="Close"
           >
