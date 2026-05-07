@@ -20,6 +20,8 @@ import {
   useRemoveParticipantMutation,
   useRecordPaymentMutation,
   useSendBookingConfirmationMutation,
+  useAdjustBookingOrderMutation,
+  useGetOrderAdjustmentCatalogQuery,
 } from "../../features/bookings/bookingApi";
 import {
   useGetBookingTicketsQuery,
@@ -149,6 +151,14 @@ export function CheckIn() {
   // Real number would require a separate aggregate endpoint; this is good enough.
   const checkedInCount = bookings.filter((b) => (b.checkedInGuests ?? 0) >= (b.totalGuests ?? 0) && (b.totalGuests ?? 0) > 0).length;
 
+  const refreshSelectedBooking = async () => {
+    const result = await refetch();
+    const nextRows = result?.data?.data || [];
+    if (!selected?.bookingId) return;
+    const updated = nextRows.find((b) => String(b.bookingId) === String(selected.bookingId));
+    if (updated) setSelected(updated);
+  };
+
   return (
     <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
       {/* Search bar */}
@@ -259,7 +269,7 @@ export function CheckIn() {
           }}
         >
           {selected ? (
-            <SelectedBookingDetail booking={selected} onCheckedIn={() => { refetch(); }} />
+            <SelectedBookingDetail booking={selected} onCheckedIn={refreshSelectedBooking} />
           ) : (
             <EmptyDetail />
           )}
@@ -442,8 +452,10 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const [paymentNote, setPaymentNote] = useState("");
   const [paymentComplete, setPaymentComplete] = useState(null);
   const [paymentDiscount, setPaymentDiscount] = useState(null);
+  const [addItemOpen, setAddItemOpen] = useState(false);
   const [recordPayment, { isLoading: recordingPayment }] = useRecordPaymentMutation();
   const [sendBookingConfirmation, { isLoading: sendingReceipt }] = useSendBookingConfirmationMutation();
+  const [adjustBookingOrder, { isLoading: adjustingOrder }] = useAdjustBookingOrderMutation();
 
   const tickets = ticketsData?.data || [];
   const summary = ticketsData?.summary || {};
@@ -455,18 +467,37 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
   const [removeParticipant] = useRemoveParticipantMutation();
 
-  const refresh = () => {
-    refetchTickets();
-    refetchStatus();
-    onCheckedIn?.();
+  const refresh = async () => {
+    await Promise.all([
+      refetchTickets(),
+      refetchStatus(),
+    ]);
+    await onCheckedIn?.();
+  };
+
+  const handleAdjustOrder = async (payload) => {
+    const promise = adjustBookingOrder({ bookingId: booking.bookingId, ...payload }).unwrap();
+    toast.promise(promise, {
+      loading: "Updating order...",
+      success: (res) => {
+        refresh();
+        return res?.message || "Order updated";
+      },
+      error: (err) => err?.data?.error || err?.data?.message || "Could not update order",
+    });
+    await promise;
   };
 
   useEffect(() => {
     if (!editorOpen) return undefined;
 
     const handleMessage = (event) => {
-      if (event?.data?.type !== "movira:booking-editor-close") return;
-      setEditorOpen(false);
+      const type = event?.data?.type;
+      if (
+        type !== "movira:booking-editor-close" &&
+        type !== "movira:booking-editor-updated"
+      ) return;
+      if (type === "movira:booking-editor-close") setEditorOpen(false);
       refresh();
     };
 
@@ -1118,9 +1149,22 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           totalCount={totalCount}
           booking={booking}
           tickets={tickets}
+          isAdjusting={adjustingOrder}
+          onAdjustOrder={handleAdjustOrder}
+          onAddItem={() => setAddItemOpen(true)}
           onTakePayment={openPayment}
         />
       </aside>
+
+      {addItemOpen && (
+        <OrderAddItemModal
+          bookingId={booking.bookingId}
+          onAdd={(variationId, quantity) =>
+            handleAdjustOrder({ action: "add_item", variationId, quantity })
+          }
+          onClose={() => setAddItemOpen(false)}
+        />
+      )}
 
     </div>
   );
@@ -1157,6 +1201,9 @@ function CheckInSettlementPanel({
   totalCount,
   booking,
   tickets = [],
+  isAdjusting = false,
+  onAdjustOrder,
+  onAddItem,
   onTakePayment,
 }) {
   const isPaid = balanceDue <= 0;
@@ -1175,8 +1222,24 @@ function CheckInSettlementPanel({
     ) || 0
   );
   const invoiceItems = useMemo(() => {
-    const rows = Array.isArray(tickets) ? tickets : [];
-    if (rows.length === 0) {
+    const bookingLines = Array.isArray(booking?.bookingItems) ? booking.bookingItems : [];
+    const activeBookingItems = bookingLines
+      .filter((item) => String(item.status || "active").toLowerCase() === "active")
+      .filter((item) => Number(item.totalPrice || 0) > 0 || Number(item.noOfTickets || 0) > 0)
+      .map((item) => ({
+        key: `bookingItem:${item.bookingItemId}`,
+        name: booking?.activityName || item.variation?.activityName || "Booking item",
+        detail: [
+          item.variation?.name,
+          item.timefrom && item.timeto ? `${item.timefrom} - ${item.timeto}` : "",
+        ].filter(Boolean).join(" - "),
+        qty: Number(item.noOfTickets || 1) || 1,
+        amount: Number(item.totalPrice || 0),
+        source: "bookingItem",
+        bookingItemId: item.bookingItemId,
+      }));
+
+    if (activeBookingItems.length === 0 && (!Array.isArray(tickets) || tickets.length === 0)) {
       return [{
         key: "booking",
         name: booking?.activityName || booking?.bookingName || "Booking",
@@ -1186,11 +1249,14 @@ function CheckInSettlementPanel({
       }];
     }
 
+    const rows = Array.isArray(tickets) ? tickets : [];
     const groups = new Map();
     rows.forEach((ticket) => {
+      if (ticket.bookingItemId) return;
       const productName = ticket.product?.name || ticket.activity?.name || activityNameFromBooking(booking);
       const variationName = ticket.variation?.name || ticket.ticketTypeName || ticket.priceName || "";
-      const key = `${productName}|${variationName}`;
+      const bookingItemId = ticket.bookingItemId || ticket.bookingItem?.bookingItemId || null;
+      const key = bookingItemId ? `bookingItem:${bookingItemId}` : `${productName}|${variationName}`;
       const unitAmount = Number(
         ticket.unitPrice ??
         ticket.price ??
@@ -1206,6 +1272,8 @@ function CheckInSettlementPanel({
         qty: 0,
         amount: 0,
         hasAmount: false,
+        source: bookingItemId ? "bookingItem" : "ticket",
+        bookingItemId,
       };
       existing.qty += 1;
       if (Number.isFinite(unitAmount) && unitAmount > 0) {
@@ -1215,11 +1283,37 @@ function CheckInSettlementPanel({
       groups.set(key, existing);
     });
 
-    return Array.from(groups.values()).map((item) => ({
+    const ticketItems = Array.from(groups.values()).map((item) => ({
       ...item,
       amount: item.hasAmount ? item.amount : null,
     }));
+    const purchasedItems = Array.isArray(booking?.purchasedItems) ? booking.purchasedItems : [];
+    const extraItems = purchasedItems
+      .filter((item) => !item.isBundleInclusion)
+      .map((item) => ({
+        key: `purchased:${item.variationId}`,
+        name: item.activityName || item.variation?.name || "Item",
+        detail: item.variation?.name || "",
+        qty: Number(item.count || item.quantity || 1) || 1,
+        amount: Number(item.total || 0),
+        source: "purchasedItem",
+        variationId: item.variationId,
+      }));
+    return [...activeBookingItems, ...ticketItems, ...extraItems];
   }, [booking, subtotal, tickets]);
+
+  const changeQty = (item, delta) => {
+    if (!onAdjustOrder || isAdjusting) return;
+    const nextQty = Math.max(item.source === "bookingItem" ? 1 : 0, Number(item.qty || 0) + delta);
+    if (nextQty === Number(item.qty || 0)) return;
+    onAdjustOrder({
+      action: "set_quantity",
+      source: item.source,
+      bookingItemId: item.bookingItemId,
+      variationId: item.variationId,
+      quantity: nextQty,
+    });
+  };
   const panel = isPaid
     ? {
         icon: "check-circle-2",
@@ -1278,7 +1372,7 @@ function CheckInSettlementPanel({
               key={item.key}
               style={{
                 display: "grid",
-                gridTemplateColumns: "minmax(0, 1fr) auto",
+                gridTemplateColumns: "minmax(0, 1fr) auto auto",
                 gap: 10,
                 padding: "9px 10px",
                 border: "1.5px solid var(--ink-100)",
@@ -1297,9 +1391,55 @@ function CheckInSettlementPanel({
               <div style={{ fontSize: 12, fontWeight: 850, color: "var(--ink-900)", alignSelf: "center" }}>
                 {item.amount != null ? moneyFmt(item.amount) : ""}
               </div>
+              <div style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <button
+                  type="button"
+                  onClick={() => changeQty(item, -1)}
+                  disabled={isAdjusting || item.source === "ticket" || item.key === "booking"}
+                  title={item.source === "ticket" ? "This line cannot be adjusted here" : "Decrease quantity"}
+                  style={{
+                    width: 24,
+                    height: 24,
+                    borderRadius: 7,
+                    border: "1.5px solid var(--ink-200)",
+                    background: "white",
+                    cursor: isAdjusting || item.source === "ticket" || item.key === "booking" ? "not-allowed" : "pointer",
+                    opacity: item.source === "ticket" || item.key === "booking" ? 0.45 : 1,
+                    fontWeight: 900,
+                  }}
+                >
+                  -
+                </button>
+                <button
+                  type="button"
+                  onClick={() => changeQty(item, 1)}
+                  disabled={isAdjusting || item.source === "ticket" || item.key === "booking"}
+                  title={item.source === "ticket" ? "This line cannot be adjusted here" : "Increase quantity"}
+                  style={{
+                    width: 24,
+                    height: 24,
+                    borderRadius: 7,
+                    border: "1.5px solid var(--ink-200)",
+                    background: "white",
+                    cursor: isAdjusting || item.source === "ticket" || item.key === "booking" ? "not-allowed" : "pointer",
+                    opacity: item.source === "ticket" || item.key === "booking" ? 0.45 : 1,
+                    fontWeight: 900,
+                  }}
+                >
+                  +
+                </button>
+              </div>
             </div>
           ))}
         </div>
+        <button
+          type="button"
+          className="a-btn a-btn--ghost a-btn--sm"
+          onClick={onAddItem}
+          style={{ width: "100%", justifyContent: "center", marginTop: 8 }}
+        >
+          <Icon name="plus" size={14} /> Add item
+        </button>
       </div>
 
       <div style={{ display: "grid", gap: 8, marginBottom: 12 }}>
@@ -1365,6 +1505,167 @@ function CheckInSettlementPanel({
         </button>
         </>
       )}
+    </div>
+  );
+}
+
+function OrderAddItemModal({ bookingId, onAdd, onClose }) {
+  const [tab, setTab] = useState("recommended");
+  const [search, setSearch] = useState("");
+  const [qtyByVariation, setQtyByVariation] = useState({});
+  const { data, isFetching } = useGetOrderAdjustmentCatalogQuery({
+    bookingId,
+    search: tab === "all" ? search : "",
+  });
+  const recommended = data?.data?.recommended || [];
+  const products = data?.data?.products || [];
+  const rows = tab === "recommended" ? recommended : products;
+
+  const pickQty = (variationId) => Math.max(1, Number(qtyByVariation[variationId] || 1));
+  const changeQty = (variationId, delta) => {
+    setQtyByVariation((prev) => ({
+      ...prev,
+      [variationId]: Math.max(1, Number(prev[variationId] || 1) + delta),
+    }));
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 1000,
+        background: "rgba(0,0,0,0.42)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 18,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 620,
+          maxHeight: "82vh",
+          background: "white",
+          border: "2px solid var(--ink-800)",
+          borderRadius: 16,
+          boxShadow: "0 8px 0 var(--ink-800)",
+          padding: 18,
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 900, color: "var(--ink-900)" }}>Add item</div>
+            <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 2 }}>
+              Add extras or stock items to this booking order.
+            </div>
+          </div>
+          <button type="button" onClick={onClose} style={{ all: "unset", cursor: "pointer", padding: 4 }}>
+            <Icon name="x" size={18} />
+          </button>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+          {[
+            ["recommended", "Party extras"],
+            ["all", "All products"],
+          ].map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setTab(key)}
+              style={{
+                border: tab === key ? "2px solid var(--aero-orange-500)" : "1.5px solid var(--ink-200)",
+                borderRadius: 10,
+                background: tab === key ? "var(--aero-orange-50)" : "white",
+                padding: "9px 10px",
+                fontWeight: 900,
+                cursor: "pointer",
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {tab === "all" && (
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            border: "1.5px solid var(--ink-200)",
+            borderRadius: 10,
+            padding: "9px 10px",
+            marginBottom: 10,
+          }}>
+            <Icon name="search" size={15} />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search products..."
+              style={{ all: "unset", flex: 1, fontSize: 13, fontWeight: 700 }}
+            />
+          </div>
+        )}
+
+        <div style={{ overflowY: "auto", display: "grid", gap: 8, minHeight: 0 }}>
+          {isFetching ? (
+            <div style={{ padding: 22, textAlign: "center", color: "var(--ink-500)" }}>Loading...</div>
+          ) : rows.length === 0 ? (
+            <div style={{ padding: 22, textAlign: "center", color: "var(--ink-500)" }}>
+              {tab === "recommended" ? "No party extras are configured for this booking." : "No products found."}
+            </div>
+          ) : (
+            rows.map((item) => {
+              const qty = pickQty(item.variationId);
+              return (
+                <div
+                  key={`${item.activityId}-${item.variationId}`}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "minmax(0, 1fr) auto auto",
+                    gap: 10,
+                    alignItems: "center",
+                    padding: "10px 12px",
+                    border: "1.5px solid var(--ink-200)",
+                    borderRadius: 12,
+                    background: "var(--ink-25)",
+                  }}
+                >
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 900, color: "var(--ink-900)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {item.activityName}
+                    </div>
+                    <div style={{ marginTop: 2, fontSize: 12, color: "var(--ink-500)" }}>
+                      {item.variationName} - {moneyFmt(item.price)}
+                    </div>
+                  </div>
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <button type="button" onClick={() => changeQty(item.variationId, -1)} className="a-btn a-btn--ghost a-btn--sm">-</button>
+                    <span style={{ minWidth: 18, textAlign: "center", fontWeight: 900 }}>{qty}</span>
+                    <button type="button" onClick={() => changeQty(item.variationId, 1)} className="a-btn a-btn--ghost a-btn--sm">+</button>
+                  </div>
+                  <button
+                    type="button"
+                    className="a-btn a-btn--primary a-btn--sm"
+                    onClick={async () => {
+                      await onAdd(item.variationId, qty);
+                      onClose();
+                    }}
+                  >
+                    Add
+                  </button>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
     </div>
   );
 }

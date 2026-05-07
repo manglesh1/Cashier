@@ -128,6 +128,36 @@ function normalizePresetSections(preset) {
   }));
 }
 
+function isVoucherPackItem(item) {
+  return String(item?.productType || "").toLowerCase() === "voucher_pack";
+}
+
+function buildLinePricingSummary(item, cartPricing) {
+  const subtotal = Math.round((Number(item?.price || 0) * Number(item?.qty || 1)) * 100) / 100;
+  const cartSubtotal = Number(cartPricing?.subtotal) || 0;
+  const ratio = cartSubtotal > 0 ? subtotal / cartSubtotal : 0;
+  const discountAmount = Math.round((Number(cartPricing?.discount?.amount) || 0) * ratio * 100) / 100;
+  const taxAmount = Math.round((Number(cartPricing?.tax) || 0) * ratio * 100) / 100;
+  const cartTotal = Number(cartPricing?.total);
+  const grandTotal =
+    cartSubtotal > 0 && Number.isFinite(cartTotal)
+      ? Math.round(cartTotal * ratio * 100) / 100
+      : Math.round((subtotal - discountAmount + taxAmount) * 100) / 100;
+
+  return {
+    subtotalAmount: subtotal,
+    discountCode: cartPricing?.discount?.code || null,
+    discountName: cartPricing?.discount?.name || null,
+    discountType: cartPricing?.discount?.type || null,
+    discountValue: cartPricing?.discount?.value || 0,
+    discountMaxValue: cartPricing?.discount?.maxValue || 0,
+    discountAmount,
+    taxAmount,
+    grandTotal,
+    totalAmount: grandTotal,
+  };
+}
+
 export function CashierApp() {
   const { user, locations } = useSelector((s) => s.auth);
 
@@ -330,6 +360,7 @@ export function CashierApp() {
           icon: productItem.icon,
           featured: productItem.featured,
           requiresWaiver: !!productItem.requiresWaiver,
+          isVoucherPack: isVoucherPackItem(productItem),
         },
       ];
     });
@@ -360,7 +391,10 @@ export function CashierApp() {
       return;
     }
 
-    const sessions = items
+    const voucherItems = items.filter(isVoucherPackItem);
+    const regularItems = items.filter((it) => !isVoucherPackItem(it));
+
+    const sessions = regularItems
       .filter((it) => it.activityId)
       .map((it) => ({
         activityId: it.activityId,
@@ -390,6 +424,10 @@ export function CashierApp() {
       `Walk-in ${Math.random().toString(36).slice(-4).toUpperCase()}`;
     const guestEmail = primaryGuest?.contactEmail || member?.email || "";
     const guestPhone = primaryGuest?.contactPhone || member?.phone || "";
+    if (voucherItems.length > 0 && !guestEmail) {
+      toast.error("Select a customer with email before selling a voucher pack.");
+      return;
+    }
     const payload = {
       locationId,
       date: new Date().toISOString().slice(0, 10),
@@ -415,37 +453,70 @@ export function CashierApp() {
       // Pricing — includes promo code if the cashier applied one in CartPanel.
       // Backend's createBooking re-validates and recomputes; we just supply
       // the chosen discount so the booking record carries the right code.
-      pricingSummary: {
-        subtotalAmount: cartPricing?.subtotal || 0,
-        discountCode: cartPricing?.discount?.code || null,
-        discountName: cartPricing?.discount?.name || null,
-        discountType: cartPricing?.discount?.type || null,
-        discountValue: cartPricing?.discount?.value || 0,
-        discountMaxValue: cartPricing?.discount?.maxValue || 0,
-        discountAmount: cartPricing?.discount?.amount || 0,
-        taxAmount: cartPricing?.tax || 0,
-        totalAmount: cartPricing?.total || 0,
-      },
+      pricingSummary: buildLinePricingSummary(
+        {
+          price: regularItems.reduce(
+            (sum, item) => sum + Number(item.price || 0) * Number(item.qty || 1),
+            0
+          ),
+          qty: 1,
+        },
+        cartPricing
+      ),
     };
 
     try {
-      const res = await createBooking(payload).unwrap();
-      const bookingId = res?.data?.bookingId || res?.data?.bookingMasterId || res?.bookingId || res?.bookingMasterId || res?.id;
-      setCreatedBookingId(bookingId);
-      toast.success(`Booking ${res?.data?.bookingNumber || res?.bookingNumber || ""} created`);
-      // Open the same payment dialog that check-in uses. Booking object
-      // carries everything the dialog needs (id, number, totals).
-      const data = res?.data || {};
-      const bookingForPayment = {
-        bookingId,
-        bookingNumber: data.bookingNumber || res?.bookingNumber || "",
-        totalAmount: Number(data.totalAmount ?? res?.totalAmount ?? cartPricing?.total ?? 0),
-        balanceDue: Number(data.balanceDue ?? res?.balanceDue ?? data.totalAmount ?? res?.totalAmount ?? cartPricing?.total ?? 0),
-        subTotal: Number(data.subTotal ?? cartPricing?.subtotal ?? 0),
-        taxAmount: Number(data.taxAmount ?? cartPricing?.tax ?? 0),
-      };
-      setPendingPaymentBooking(bookingForPayment);
-      setPaymentBooking(bookingForPayment);
+      let bookingForPayment = null;
+
+      if (regularItems.length > 0) {
+        const res = await createBooking(payload).unwrap();
+        const bookingId = res?.data?.bookingId || res?.data?.bookingMasterId || res?.bookingId || res?.bookingMasterId || res?.id;
+        setCreatedBookingId(bookingId);
+        toast.success(`Booking ${res?.data?.bookingNumber || res?.bookingNumber || ""} created`);
+        const data = res?.data || {};
+        bookingForPayment = {
+          bookingId,
+          bookingNumber: data.bookingNumber || res?.bookingNumber || "",
+          totalAmount: Number(data.totalAmount ?? res?.totalAmount ?? cartPricing?.total ?? 0),
+          balanceDue: Number(data.balanceDue ?? res?.balanceDue ?? data.totalAmount ?? res?.totalAmount ?? cartPricing?.total ?? 0),
+          subTotal: Number(data.subTotal ?? cartPricing?.subtotal ?? 0),
+          taxAmount: Number(data.taxAmount ?? cartPricing?.tax ?? 0),
+        };
+      }
+
+      for (const item of voucherItems) {
+        const repeats = Math.max(1, Number(item.qty) || 1);
+        for (let i = 0; i < repeats; i += 1) {
+          const lineItem = { ...item, qty: 1 };
+          const res = await createBooking({
+            ...payload,
+            sessions: undefined,
+            waiverSignatureIds: undefined,
+            activityIds: [Number(item.activityId)],
+            variationId: item.variationId || null,
+            bookingName: `${guestName} - ${item.name}`.trim(),
+            pricingSummary: buildLinePricingSummary(lineItem, cartPricing),
+            deferWaiverEnforcement: true,
+          }).unwrap();
+          const bookingId = res?.data?.bookingId || res?.data?.bookingMasterId || res?.bookingId || res?.bookingMasterId || res?.id;
+          setCreatedBookingId(bookingId);
+          toast.success(`Voucher sold: ${item.name}`);
+          const data = res?.data || {};
+          bookingForPayment = {
+            bookingId,
+            bookingNumber: data.bookingNumber || res?.bookingNumber || "",
+            totalAmount: Number(data.totalAmount ?? res?.totalAmount ?? data.grandTotal ?? lineItem.price ?? 0),
+            balanceDue: Number(data.balanceDue ?? res?.balanceDue ?? data.totalAmount ?? res?.totalAmount ?? lineItem.price ?? 0),
+            subTotal: Number(data.subTotal ?? lineItem.price ?? 0),
+            taxAmount: Number(data.taxAmount ?? 0),
+          };
+        }
+      }
+
+      if (bookingForPayment) {
+        setPendingPaymentBooking(bookingForPayment);
+        setPaymentBooking(bookingForPayment);
+      }
     } catch (err) {
       const msg = err?.data?.message || err?.data?.error || err?.message || "Failed to create booking";
       toast.error(msg);

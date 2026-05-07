@@ -129,6 +129,25 @@ export const bookingApi = baseApi.injectEndpoints({
         { type: "Booking", id: bookingId },
       ],
     }),
+    getOrderAdjustmentCatalog: builder.query({
+      query: ({ bookingId, search = "" }) => ({
+        url: `/bookings/${bookingId}/order-adjustments/catalog`,
+        params: search ? { search } : {},
+      }),
+    }),
+    adjustBookingOrder: builder.mutation({
+      query: ({ bookingId, ...body }) => ({
+        url: `/bookings/${bookingId}/order-adjustments`,
+        method: "POST",
+        body,
+      }),
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "Booking", id: bookingId },
+        { type: "Tickets", id: bookingId },
+        { type: "CheckIn", id: bookingId },
+        "Bookings",
+      ],
+    }),
   }),
 });
 
@@ -149,4 +168,6 @@ export const {
   useLazySearchWaiversQuery,
   useLinkParticipantFromWaiverMutation,
   useRemoveParticipantMutation,
+  useGetOrderAdjustmentCatalogQuery,
+  useAdjustBookingOrderMutation,
 } = bookingApi;
