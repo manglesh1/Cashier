@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react";
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const port = Number(env.VITE_PORT || 5173);
+  const apiTarget = env.VITE_API_PROXY_TARGET || "http://localhost:5171";
 
   return {
     plugins: [react()],
@@ -13,6 +14,12 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
       allowedHosts: ["192.168.2.66", "192.168.2.91"],
       open: false,
+      proxy: {
+        "/api": {
+          target: apiTarget,
+          changeOrigin: true,
+        },
+      },
     },
   };
 });
