@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
-import { useLazySearchWaiversQuery } from "../../features/bookings/bookingApi";
+import {
+  useLazySearchGuestsQuery,
+  useLazySearchWaiversQuery,
+} from "../../features/bookings/bookingApi";
 
 const formatDob = (value) => {
   if (!value) return "DOB not on file";
@@ -16,13 +19,17 @@ const formatDob = (value) => {
 
 export function CartWaiverModal({
   open,
+  mode = "customer",
   needed,
   attached = [],
   onChange,
+  onCustomerChange,
   onClose,
 }) {
   const [query, setQuery] = useState("");
-  const [trigger, { data, isFetching }] = useLazySearchWaiversQuery();
+  const customerMode = mode === "customer" || Number(needed || 0) <= 0;
+  const [triggerWaiverSearch, { data: waiverData, isFetching: isFetchingWaivers }] = useLazySearchWaiversQuery();
+  const [triggerGuestSearch, { data: guestData, isFetching: isFetchingGuests }] = useLazySearchGuestsQuery();
   const [showLink, setShowLink] = useState(false);
 
   useEffect(() => {
@@ -41,15 +48,19 @@ export function CartWaiverModal({
     if (!open) return undefined;
     const t = setTimeout(() => {
       if (query.trim().length >= 2) {
-        trigger({ search: query.trim(), limit: 24, contactOnly: true });
+        if (customerMode) {
+          triggerGuestSearch(query.trim());
+        } else {
+          triggerWaiverSearch({ search: query.trim(), limit: 24, contactOnly: true });
+        }
       }
     }, 250);
     return () => clearTimeout(t);
-  }, [query, trigger, open]);
+  }, [query, triggerGuestSearch, triggerWaiverSearch, open, customerMode]);
 
   const waiverGroups = useMemo(() => {
     if (query.trim().length < 2) return [];
-    const rows = data?.data || [];
+    const rows = waiverData?.data || [];
     const groups = new Map();
     for (const row of rows) {
       const signatureId = Number(row.signatureId ?? row.id);
@@ -85,7 +96,18 @@ export function CartWaiverModal({
       groups.set(signatureId, group);
     }
     return Array.from(groups.values()).filter((group) => group.signer);
-  }, [data, query]);
+  }, [waiverData, query]);
+
+  const customerCards = useMemo(() => {
+    if (!customerMode || query.trim().length < 2) return [];
+    return (guestData?.data || []).map((guest) => ({
+      key: `guest:${guest.guestId}`,
+      guestId: guest.guestId,
+      name: guest.guestName || guest.name || "Guest",
+      email: guest.guestEmail || guest.email || "",
+      phone: guest.guestPhone || guest.phone || "",
+    }));
+  }, [customerMode, guestData, query]);
 
   const attachedIds = useMemo(
     () => new Set(attached.map((a) => Number(a.signatureId))),
@@ -200,6 +222,19 @@ export function CartWaiverModal({
     );
   };
 
+  const handlePickCustomer = (guest) => {
+    if (!guest?.guestId) return;
+    onCustomerChange?.({
+      guestId: guest.guestId,
+      name: guest.name,
+      contact: guest.email || guest.phone || "",
+      contactEmail: guest.email || "",
+      contactPhone: guest.phone || "",
+    });
+    toast.success(`Customer selected: ${guest.name}`);
+    handleClose();
+  };
+
   const waiverPageUrl = (() => {
     const base = import.meta.env.VITE_BOOKING_PORTAL_URL || "/waivers";
     return `${base}/waivers`;
@@ -236,14 +271,16 @@ export function CartWaiverModal({
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
           <h2 style={{ margin: 0, fontFamily: "var(--font-display)", fontSize: 20, fontWeight: 800, color: "var(--ink-900)" }}>
-            {attached.length === 0 ? "Add customer" : "Add waiver coverage"}
+            {customerMode ? "Add customer" : "Add waiver coverage"}
           </h2>
           <button type="button" onClick={handleClose} style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)", padding: 4 }} title="Close">
             <Icon name="x" size={18} />
           </button>
         </div>
         <div style={{ fontSize: 12, color: "var(--ink-500)", marginBottom: 14 }}>
-          {totalCovered} of {needed} guest{needed === 1 ? "" : "s"} covered. Search signed waivers with an email or phone.
+          {customerMode
+            ? "Search customers by name, email, or phone."
+            : `${totalCovered} of ${needed} guest${needed === 1 ? "" : "s"} covered. Search signed waivers with an email or phone.`}
         </div>
 
         <div style={{
@@ -271,10 +308,62 @@ export function CartWaiverModal({
             <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
               Type at least 2 characters to search.
             </div>
-          ) : isFetching ? (
+          ) : (customerMode ? isFetchingGuests : isFetchingWaivers) ? (
             <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
               Searching...
             </div>
+          ) : customerMode ? (
+            customerCards.length === 0 ? (
+              <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
+                No matching customers found.
+              </div>
+            ) : (
+              <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
+                {customerCards.map((person) => (
+                  <li key={person.key}>
+                    <button
+                      type="button"
+                      onClick={() => handlePickCustomer(person)}
+                      style={{
+                        all: "unset",
+                        cursor: "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 12,
+                        width: "100%",
+                        boxSizing: "border-box",
+                        padding: "12px 14px",
+                        background: "white",
+                        border: "1.5px solid var(--ink-200)",
+                        borderRadius: 12,
+                      }}
+                    >
+                      <Icon name="user-round" size={17} style={{ color: "var(--ink-600)", flexShrink: 0 }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 800, color: "var(--ink-900)" }}>
+                          {person.name}
+                        </div>
+                        <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 2 }}>
+                          {[person.email, person.phone].filter(Boolean).join(" - ") || "No contact on file"}
+                        </div>
+                      </div>
+                      <span style={{
+                        fontSize: 11,
+                        fontWeight: 800,
+                        color: "var(--ink-600)",
+                        padding: "2px 8px",
+                        background: "var(--ink-25)",
+                        border: "1.5px solid var(--ink-200)",
+                        borderRadius: 999,
+                        flexShrink: 0,
+                      }}>
+                        Customer
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )
           ) : personCards.length === 0 ? (
             <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
               No matching customers with signed waivers and contact details.
@@ -339,7 +428,7 @@ export function CartWaiverModal({
           )}
         </div>
 
-        <div style={{
+        {!customerMode && <div style={{
           padding: "10px 12px",
           background: "var(--ink-25)",
           border: "1.5px solid var(--ink-200)",
@@ -382,11 +471,11 @@ export function CartWaiverModal({
               </div>
             </div>
           )}
-        </div>
+        </div>}
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
-          <button type="button" onClick={handleClose} className="a-btn a-btn--primary" disabled={totalCovered < needed}>
-            {totalCovered >= needed ? "Done" : `${needed - totalCovered} more needed`}
+          <button type="button" onClick={handleClose} className="a-btn a-btn--primary" disabled={!customerMode && totalCovered < needed}>
+            {customerMode ? "Done" : totalCovered >= needed ? "Done" : `${needed - totalCovered} more needed`}
           </button>
         </div>
       </div>

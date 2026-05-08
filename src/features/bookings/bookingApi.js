@@ -29,6 +29,9 @@ export const bookingApi = baseApi.injectEndpoints({
       query: (body) => ({ url: "/bookings", method: "POST", body }),
       invalidatesTags: ["Bookings"],
     }),
+    validateCart: builder.mutation({
+      query: (body) => ({ url: "/bookings/validate-cart", method: "POST", body }),
+    }),
     sendBookingConfirmation: builder.mutation({
       query: (body) => ({ url: "/payment/send-booking-confirmation", method: "POST", body }),
     }),
@@ -155,7 +158,9 @@ export const {
   useGetAllBookingQuery,
   useGetBookingByIdQuery,
   useSearchGuestsQuery,
+  useLazySearchGuestsQuery,
   useCreateBookingMutation,
+  useValidateCartMutation,
   useSendBookingConfirmationMutation,
   usePaymentSendPaymentLinkMutation,
   useRecordPaymentMutation,

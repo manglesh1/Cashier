@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Icon } from './Icon';
+import React, { useState } from "react";
+import { Icon } from "./Icon";
 
 // Sections come from props (loaded from the device's terminal template).
 // Falls back to a single "Quick" section using whatever items the parent
@@ -7,6 +7,29 @@ import { Icon } from './Icon';
 export function CatalogGrid({ sections = [], loading, error, onAdd }) {
   const [activeChip, setActiveChip] = useState("all");
   const [search, setSearch] = useState("");
+  const [variantPicker, setVariantPicker] = useState(null);
+
+  const addWithVariant = (item, section, option = null) => {
+    const chosen = option
+      ? {
+          ...item,
+          variationId: option.variationId,
+          variationName: option.name,
+          price: Number(option.price ?? item.price ?? 0),
+        }
+      : item;
+    onAdd?.(chosen, section);
+    setVariantPicker(null);
+  };
+
+  const handleProductClick = (item, section) => {
+    const options = item.variationOptions || [];
+    if (options.length > 1) {
+      setVariantPicker({ item, section });
+      return;
+    }
+    addWithVariant(item, section, options[0] || null);
+  };
 
   const visibleSections = sections
     .filter((s) => activeChip === "all" || s.title === activeChip)
@@ -26,7 +49,6 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
 
   return (
     <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-      {/* category chips */}
       <div style={{ padding: "16px 28px", display: "flex", gap: 10, alignItems: "center", borderBottom: "1px solid var(--ink-100)" }}>
         <SearchBar value={search} onChange={setSearch} />
         <div style={{ display: "flex", gap: 8, marginLeft: "auto", flexWrap: "wrap" }}>
@@ -51,20 +73,19 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
         </div>
       </div>
 
-      {/* scrollable catalog */}
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 28px 28px", display: "flex", flexDirection: "column", gap: 24 }}>
         {loading ? (
           <div style={{ padding: 60, textAlign: "center", color: "var(--ink-500)", fontWeight: 600 }}>
-            Loading terminal template…
+            Loading terminal template...
           </div>
         ) : error ? (
           <div style={{ padding: 60, textAlign: "center", color: "var(--color-danger)", fontWeight: 600 }}>
-            Couldn't load this terminal's template. Pick a template in admin → POS → Terminals.
+            Couldn't load this terminal's template. Pick a template in admin / POS / Terminals.
           </div>
         ) : visibleSections.length === 0 ? (
           <div style={{ padding: 60, textAlign: "center", color: "var(--ink-500)" }}>
             <div style={{ fontWeight: 700, marginBottom: 4 }}>No activities in this template</div>
-            <div style={{ fontSize: 13 }}>Configure sections in admin → POS → Terminal Presets.</div>
+            <div style={{ fontSize: 13 }}>Configure sections in admin / POS / Terminal Presets.</div>
           </div>
         ) : (
           visibleSections.map((sec) => (
@@ -75,23 +96,33 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14 }}>
                 {sec.items.map((it) => (
-                  <ProductCard key={it.id} item={it} tone={sec.tone} onClick={() => onAdd(it, sec)} />
+                  <ProductCard key={it.id} item={it} tone={sec.tone} onClick={() => handleProductClick(it, sec)} />
                 ))}
               </div>
             </section>
           ))
         )}
       </div>
+
+      {variantPicker && (
+        <VariantPickerDialog
+          item={variantPicker.item}
+          section={variantPicker.section}
+          onClose={() => setVariantPicker(null)}
+          onPick={addWithVariant}
+        />
+      )}
     </div>
   );
 }
 
 function ProductCard({ item, tone = "orange", onClick }) {
   const accent = {
-    orange:  { bg: "var(--aero-orange-50)",   fg: "var(--aero-orange-600)" },
-    yellow:  { bg: "var(--aero-yellow-50)",   fg: "var(--aero-yellow-500)" },
-    neutral: { bg: "var(--ink-50)",           fg: "var(--ink-700)" },
+    orange: { bg: "var(--aero-orange-50)", fg: "var(--aero-orange-600)" },
+    yellow: { bg: "var(--aero-yellow-50)", fg: "var(--aero-yellow-500)" },
+    neutral: { bg: "var(--ink-50)", fg: "var(--ink-700)" },
   }[tone];
+  const hasChoices = (item.variationOptions || []).length > 1;
 
   return (
     <button
@@ -107,9 +138,9 @@ function ProductCard({ item, tone = "orange", onClick }) {
         transition: "transform var(--dur-fast) var(--ease-bounce), box-shadow var(--dur-fast)",
         position: "relative",
       }}
-      onMouseDown={e => e.currentTarget.style.transform = "translateY(5px)"}
-      onMouseUp={e => e.currentTarget.style.transform = ""}
-      onMouseLeave={e => e.currentTarget.style.transform = ""}
+      onMouseDown={(e) => { e.currentTarget.style.transform = "translateY(5px)"; }}
+      onMouseUp={(e) => { e.currentTarget.style.transform = ""; }}
+      onMouseLeave={(e) => { e.currentTarget.style.transform = ""; }}
     >
       {item.badge && (
         <span style={{
@@ -129,11 +160,82 @@ function ProductCard({ item, tone = "orange", onClick }) {
       <div style={{ minHeight: 44 }}>
         <div style={{ fontWeight: 700, fontSize: 16, lineHeight: 1.2 }}>{item.name}</div>
         {item.sub && <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 2 }}>{item.sub}</div>}
+        {hasChoices && (
+          <div style={{ fontSize: 11, color: "var(--aero-orange-700)", fontWeight: 800, marginTop: 4 }}>
+            Choose option
+          </div>
+        )}
       </div>
       <div className="display-num" style={{ fontSize: 24 }}>
-        {Number.isFinite(item.price) ? `$${Number(item.price).toFixed(2)}` : "—"}
+        {Number.isFinite(item.price) ? `${hasChoices ? "From " : ""}$${Number(item.price).toFixed(2)}` : "-"}
       </div>
     </button>
+  );
+}
+
+function VariantPickerDialog({ item, section, onClose, onPick }) {
+  const options = item.variationOptions || [];
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 50,
+        background: "rgba(0,0,0,0.35)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 24,
+      }}
+      onMouseDown={onClose}
+    >
+      <div
+        style={{
+          width: "min(520px, 100%)",
+          background: "var(--ink-0)",
+          border: "2px solid var(--ink-800)",
+          borderRadius: 18,
+          boxShadow: "0 8px 0 var(--ink-800)",
+          padding: 18,
+        }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginBottom: 14 }}>
+          <div>
+            <div className="eyebrow">Choose option</div>
+            <h2 style={{ margin: "2px 0 0", fontFamily: "var(--font-display)", fontSize: 24 }}>
+              {item.name}
+            </h2>
+          </div>
+          <button type="button" className="a-btn a-btn--ghost a-btn--sm" onClick={onClose}>x</button>
+        </div>
+        <div style={{ display: "grid", gap: 10 }}>
+          {options.map((option) => (
+            <button
+              key={option.variationId}
+              type="button"
+              onClick={() => onPick(item, section, option)}
+              style={{
+                all: "unset",
+                cursor: "pointer",
+                border: "1.5px solid var(--ink-200)",
+                borderRadius: 14,
+                padding: "14px 16px",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                background: "var(--ink-0)",
+              }}
+            >
+              <span style={{ fontWeight: 800, color: "var(--ink-800)" }}>{option.name}</span>
+              <span className="display-num" style={{ fontSize: 20 }}>${Number(option.price || 0).toFixed(2)}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -149,14 +251,12 @@ function SearchBar({ value, onChange }) {
       <input
         value={value}
         onChange={(e) => onChange?.(e.target.value)}
-        placeholder="Scan or search SKU, member, party…"
+        placeholder="Scan or search SKU, member, party..."
         style={{ all: "unset", flex: 1, fontSize: 14, color: "var(--ink-800)" }}
       />
-      <kbd style={{ fontSize: 10, color: "var(--ink-500)", fontFamily: "var(--font-mono)", padding: "2px 6px", background: "var(--ink-50)", borderRadius: 4 }}>⌘ K</kbd>
+      <kbd style={{ fontSize: 10, color: "var(--ink-500)", fontFamily: "var(--font-mono)", padding: "2px 6px", background: "var(--ink-50)", borderRadius: 4 }}>K</kbd>
     </div>
   );
 }
 
-// Default fallback price when the preset doesn't carry one (e.g. linked to
-// a variation that lives on the variations table; cashier shows "—" then).
 ProductCard.displayName = "ProductCard";

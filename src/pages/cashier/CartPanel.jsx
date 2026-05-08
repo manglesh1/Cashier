@@ -35,12 +35,15 @@ export function CartPanel({
   onPricingChange,         // (pricing) => void — parent uses for createBooking payload
   waiversAttached = [],    // [{ signatureId, name, coverage, minors: [{name}], ... }]
   cartCustomer = null,
-  onCollectWaivers,        // () => void — opens waiver collection modal
+  onCollectWaivers,        // (mode) => void — opens customer or waiver modal
   onChangeWaivers,         // (next) => void — full replacement of waiver list
   waiverPool = [],         // [{ key, name, kind, signatureId, primaryName }]
   ticketAssignments = {},  // { [ticketIndex]: poolKey }
   onAssignTicket,          // (ticketIndex, poolKey) => void
   onDetachTicket,          // (ticketIndex) => void
+  recipientAssignments = {},
+  onAssignRecipient,
+  onClearRecipient,
 }) {
   // Discount can be one of three modes — same as PaymentTab on All Bookings.
   // Code: typed string → validated against /promos/validate → server-defined value
@@ -107,6 +110,24 @@ export function CartPanel({
   const waiversMissing = Math.max(0, waiversNeeded - waiversCount);
 
   const primaryCustomer = cartCustomer || waiversAttached[0] || null;
+  const customerRequiredTypes = ["voucher_pack", "membership", "gift_card"];
+  const needsCustomer = items.some((item) =>
+    customerRequiredTypes.includes(
+      String(item?.productType || "").toLowerCase()
+    )
+  );
+  const missingRecipients = items.reduce((count, item, itemIndex) => {
+    if (!customerRequiredTypes.includes(String(item?.productType || "").toLowerCase())) {
+      return count;
+    }
+    const qty = Math.max(1, Number(item.qty) || 1);
+    let next = count;
+    for (let unitIndex = 0; unitIndex < qty; unitIndex += 1) {
+      const recipient = recipientAssignments[`${itemIndex}:${unitIndex}`] || primaryCustomer;
+      if (!recipient?.contactEmail) next += 1;
+    }
+    return next;
+  }, 0);
   const removeWaiver = (signatureId) => {
     if (!onChangeWaivers) return;
     onChangeWaivers(
@@ -348,7 +369,7 @@ export function CartPanel({
           ticket rows below. Each leaf shows whether it is already
           assigned to a ticket. Cashier can detach the whole waiver
           (× on the header) or add another guest at any time. */}
-      {(waiversNeeded > 0 || waiversAttached.length > 0) && (
+      {(needsCustomer || waiversNeeded > 0 || waiversAttached.length > 0 || primaryCustomer) && (
         <div style={{
           padding: "12px 18px",
           background: primaryCustomer ? "#EAF8EF" : "var(--ink-25)",
@@ -365,18 +386,47 @@ export function CartPanel({
             </div>
             <button
               type="button"
-              onClick={onCollectWaivers}
+              onClick={() =>
+                onCollectWaivers?.(
+                  primaryCustomer && waiversNeeded > 0 ? "waiver" : "customer"
+                )
+              }
               className="a-btn a-btn--primary a-btn--sm"
               style={{ flexShrink: 0 }}
             >
               <Icon name="user-plus" size={14} />
-              {primaryCustomer ? "Add waiver" : "Add customer"}
+              {primaryCustomer && waiversNeeded > 0 ? "Add waiver" : "Add customer"}
             </button>
           </div>
 
           {!primaryCustomer ? (
             <div style={{ fontSize: 13, color: "var(--ink-600)" }}>
-              Add the booking customer with a signed waiver to start covering tickets.
+              {waiversNeeded > 0
+                ? "Add the booking customer with a signed waiver to start covering tickets."
+                : "Add the booking customer before taking payment."}
+            </div>
+          ) : !primaryCustomer.signatureId ? (
+            <div style={{
+              background: "white",
+              borderRadius: 10,
+              padding: "8px 10px",
+              border: "1.5px solid var(--ink-200)",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}>
+              <Icon name="user-round" size={14} style={{ color: "var(--ink-700)" }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink-900)" }}>
+                  {primaryCustomer.name}
+                  <span style={{ marginLeft: 6, fontSize: 10, color: "var(--ink-500)", fontWeight: 700 }}>
+                    customer
+                  </span>
+                </div>
+                <div style={{ fontSize: 10, color: "var(--ink-500)" }}>
+                  {primaryCustomer.contact || primaryCustomer.contactEmail || primaryCustomer.contactPhone || "contact not on file"}
+                </div>
+              </div>
             </div>
           ) : (
             <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
@@ -459,7 +509,18 @@ export function CartPanel({
           </div>
         )}
         {items.map((it, idx) => (
-          <CartRow key={idx} item={it} onRemove={() => onRemove?.(idx)} onQty={(d) => onQty?.(idx, d)} />
+          <CartRow
+            key={idx}
+            item={it}
+            itemIndex={idx}
+            primaryCustomer={primaryCustomer}
+            requiresRecipient={customerRequiredTypes.includes(String(it?.productType || "").toLowerCase())}
+            recipientAssignments={recipientAssignments}
+            onAssignRecipient={onAssignRecipient}
+            onClearRecipient={onClearRecipient}
+            onRemove={() => onRemove?.(idx)}
+            onQty={(d) => onQty?.(idx, d)}
+          />
         ))}
 
         {/* Per-ticket coverage rows — one row per waiver-required spot,
@@ -526,7 +587,7 @@ export function CartPanel({
                             const v = e.target.value;
                             if (!v) return;
                             if (v === "__search") {
-                              onCollectWaivers?.();
+                              onCollectWaivers?.("waiver");
                               return;
                             }
                             onAssignTicket?.(i, v);
@@ -736,8 +797,14 @@ export function CartPanel({
           className="a-btn a-btn--primary"
           style={{ marginTop: 10, width: "100%", justifyContent: "center", padding: "14px 18px", fontSize: 16 }}
           onClick={onCheckout}
-          disabled={items.length === 0 || isSubmitting || waiversMissing > 0}
-          title={waiversMissing > 0 ? `Add ${waiversMissing} more guest${waiversMissing === 1 ? "" : "s"} with signed waivers before taking payment` : undefined}
+          disabled={items.length === 0 || isSubmitting || waiversMissing > 0 || missingRecipients > 0}
+          title={
+            waiversMissing > 0
+              ? `Add ${waiversMissing} more guest${waiversMissing === 1 ? "" : "s"} with signed waivers before taking payment`
+              : missingRecipients > 0
+                ? `Assign ${missingRecipients} recipient${missingRecipients === 1 ? "" : "s"} before taking payment`
+                : undefined
+          }
         >
           <Icon name="credit-card" size={20} />
           {isSubmitting
@@ -763,10 +830,30 @@ export function CartPanel({
   );
 }
 
-function CartRow({ item, onRemove, onQty }) {
+function CartRow({
+  item,
+  itemIndex,
+  primaryCustomer,
+  requiresRecipient = false,
+  recipientAssignments = {},
+  onAssignRecipient,
+  onClearRecipient,
+  onRemove,
+  onQty,
+}) {
+  const qty = Math.max(1, Number(item.qty) || 1);
+  const recipientRows = requiresRecipient
+    ? Array.from({ length: qty }, (_, unitIndex) => {
+        const key = `${itemIndex}:${unitIndex}`;
+        const assigned = recipientAssignments[key];
+        const recipient = assigned || primaryCustomer;
+        return { key, unitIndex, assigned, recipient };
+      })
+    : [];
+
   return (
     <div style={{
-      display: "flex", alignItems: "center", gap: 12,
+      display: "grid", gridTemplateColumns: "40px minmax(0, 1fr) auto auto auto", alignItems: "center", gap: 12,
       padding: "12px 14px",
       background: item.featured ? "var(--aero-orange-50)" : "#fff",
       border: item.featured ? "2px solid var(--ink-800)" : "1.5px solid var(--ink-100)",
@@ -783,6 +870,39 @@ function CartRow({ item, onRemove, onQty }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 700, fontSize: 15, color: "var(--ink-800)" }}>{item.name}</div>
         <div style={{ fontSize: 12, color: "var(--ink-500)" }}>{item.meta}</div>
+        {recipientRows.length > 0 && (
+          <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+            {recipientRows.map(({ key, unitIndex, assigned, recipient }) => (
+              <div
+                key={key}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  minHeight: 28,
+                  padding: "4px 8px",
+                  border: "1px solid var(--ink-100)",
+                  borderRadius: 8,
+                  background: "#fff",
+                  fontSize: 12,
+                }}
+              >
+                <span style={{ fontWeight: 800, color: "var(--ink-500)" }}>#{unitIndex + 1}</span>
+                <span style={{ flex: 1, minWidth: 0, color: recipient ? "var(--ink-800)" : "var(--color-danger, #DC2626)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {recipient?.name || recipient?.guestName || "Assign recipient"}
+                </span>
+                {assigned && (
+                  <button type="button" className="a-btn a-btn--ghost a-btn--xs" onClick={() => onClearRecipient?.(itemIndex, unitIndex)}>
+                    Clear
+                  </button>
+                )}
+                <button type="button" className="a-btn a-btn--ghost a-btn--xs" onClick={() => onAssignRecipient?.(itemIndex, unitIndex)}>
+                  {recipient ? "Change" : "Assign"}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
       <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 6px", background: "var(--ink-50)", borderRadius: 999 }}>
         <button onClick={() => onQty(-1)} style={{ all: "unset", cursor: "pointer", width: 24, height: 24, borderRadius: "50%", background: "#fff", boxShadow: "var(--shadow-1)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>−</button>
