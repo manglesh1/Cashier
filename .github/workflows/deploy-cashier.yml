@@ -1,0 +1,119 @@
+name: Deploy cashier to AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment target
+        required: true
+        default: production
+        type: choice
+        options:
+          - production
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  AWS_ROLE_ARN: arn:aws:iam::072508717210:role/movira-github-actions-deploy
+  ARTIFACT_BUCKET: movira-deploy-072508717210-ap-south-1
+  CLOUDFRONT_DISTRIBUTION_ID: E3BK0WD0H75QO0
+  INSTANCE_ID: i-04b24ccadd1321a1c
+  APP_URL: https://dfu5picvz3zde.cloudfront.net
+  CASHIER_BASE_PATH: /cashier/
+
+jobs:
+  deploy:
+    name: Build and deploy cashier
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Load production build config
+        run: |
+          echo "VITE_API_BASE_URL=/api" >> "$GITHUB_ENV"
+          echo "VITE_ADMIN_URL=${APP_URL}" >> "$GITHUB_ENV"
+          echo "VITE_BASE_PATH=${CASHIER_BASE_PATH}" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      - name: Package cashier
+        run: tar -czf cashier.tar.gz -C dist .
+
+      - name: Upload artifact
+        run: aws s3 cp cashier.tar.gz "s3://${ARTIFACT_BUCKET}/cashier/frontend.tar.gz"
+
+      - name: Deploy cashier on EC2
+        run: |
+          cat > /tmp/movira-cashier-ssm-commands.json <<COMMANDS
+          {
+            "commands": [
+              "set -euo pipefail",
+              "aws s3 cp s3://${ARTIFACT_BUCKET}/cashier/frontend.tar.gz /tmp/movira-cashier.tar.gz --region ${AWS_REGION}",
+              "mkdir -p /opt/movira/cashier",
+              "rm -rf /opt/movira/cashier/*",
+              "tar --warning=no-unknown-keyword -xzf /tmp/movira-cashier.tar.gz -C /opt/movira/cashier",
+              "python3 - <<'PY'",
+              "from pathlib import Path",
+              "path = Path('/etc/nginx/conf.d/movira.conf')",
+              "text = path.read_text()",
+              "dollar = chr(36)",
+              "block = '\\n'.join([",
+              "    '  location = /cashier {',",
+              "    '    return 301 /cashier/;',",
+              "    '  }',",
+              "    '',",
+              "    '  location /cashier/ {',",
+              "    '    alias /opt/movira/cashier/;',",
+              "    f'    try_files {dollar}uri {dollar}uri/ /cashier/index.html;',",
+              "    '  }',",
+              "]) + '\\n'",
+              "if 'location /cashier/' not in text:",
+              "    marker = '\\n  location / {\\n'",
+              "    if marker not in text:",
+              "        raise SystemExit('Could not find root location block in movira.conf')",
+              "    path.write_text(text.replace(marker, block + marker))",
+              "PY",
+              "nginx -t",
+              "systemctl reload nginx"
+            ]
+          }
+          COMMANDS
+
+          COMMAND_ID="$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name AWS-RunShellScript \
+            --comment "Deploy Movira cashier from GitHub Actions" \
+            --parameters file:///tmp/movira-cashier-ssm-commands.json \
+            --query 'Command.CommandId' \
+            --output text)"
+
+          if ! aws ssm wait command-executed --command-id "${COMMAND_ID}" --instance-id "${INSTANCE_ID}"; then
+            aws ssm get-command-invocation --command-id "${COMMAND_ID}" --instance-id "${INSTANCE_ID}"
+            exit 1
+          fi
+
+          aws ssm get-command-invocation \
+            --command-id "${COMMAND_ID}" \
+            --instance-id "${INSTANCE_ID}" \
+            --query '{Status:Status,ResponseCode:ResponseCode}'
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${CLOUDFRONT_DISTRIBUTION_ID}" \
+            --paths "/cashier*" "/cashier/*"
