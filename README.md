@@ -29,6 +29,22 @@ Two env vars (read at build time):
 |----------------------|----------------------------|-------------------------------------------|
 | `VITE_API_BASE_URL`  | `/api`                     | aeroSportsAdmin REST root                 |
 | `VITE_ADMIN_URL`     | `http://localhost:5172`    | The admin app — opened in a new tab for actions the cashier defers (take payment, send waiver) |
+| `VITE_BASE_PATH`     | `/`                        | URL base path when deployed under a subpath, such as `/cashier/` |
+
+## Deploy
+
+GitHub Actions has a manual deployment workflow:
+
+1. Open **Actions** → **Deploy cashier to AWS**.
+2. Click **Run workflow**.
+3. Select `production`.
+4. Click **Run workflow** again.
+
+Production deploys to:
+
+```text
+https://dfu5picvz3zde.cloudfront.net/cashier/
+```
 
 ## Architecture
 

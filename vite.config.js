@@ -5,8 +5,10 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const port = Number(env.VITE_PORT || 5173);
   const apiTarget = env.VITE_API_PROXY_TARGET || "http://localhost:5171";
+  const base = env.VITE_BASE_PATH || "/";
 
   return {
+    base,
     plugins: [react()],
     server: {
       host: "0.0.0.0",

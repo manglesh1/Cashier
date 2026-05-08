@@ -39,7 +39,7 @@ import {
   useGetPresetFullQuery,
   useDeviceHeartbeatMutation,
 } from "../../features/pos/posApi";
-import { useCreateBookingMutation } from "../../features/bookings/bookingApi";
+import { useCreateBookingMutation, useValidateCartMutation } from "../../features/bookings/bookingApi";
 import { getTerminal, clearTerminal } from "../../lib/terminal";
 
 // ── Map preset { sections: [{ products: [...] }] } → CatalogGrid sections
@@ -109,6 +109,12 @@ function normalizePresetSections(preset) {
         id: p.productItemId || p.id || `${sec.sectionId}-${p.activityId || p.productId}`,
         activityId: p.activityId || p.productId,
         variationId: p.variationId,
+        variationName: p.variationName || null,
+        variationOptions: (p.variationOptions || []).map((v) => ({
+          variationId: v.variationId || v.id,
+          name: v.name || v.variationName || v.label || "Option",
+          price: Number(v.price ?? p.price ?? p.unitPrice ?? 0),
+        })).filter((v) => v.variationId),
         productItemId: p.productItemId,
         productType,
         name: p.displayName || p.activityName || p.productName || p.name || "Untitled",
@@ -128,8 +134,26 @@ function normalizePresetSections(preset) {
   }));
 }
 
+const CUSTOMER_REQUIRED_PRODUCT_TYPES = new Set([
+  "voucher_pack",
+  "membership",
+  "gift_card",
+]);
+
+function productTypeKey(item) {
+  return String(item?.productType || "").toLowerCase();
+}
+
 function isVoucherPackItem(item) {
-  return String(item?.productType || "").toLowerCase() === "voucher_pack";
+  return productTypeKey(item) === "voucher_pack";
+}
+
+function isCustomerRequiredItem(item) {
+  return CUSTOMER_REQUIRED_PRODUCT_TYPES.has(productTypeKey(item));
+}
+
+function isNoScheduleSkuItem(item) {
+  return isCustomerRequiredItem(item);
 }
 
 function buildLinePricingSummary(item, cartPricing) {
@@ -203,6 +227,7 @@ export function CashierApp() {
   const [waiversAttached, setWaiversAttached] = useState([]);
   const [cartCustomer, setCartCustomer] = useState(null);
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
+  const [waiverModalMode, setWaiverModalMode] = useState("customer");
   // Per-ticket assignment of waiver-pool people to waiver-required spots.
   // Map<ticketIndex, "signatureId:role"> where role is "signer" or
   // "minor:N". Auto-filled when a waiver is attached, but the cashier
@@ -280,6 +305,7 @@ export function CashierApp() {
   }, [waiverPool, waiverSpotCount]);
 
   const [createBooking, { isLoading: isCreating }] = useCreateBookingMutation();
+  const [validateCart, { isLoading: isValidatingCart }] = useValidateCartMutation();
 
   // ── Resolve which template to load ─────────────────────────────────
   // The terminal is paired (PairTerminal page) before the user logs in;
@@ -352,6 +378,8 @@ export function CashierApp() {
           id: productItem.id,
           activityId: productItem.activityId,
           variationId: productItem.variationId,
+          variationName: productItem.variationName,
+          variationOptions: productItem.variationOptions || [],
           productType: productItem.productType,
           name: productItem.name,
           meta,
@@ -391,8 +419,8 @@ export function CashierApp() {
       return;
     }
 
-    const voucherItems = items.filter(isVoucherPackItem);
-    const regularItems = items.filter((it) => !isVoucherPackItem(it));
+    const noScheduleItems = items.filter(isNoScheduleSkuItem);
+    const regularItems = items.filter((it) => !isNoScheduleSkuItem(it));
 
     const sessions = regularItems
       .filter((it) => it.activityId)
@@ -424,8 +452,8 @@ export function CashierApp() {
       `Walk-in ${Math.random().toString(36).slice(-4).toUpperCase()}`;
     const guestEmail = primaryGuest?.contactEmail || member?.email || "";
     const guestPhone = primaryGuest?.contactPhone || member?.phone || "";
-    if (voucherItems.length > 0 && !guestEmail) {
-      toast.error("Select a customer with email before selling a voucher pack.");
+    if (noScheduleItems.length > 0 && !guestEmail) {
+      toast.error("Select a customer with email before selling vouchers, memberships, or gift cards.");
       return;
     }
     const payload = {
@@ -466,6 +494,27 @@ export function CashierApp() {
     };
 
     try {
+      await validateCart({
+        locationId,
+        guestInfo: payload.guestInfo,
+        items: items.map((item) => ({
+          activityId: item.activityId,
+          variationId: item.variationId,
+          productType: item.productType,
+          name: item.name,
+          quantity: item.qty,
+        })),
+      }).unwrap();
+    } catch (err) {
+      const errors = Array.isArray(err?.data?.errors) ? err.data.errors : [];
+      const msg = errors.length
+        ? errors.map((e) => e.message || e).join(" ")
+        : err?.data?.message || err?.data?.error || err?.message || "Cart failed validation";
+      toast.error(msg);
+      return;
+    }
+
+    try {
       let bookingForPayment = null;
 
       if (regularItems.length > 0) {
@@ -484,7 +533,7 @@ export function CashierApp() {
         };
       }
 
-      for (const item of voucherItems) {
+      for (const item of noScheduleItems) {
         const repeats = Math.max(1, Number(item.qty) || 1);
         for (let i = 0; i < repeats; i += 1) {
           const lineItem = { ...item, qty: 1 };
@@ -500,7 +549,7 @@ export function CashierApp() {
           }).unwrap();
           const bookingId = res?.data?.bookingId || res?.data?.bookingMasterId || res?.bookingId || res?.bookingMasterId || res?.id;
           setCreatedBookingId(bookingId);
-          toast.success(`Voucher sold: ${item.name}`);
+          toast.success(`${item.name} sold`);
           const data = res?.data || {};
           bookingForPayment = {
             bookingId,
@@ -570,10 +619,13 @@ export function CashierApp() {
           onCheckout={handleCheckout}
           onPricingChange={setCartPricing}
           variant={v.cartVariant}
-          isSubmitting={isCreating}
+          isSubmitting={isCreating || isValidatingCart}
           waiversAttached={waiversAttached}
           cartCustomer={cartCustomer}
-          onCollectWaivers={() => setWaiverModalOpen(true)}
+          onCollectWaivers={(mode = "customer") => {
+            setWaiverModalMode(mode);
+            setWaiverModalOpen(true);
+          }}
           onChangeWaivers={setWaiversAttached}
           waiverPool={waiverPool}
           ticketAssignments={ticketAssignments}
@@ -760,12 +812,14 @@ export function CashierApp() {
       </main>
       <CartWaiverModal
         open={waiverModalOpen}
+        mode={waiverModalMode}
         needed={items.reduce((n, it) => n + (it.requiresWaiver ? it.qty : 0), 0)}
         attached={waiversAttached}
         onChange={(next) => {
           setWaiversAttached(next);
           setCartCustomer((current) => current || next[0] || null);
         }}
+        onCustomerChange={setCartCustomer}
         onClose={() => setWaiverModalOpen(false)}
       />
       <CashierPaymentDialog
