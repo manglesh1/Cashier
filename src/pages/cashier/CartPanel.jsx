@@ -12,6 +12,9 @@ import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 // maxValue caps a percentage so e.g. "10% off, max $20" works.
 function computeDiscountAmount(discount, subtotal) {
   if (!discount) return 0;
+  if (discount.amount !== undefined && discount.amount !== null) {
+    return Math.min(Number(discount.amount) || 0, subtotal);
+  }
   const value = Number(discount.value || 0);
   const max = Number(discount.maxValue || 0);
   if (Number(discount.discountType) === 1) {
@@ -136,6 +139,19 @@ export function CartPanel({
   };
 
   const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
+  const promoCartLines = React.useMemo(
+    () =>
+      items
+        .map((item) => ({
+          activityId: Number(item.activityId || 0) || null,
+          variationId: Number(item.variationId || 0) || null,
+          activityType: item.activityTypeKey || item.typeKey || item.productType || null,
+          quantity: Math.max(1, Number(item.qty || 1) || 1),
+          subtotal: Number(((Number(item.price || 0) * Number(item.qty || 1)) || 0).toFixed(2)),
+        }))
+        .filter((line) => line.subtotal > 0 && (line.activityId || line.variationId || line.activityType)),
+    [items]
+  );
   const discountAmount = computeDiscountAmount(promo, subtotal);
   const memberDiscount = member ? subtotal * 0.1 : 0;
   const afterDiscount = Math.max(0, subtotal - discountAmount - memberDiscount);
@@ -170,7 +186,11 @@ export function CartPanel({
     // Code path — validates against the server, gets discount details
     if (promoMode === "code") {
       try {
-        const res = await validate(raw).unwrap();
+        const res = await validate({
+          code: raw,
+          subtotalAmount: subtotal,
+          cartLines: promoCartLines,
+        }).unwrap();
         if (res?.success && res.data) {
           setPromo(res.data);
           setPromoOpen(false);

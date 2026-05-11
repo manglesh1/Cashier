@@ -6,7 +6,7 @@
 // Internally manages amount/method/note/discount state and the API call.
 // Caller just supplies the freshly-created booking and two callbacks.
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import {
@@ -19,6 +19,31 @@ import { getTerminal } from "../../lib/terminal";
 
 const moneyFmt = (v) => `$${(Number(v) || 0).toFixed(2)}`;
 const roundMoney = (v) => Number((Number(v) || 0).toFixed(2));
+
+function buildBookingPromoCartLines(booking) {
+  const bookingItems = Array.isArray(booking?.bookingItems) ? booking.bookingItems : [];
+  const purchasedItems = Array.isArray(booking?.purchasedItems) ? booking.purchasedItems : [];
+  return [
+    ...bookingItems.map((item) => ({
+      activityId: Number(item.activityId || item.activity?.activityId || item.variation?.activityId || 0) || null,
+      variationId: Number(item.variationId || item.variation?.variationId || 0) || null,
+      activityType: item.activityTypeKey || item.productType || item.activity?.typeKey || null,
+      quantity: Math.max(1, Number(item.noOfTickets || item.quantity || 1) || 1),
+      subtotal: roundMoney(item.totalPrice || item.total || item.amount || 0),
+      date: item.date || item.activityDate || null,
+      timefrom: item.timefrom || item.fromTime || item.startTime || null,
+    })),
+    ...purchasedItems
+      .filter((item) => !item.isBundleInclusion)
+      .map((item) => ({
+        activityId: Number(item.activityId || 0) || null,
+        variationId: Number(item.variationId || 0) || null,
+        activityType: item.activityTypeKey || item.productType || null,
+        quantity: Math.max(1, Number(item.count || item.quantity || 1) || 1),
+        subtotal: roundMoney(item.total || item.totalPrice || 0),
+      })),
+  ].filter((line) => line.subtotal > 0 && (line.activityId || line.variationId || line.activityType));
+}
 
 function triggerCashDrawer({ bookingId, terminal }) {
   const payload = {
@@ -81,6 +106,7 @@ export default function CashierPaymentDialog({
   const balanceDue = Number(booking.balanceDue ?? booking.totalAmount ?? 0);
   const subTotal = Number(booking.subTotal ?? booking.subtotal ?? balanceDue);
   const taxAmount = Number(booking.taxAmount ?? booking.tax ?? 0);
+  const promoCartLines = useMemo(() => buildBookingPromoCartLines(booking), [booking]);
   const discountAmount = roundMoney(Math.min(Number(discount?.amount || 0), balanceDue));
   const payableBalance = roundMoney(Math.max(0, balanceDue - discountAmount));
   const tendered = Number(amount) || 0;
@@ -109,12 +135,18 @@ export default function CashierPaymentDialog({
       return;
     }
     try {
-      const res = await validateDiscountCode(code).unwrap();
+      const res = await validateDiscountCode({
+        code,
+        subtotalAmount: subTotal || balanceDue,
+        cartLines: promoCartLines,
+      }).unwrap();
       const promo = res?.data || {};
       const rawValue = Number(promo.value || 0);
-      const calculated = Number(promo.discountType) === 1
-        ? roundMoney(Math.min(payableBalance, (balanceDue * rawValue) / 100, Number(promo.maxValue || Infinity)))
-        : roundMoney(Math.min(payableBalance, rawValue));
+      const calculated = promo.amount !== undefined && promo.amount !== null
+        ? roundMoney(Math.min(payableBalance, Number(promo.amount) || 0))
+        : Number(promo.discountType) === 1
+          ? roundMoney(Math.min(payableBalance, (balanceDue * rawValue) / 100, Number(promo.maxValue || Infinity)))
+          : roundMoney(Math.min(payableBalance, rawValue));
       if (calculated <= 0) {
         toast.error("Coupon has no value for this balance.");
         return;

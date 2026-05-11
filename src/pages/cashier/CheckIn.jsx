@@ -45,6 +45,31 @@ const today = localIsoDate();
 const moneyFmt = (value) => `$${(Number(value) || 0).toFixed(2)}`;
 const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
 
+function buildBookingPromoCartLines(booking) {
+  const bookingItems = Array.isArray(booking?.bookingItems) ? booking.bookingItems : [];
+  const purchasedItems = Array.isArray(booking?.purchasedItems) ? booking.purchasedItems : [];
+  return [
+    ...bookingItems.map((item) => ({
+      activityId: Number(item.activityId || item.activity?.activityId || item.variation?.activityId || 0) || null,
+      variationId: Number(item.variationId || item.variation?.variationId || 0) || null,
+      activityType: item.activityTypeKey || item.productType || item.activity?.typeKey || null,
+      quantity: Math.max(1, Number(item.noOfTickets || item.quantity || 1) || 1),
+      subtotal: roundMoney(item.totalPrice || item.total || item.amount || 0),
+      date: item.date || item.activityDate || null,
+      timefrom: item.timefrom || item.fromTime || item.startTime || null,
+    })),
+    ...purchasedItems
+      .filter((item) => !item.isBundleInclusion)
+      .map((item) => ({
+        activityId: Number(item.activityId || 0) || null,
+        variationId: Number(item.variationId || 0) || null,
+        activityType: item.activityTypeKey || item.productType || null,
+        quantity: Math.max(1, Number(item.count || item.quantity || 1) || 1),
+        subtotal: roundMoney(item.total || item.totalPrice || 0),
+      })),
+  ].filter((line) => line.subtotal > 0 && (line.activityId || line.variationId || line.activityType));
+}
+
 const fmtTime = (range) => (range || "").split(/[–-]/)[0].trim() || "—";
 
 
@@ -1703,6 +1728,7 @@ function CheckInPaymentModal({
   const taxAmount = Number(booking?.taxAmount ?? booking?.tax ?? 0) || 0;
   const subTotal = roundMoney(Math.max(0, Number(booking?.subTotal ?? booking?.subtotal ?? booking?.totalAmount ?? balanceDue) || 0));
   const existingDiscount = Number(booking?.discountAmount || 0) || 0;
+  const promoCartLines = useMemo(() => buildBookingPromoCartLines(booking), [booking]);
   const methods = [
     { value: "cash", label: "Cash", icon: "banknote", bg: "#F23B20" },
     { value: "card", label: "Credit / Debit", icon: "credit-card", bg: "#FF8A00" },
@@ -1739,12 +1765,18 @@ function CheckInPaymentModal({
       return;
     }
     try {
-      const res = await validateDiscountCode(code).unwrap();
+      const res = await validateDiscountCode({
+        code,
+        subtotalAmount: subTotal || balanceDue,
+        cartLines: promoCartLines,
+      }).unwrap();
       const promo = res?.data || {};
       const rawValue = Number(promo.value || 0);
-      const calculated = Number(promo.discountType) === 1
-        ? roundMoney(Math.min(payableBalance, (balanceDue * rawValue) / 100, Number(promo.maxValue || Infinity)))
-        : roundMoney(Math.min(payableBalance, rawValue));
+      const calculated = promo.amount !== undefined && promo.amount !== null
+        ? roundMoney(Math.min(payableBalance, Number(promo.amount) || 0))
+        : Number(promo.discountType) === 1
+          ? roundMoney(Math.min(payableBalance, (balanceDue * rawValue) / 100, Number(promo.maxValue || Infinity)))
+          : roundMoney(Math.min(payableBalance, rawValue));
       if (calculated <= 0) {
         toast.error("Coupon has no value for this balance.");
         return;
