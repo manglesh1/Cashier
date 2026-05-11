@@ -49,9 +49,9 @@ export default function PairTerminal({ onPaired }) {
       const msg =
         err?.data?.error ||
         err?.data?.message ||
-        (err?.status === 404 && "Pairing endpoint not found. Check VITE_API_BASE_URL or the dev proxy, then restart npm run dev.") ||
+        (err?.status === 404 && "Invalid pairing code. Ask admin to regenerate a fresh code for this terminal.") ||
         (err?.status === 410 && "Pairing code has expired — ask admin to regenerate") ||
-        (err?.status === "FETCH_ERROR" && "Can't reach the API. Check VITE_API_BASE_URL in .env.") ||
+        (err?.status === "FETCH_ERROR" && "Can't reach the server. Hard refresh this page, then try the code again.") ||
         (typeof err?.status === "number" && `HTTP ${err.status}`) ||
         "Pairing failed";
       toast.error(String(msg), { duration: 6000 });
