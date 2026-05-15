@@ -28,7 +28,7 @@ export default function PairTerminal({ onPaired }) {
     }
     try {
       const res = await pair({ code, appVersion: APP_VERSION }).unwrap();
-      const device = res?.data;
+      const device = res?.data || res?.device || res?.terminal || res;
       if (!device?.deviceId) {
         toast.error("Pairing succeeded but no device data returned");
         return;
