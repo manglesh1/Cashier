@@ -190,6 +190,7 @@ export function CartPanel({
           code: raw,
           subtotalAmount: subtotal,
           cartLines: promoCartLines,
+          guestId: primaryCustomer?.guestId || primaryCustomer?.id || null,
         }).unwrap();
         if (res?.success && res.data) {
           setPromo(res.data);
