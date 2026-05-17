@@ -21,6 +21,7 @@ export const discountApi = baseApi.injectEndpoints({
           body: {
             subtotalAmount: payload.subtotalAmount || 0,
             cartLines: payload.cartLines || [],
+            guestId: payload.guestId || null,
             channel: "POS",
           },
         };

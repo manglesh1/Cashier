@@ -1769,6 +1769,7 @@ function CheckInPaymentModal({
         code,
         subtotalAmount: subTotal || balanceDue,
         cartLines: promoCartLines,
+        guestId: booking?.guestId || null,
       }).unwrap();
       const promo = res?.data || {};
       const rawValue = Number(promo.value || 0);
