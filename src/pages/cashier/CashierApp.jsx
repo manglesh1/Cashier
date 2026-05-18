@@ -22,6 +22,7 @@ import { Icon } from "./Icon";
 import { CartPanel } from "./CartPanel";
 import { CartWaiverModal } from "./CartWaiverModal";
 import CashierPaymentDialog from "./CashierPaymentDialog";
+import { CashierScreenBoundary } from "./CashierScreenBoundary";
 import { CatalogGrid } from "./CatalogGrid";
 import { WaveBoard } from "./WaveBoard";
 import { QuickBuilder } from "./QuickBuilder";
@@ -731,7 +732,7 @@ export function CashierApp() {
   }
 
   return (
-    <div style={{ display: "flex", flex: 1, minWidth: 0 }}>
+    <div style={{ display: "flex", flex: 1, minWidth: 0, minHeight: 0, height: "100%" }}>
       <aside
         style={{
           width: 88,
@@ -742,6 +743,7 @@ export function CashierApp() {
           alignItems: "center",
           padding: "20px 0",
           flexShrink: 0,
+          minHeight: 0,
         }}
       >
         <div style={{ marginBottom: 20 }}>
@@ -752,7 +754,7 @@ export function CashierApp() {
             <circle cx="60" cy="98" r="5" fill="#6A40F5" />
           </svg>
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, width: "100%", padding: "0 8px" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minHeight: 0, width: "100%", padding: "0 8px", overflowY: "auto" }}>
           {screens.map((s) => (
             <button
               key={s.id}
@@ -808,7 +810,19 @@ export function CashierApp() {
           ),
           terminal: header.props.terminal ?? (myDevice?.deviceName || myDevice?.name),
         })}
-        <div style={{ flex: 1, display: "flex", minHeight: 0, overflow: "auto" }}>{body}</div>
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            minWidth: 0,
+            minHeight: 0,
+            overflow: screen === "sell" ? "hidden" : "auto",
+          }}
+        >
+          <CashierScreenBoundary screenKey={screen}>
+            {body}
+          </CashierScreenBoundary>
+        </div>
       </main>
       <CartWaiverModal
         open={waiverModalOpen}

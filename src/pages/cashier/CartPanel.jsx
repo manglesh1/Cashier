@@ -350,7 +350,7 @@ export function CartPanel({
 
   const isBold = variant === "bold";
   const panelStyle = {
-    width: 460, flexShrink: 0,
+    width: "clamp(360px, 30vw, 460px)", flexShrink: 0,
     minHeight: 0,
     alignSelf: "stretch",
     background: "var(--ink-0)",
