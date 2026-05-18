@@ -231,9 +231,19 @@ export function CheckIn() {
   const visibleBookings = bookingBuckets[bookingBucket] || [];
 
   const totalToday = stats.total ?? bookings.length;
-  // Cheap proxy for "checked in" — bookings whose all participants are checked in.
-  // Real number would require a separate aggregate endpoint; this is good enough.
-  const checkedInCount = bookings.filter((b) => (b.checkedInGuests ?? 0) >= (b.totalGuests ?? 0) && (b.totalGuests ?? 0) > 0).length;
+  const guestTotals = useMemo(() => {
+    const totalGuests = bookings.reduce((sum, b) => sum + Number(b.totalGuests || 0), 0);
+    const checkedInGuests = bookings.reduce((sum, b) => sum + Number(b.checkedInGuests || 0), 0);
+    const completedBookings = bookings.filter(
+      (b) => Number(b.totalGuests || 0) > 0 && Number(b.checkedInGuests || 0) >= Number(b.totalGuests || 0)
+    ).length;
+    return {
+      totalGuests,
+      checkedInGuests,
+      pendingGuests: Math.max(0, totalGuests - checkedInGuests),
+      completedBookings,
+    };
+  }, [bookings]);
 
   const refreshSelectedBooking = async () => {
     const result = await refetch();
@@ -279,18 +289,28 @@ export function CheckIn() {
       </div>
 
       {/* Stats strip */}
-      <div style={{ padding: "16px 28px", display: "flex", gap: 28, flexShrink: 0, borderBottom: "1px solid var(--ink-100)" }}>
+      <div style={{
+        padding: "12px 28px",
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+        gap: 12,
+        flexShrink: 0,
+        borderBottom: "1px solid var(--ink-100)",
+      }}>
         <Stat label="Booked today" value={totalToday} />
-        <Stat label="Checked in" value={checkedInCount} fg="var(--color-success)" />
-        <Stat label="Pending arrival" value={Math.max(0, totalToday - checkedInCount)} />
+        <Stat label="Guests checked in" value={guestTotals.checkedInGuests} fg="var(--color-success)" />
+        <Stat label="Pending guests" value={guestTotals.pendingGuests} fg={guestTotals.pendingGuests > 0 ? "#8A5A00" : "var(--color-success)"} />
+        <Stat label="Completed bookings" value={guestTotals.completedBookings} />
       </div>
 
       {/* Body — list (left) + selected detail (right) */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
         <div style={{
-          width: 360,
-          flex: "0 0 360px",
+          width: "clamp(300px, 24vw, 360px)",
+          flex: "0 0 clamp(300px, 24vw, 360px)",
           overflowY: "auto",
+          overscrollBehavior: "contain",
+          minHeight: 0,
           padding: "12px 14px 12px 18px",
           borderRight: "1px solid var(--ink-100)",
           background: "var(--ink-25)",
@@ -378,7 +398,15 @@ function parseTime(range) {
 
 function Stat({ label, value, fg }) {
   return (
-    <div>
+    <div
+      style={{
+        minWidth: 0,
+        padding: "8px 10px",
+        background: "white",
+        border: "1.5px solid var(--ink-100)",
+        borderRadius: 10,
+      }}
+    >
       <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-500)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
         {label}
       </div>
@@ -386,10 +414,11 @@ function Stat({ label, value, fg }) {
         className="display-num"
         style={{
           fontFamily: "var(--font-display, inherit)",
-          fontSize: 26,
+          fontSize: 24,
           fontWeight: 800,
           color: fg || "var(--ink-900)",
           marginTop: 2,
+          lineHeight: 1,
         }}
       >
         {value}
@@ -753,6 +782,20 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     () => tickets.filter(isTicketActionable).length,
     [tickets, ticketBlockers]
   );
+  const selectedProgress = useMemo(() => {
+    const blocked = tickets.filter((ticket) => {
+      const reason = ticketBlockers.get(ticket.ticketCode);
+      return reason && reason !== "already_redeemed";
+    }).length;
+    return {
+      checkedIn: redeemedCount,
+      total: totalCount,
+      ready: tickets.filter(isTicketActionable).length,
+      blocked,
+      pending: Math.max(0, totalCount - redeemedCount),
+      percent: totalCount > 0 ? Math.min(100, Math.round((redeemedCount / totalCount) * 100)) : 0,
+    };
+  }, [tickets, ticketBlockers, redeemedCount, totalCount]);
   const allActionableSelected = safeSelectableCodes.length > 0 && safeSelectableCodes.every((c) => selectedCodes.has(c));
 
   useEffect(() => {
@@ -1025,7 +1068,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       </div>
 
       {/* Toolbar — ROLLER-style: select all + hide checked-in + batch redeem */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 12 }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 12, overscrollBehavior: "contain" }}>
       <div style={{
         display: "grid",
         gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
@@ -1039,7 +1082,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         />
         <CloseoutPill
           label="Check-in"
-          value={`${redeemedCount}/${totalCount}`}
+          value={`${selectedProgress.checkedIn}/${selectedProgress.total}`}
           tone={isFullyCheckedIn ? "success" : "warning"}
         />
         <CloseoutPill
@@ -1048,6 +1091,8 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           tone={balanceDue > 0 ? "danger" : "success"}
         />
       </div>
+
+      <SelectedProgressPanel progress={selectedProgress} />
 
       <GuestWorkflowPanel
         bookingId={booking.bookingId}
@@ -1357,13 +1402,14 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 
       <aside
         style={{
-          width: 370,
-          flex: "0 0 370px",
+          width: "clamp(310px, 28vw, 370px)",
+          flex: "0 0 clamp(310px, 28vw, 370px)",
           minHeight: 0,
           padding: "12px 14px 12px 0",
           display: "flex",
           flexDirection: "column",
           overflowY: "auto",
+          overscrollBehavior: "contain",
         }}
       >
         <CheckInSettlementPanel
@@ -1396,6 +1442,46 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 
 function activityNameFromBooking(b) {
   return b?.activityName || "Item";
+}
+
+function SelectedProgressPanel({ progress }) {
+  const percent = Number(progress?.percent || 0);
+  return (
+    <div
+      style={{
+        marginBottom: 8,
+        padding: "9px 10px",
+        background: "white",
+        border: "1.5px solid var(--ink-200)",
+        borderRadius: 12,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 7 }}>
+        <div style={{ fontSize: 12, fontWeight: 900, color: "var(--ink-900)" }}>
+          Booking progress
+        </div>
+        <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-500)" }}>
+          {progress.checkedIn}/{progress.total} checked in
+        </div>
+      </div>
+      <div style={{ height: 8, borderRadius: 999, background: "var(--ink-100)", overflow: "hidden", marginBottom: 8 }}>
+        <div
+          style={{
+            width: `${percent}%`,
+            height: "100%",
+            background: percent >= 100 ? "var(--color-success)" : "var(--aero-orange-500)",
+            borderRadius: 999,
+          }}
+        />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6 }}>
+        <MiniStat label="Ready" value={progress.ready} tone={progress.ready ? "success" : "default"} />
+        <MiniStat label="Blocked" value={progress.blocked} tone={progress.blocked ? "warning" : "default"} />
+        <MiniStat label="Pending" value={progress.pending} tone={progress.pending ? "warning" : "success"} />
+        <MiniStat label="Done" value={progress.checkedIn} tone={progress.checkedIn ? "success" : "default"} />
+      </div>
+    </div>
+  );
 }
 
 function GuestWorkflowPanel({
