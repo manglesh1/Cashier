@@ -11,10 +11,6 @@ export const voucherApi = baseApi.injectEndpoints({
     lookupVoucherByToken: builder.query({
       query: (token) => ({ url: `/vouchers/by-token/${token}` }),
     }),
-    // Same query, lazy form for scanner-driven flows that fire on Enter.
-    lazyLookupVoucherByToken: builder.query({
-      query: (token) => ({ url: `/vouchers/by-token/${token}` }),
-    }),
 
     // Decrement a stock-item entitlement at the counter.
     redeemEntitlement: builder.mutation({
