@@ -701,7 +701,7 @@ export function CashierApp() {
     header = <Header breadcrumb="GUESTS" title="Guest lookup" />;
   } else if (screen === "waiver") {
     body = <WaiverDetail />;
-    header = <Header breadcrumb="COMPLIANCE · WAIVERS" title="Waiver" right={<StatusPill tone="danger">Blocked</StatusPill>} />;
+    header = <Header breadcrumb="COMPLIANCE · WAIVERS" title="Waiver" right={<StatusPill tone="info">Live lookup</StatusPill>} />;
   } else if (screen === "payment") {
     body = (
       <Payment

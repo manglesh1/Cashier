@@ -104,10 +104,24 @@ export const bookingApi = baseApi.injectEndpoints({
     }),
     // Lookup signed waivers in this location (cashier search modal)
     searchWaivers: builder.query({
-      query: ({ search = "", limit = 12, contactOnly = false } = {}) => ({
+      query: ({ search = "", limit = 12, page = 1, status = "active", contactOnly = false, sortBy, sortDir } = {}) => ({
         url: "/waivers/holders",
-        params: { search, limit, status: "active", contactOnly: contactOnly ? 1 : undefined },
+        params: {
+          search,
+          limit,
+          page,
+          status,
+          contactOnly: contactOnly ? 1 : undefined,
+          sortBy,
+          sortDir,
+        },
       }),
+    }),
+    getSignedWaiver: builder.query({
+      query: (signatureId) => `/waivers/signed/${signatureId}`,
+    }),
+    getWaiverDefinition: builder.query({
+      query: (waiverId) => `/waivers/${waiverId}`,
     }),
     linkParticipantFromWaiver: builder.mutation({
       query: ({ bookingId, waiverSignatureId, includeMinors = true }) => ({
@@ -171,6 +185,8 @@ export const {
   useUpsertParticipantsMutation,
   useSearchWaiversQuery,
   useLazySearchWaiversQuery,
+  useGetSignedWaiverQuery,
+  useGetWaiverDefinitionQuery,
   useLinkParticipantFromWaiverMutation,
   useRemoveParticipantMutation,
   useGetOrderAdjustmentCatalogQuery,
