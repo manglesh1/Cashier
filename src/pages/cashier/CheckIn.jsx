@@ -75,7 +75,9 @@ const fmtTime = (range) => (range || "").split(/[–-]/)[0].trim() || "—";
 
 const redeemReasonLabel = (reason) => {
   const labels = {
+    payment_required: "payment required",
     requires_waiver: "waiver required",
+    requires_waiver_no_holder: "link waiver first",
     not_yet_valid: "too early",
     expired: "expired",
     voided: "voided",
@@ -85,6 +87,63 @@ const redeemReasonLabel = (reason) => {
   };
   return labels[reason] || reason || "failed";
 };
+
+const redeemReasonMessage = (reason, ticket) => {
+  const start = ticket?.validFrom
+    ? new Date(ticket.validFrom).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : null;
+  const messages = {
+    payment_required: "Collect payment before check-in",
+    requires_waiver: "Valid waiver required",
+    requires_waiver_no_holder: "Link a waiver holder first",
+    not_yet_valid: start ? `Starts at ${start}` : "Too early to check in",
+    expired: "Ticket expired",
+    voided: "Ticket voided",
+    refunded: "Ticket refunded",
+    already_redeemed: "Already checked in",
+    requires_manager_override: "Manager override required",
+  };
+  return messages[reason] || redeemReasonLabel(reason);
+};
+
+const isRedeemedTicket = (ticket) =>
+  ticket?.status === "redeemed" || ticket?.status === "partially_redeemed";
+
+const getTicketBlocker = (ticket, { balanceDue = 0, participantsById = new Map(), now = new Date() } = {}) => {
+  if (!ticket) return "not_found";
+  if (isRedeemedTicket(ticket)) return "already_redeemed";
+  if (["voided", "refunded", "expired"].includes(ticket.status)) return ticket.status;
+  if (balanceDue > 0) return "payment_required";
+
+  if (ticket.validUntil && new Date(ticket.validUntil) < now) return "expired";
+  if (ticket.validFrom && new Date(ticket.validFrom) > now) return "not_yet_valid";
+
+  if (ticket.requiresWaiver) {
+    if (!ticket.participantId) return "requires_waiver_no_holder";
+    const participant = participantsById.get(Number(ticket.participantId));
+    if (participant && participant.hasValidWaiver === false) return "requires_waiver";
+  }
+
+  return null;
+};
+
+const summarizeRedeemFailures = (failures = []) => {
+  const counts = failures.reduce((acc, failure) => {
+    const key = failure?.reason || "failed";
+    acc.set(key, (acc.get(key) || 0) + 1);
+    return acc;
+  }, new Map());
+  return [...counts.entries()]
+    .slice(0, 2)
+    .map(([reason, count]) => `${count} ${redeemReasonLabel(reason)}`)
+    .join(", ");
+};
+
+const normalizeGuestName = (value) =>
+  String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
 
 const completedWithinHours = (booking, hours = 2) => {
   const value = booking.lastCheckedInAt || booking.completedAt || booking.checkedInAt;
@@ -478,6 +537,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const [paymentComplete, setPaymentComplete] = useState(null);
   const [paymentDiscount, setPaymentDiscount] = useState(null);
   const [addItemOpen, setAddItemOpen] = useState(false);
+  const [waiverTargetCode, setWaiverTargetCode] = useState(null);
   const [recordPayment, { isLoading: recordingPayment }] = useRecordPaymentMutation();
   const [sendBookingConfirmation, { isLoading: sendingReceipt }] = useSendBookingConfirmationMutation();
   const [adjustBookingOrder, { isLoading: adjustingOrder }] = useAdjustBookingOrderMutation();
@@ -533,6 +593,13 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   // Booking-wide pool of waiver-eligible holders. The candidate set per
   // ticket is this pool minus participants already bound to other tickets.
   const allParticipants = checkInData?.data?.participants || [];
+  const participantsById = useMemo(() => {
+    const map = new Map();
+    allParticipants.forEach((participant) => {
+      map.set(Number(participant.bookingParticipantId), participant);
+    });
+    return map;
+  }, [allParticipants]);
 
   // Map: bookingParticipantId → ticketId currently holding them.
   // Used to remove a person from other tickets' candidate lists once picked.
@@ -555,6 +622,83 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     });
   };
 
+  const autoBindReadyHolders = async ({ participantRows = allParticipants, ticketRows = tickets, preferredTicketCode = null } = {}) => {
+    const boundParticipantIds = new Set(
+      ticketRows
+        .map((ticket) => Number(ticket.participantId))
+        .filter(Boolean)
+    );
+    const availableParticipants = participantRows.filter((participant) => {
+      const id = Number(participant.bookingParticipantId);
+      return id && participant.hasValidWaiver && !participant.checkedInAt && !boundParticipantIds.has(id);
+    });
+    const targetTickets = ticketRows
+      .filter((ticket) =>
+        ticket.status === "issued" &&
+        ticket.requiresWaiver &&
+        !ticket.participantId &&
+        !isRedeemedTicket(ticket)
+      )
+      .sort((a, b) => {
+        if (!preferredTicketCode) return 0;
+        if (a.ticketCode === preferredTicketCode) return -1;
+        if (b.ticketCode === preferredTicketCode) return 1;
+        return 0;
+      });
+    const count = Math.min(availableParticipants.length, targetTickets.length);
+    if (count <= 0) return { bound: 0, available: availableParticipants.length, target: targetTickets.length };
+
+    let bound = 0;
+    for (let index = 0; index < count; index += 1) {
+      const ticket = targetTickets[index];
+      const participant = availableParticipants[index];
+      await bindHolder({
+        ticketCode: ticket.ticketCode,
+        participantId: participant.bookingParticipantId,
+        bookingId: booking.bookingId,
+      }).unwrap();
+      bound += 1;
+    }
+    await Promise.all([refetchTickets(), refetchStatus()]);
+    await onCheckedIn?.();
+    return { bound, available: availableParticipants.length, target: targetTickets.length };
+  };
+
+  const handleAutoBindReadyHolders = async () => {
+    const promise = autoBindReadyHolders();
+    toast.promise(promise, {
+      loading: "Assigning waiver holders...",
+      success: (result) => {
+        if (result.bound > 0) return `Assigned ${result.bound} holder${result.bound === 1 ? "" : "s"}`;
+        if (result.target === 0) return "No waiver-required tickets need holders";
+        if (result.available === 0) return "No unassigned waiver holders available";
+        return "No holders assigned";
+      },
+      error: (err) => err?.data?.error || err?.data?.message || "Could not assign holders",
+    });
+    await promise.catch(() => null);
+  };
+
+  const handleWaiverLinked = async (linkResult) => {
+    const [ticketResult, statusResult] = await Promise.all([refetchTickets(), refetchStatus()]);
+    const nextTickets = ticketResult?.data?.data || tickets;
+    const nextParticipants = statusResult?.data?.data?.participants || allParticipants;
+    const autoResult = await autoBindReadyHolders({
+      participantRows: nextParticipants,
+      ticketRows: nextTickets,
+      preferredTicketCode: waiverTargetCode,
+    });
+    await onCheckedIn?.();
+    if (autoResult.bound > 0) {
+      toast.success(`Assigned ${autoResult.bound} holder${autoResult.bound === 1 ? "" : "s"} to tickets`);
+    } else {
+      const created = linkResult?.data?.created || 0;
+      const covered = linkResult?.data?.covered || 0;
+      if (created > 0 || covered > 0) toast.info("Waiver linked. Pick a holder on the ticket row.");
+    }
+    setWaiverTargetCode(null);
+  };
+
   const handleBind = async (ticketCode, participantId) => {
     const promise = bindHolder({
       ticketCode,
@@ -562,7 +706,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       bookingId: booking.bookingId,
     }).unwrap();
     toast.promise(promise, {
-      loading: "Linking holder…",
+      loading: "Linking holder...",
       success: () => { refetchTickets(); refetchStatus(); return "Linked"; },
       error: (err) => err?.data?.error || "Could not link",
     });
@@ -587,15 +731,37 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     [tickets, hideCheckedIn]
   );
 
-  const allSelectableCodes = useMemo(
+  const ticketBlockers = useMemo(() => {
+    const now = new Date();
+    const map = new Map();
+    tickets.forEach((ticket) => {
+      map.set(ticket.ticketCode, getTicketBlocker(ticket, { balanceDue, participantsById, now }));
+    });
+    return map;
+  }, [tickets, balanceDue, participantsById]);
+
+  const isTicketActionable = (ticket) =>
+    ticket?.status === "issued" && !ticketBlockers.get(ticket.ticketCode);
+
+  const safeSelectableCodes = useMemo(
     () => visibleTickets
-      .filter((t) => t.status === "issued")
-      // Exclude tickets blocked by missing waiver — server would reject these
-      .filter((t) => !(t.requiresWaiver && !t.participantId))
+      .filter(isTicketActionable)
       .map((t) => t.ticketCode),
-    [visibleTickets]
+    [visibleTickets, ticketBlockers]
   );
-  const allSelected = allSelectableCodes.length > 0 && allSelectableCodes.every((c) => selectedCodes.has(c));
+  const bulkActionableCount = useMemo(
+    () => tickets.filter(isTicketActionable).length,
+    [tickets, ticketBlockers]
+  );
+  const allActionableSelected = safeSelectableCodes.length > 0 && safeSelectableCodes.every((c) => selectedCodes.has(c));
+
+  useEffect(() => {
+    setSelectedCodes((prev) => {
+      const allowed = new Set(safeSelectableCodes);
+      const next = new Set([...prev].filter((code) => allowed.has(code)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [safeSelectableCodes]);
 
   const toggleSelect = (code) => {
     setSelectedCodes((prev) => {
@@ -606,8 +772,8 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   };
 
   const toggleSelectAll = () => {
-    if (allSelected) setSelectedCodes(new Set());
-    else setSelectedCodes(new Set(allSelectableCodes));
+    if (allActionableSelected) setSelectedCodes(new Set());
+    else setSelectedCodes(new Set(safeSelectableCodes));
   };
 
   const handleUnlinkParticipant = async (participantId) => {
@@ -621,33 +787,30 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   };
 
   const handleRedeemOne = async (code) => {
+    const ticket = tickets.find((t) => t.ticketCode === code);
+    const blocker = ticket ? ticketBlockers.get(code) : null;
+    if (blocker) {
+      toast.error(redeemReasonMessage(blocker, ticket));
+      return;
+    }
     const terminal = getTerminal();
     const promise = redeemTicket({
       ticketCode: code,
       terminalDeviceId: terminal?.deviceId || null,
       gateOrZone: terminal?.deviceName || "Cashier check-in",
-      allowEarlyCheckIn: true,
     }).unwrap();
     toast.promise(promise, {
       loading: "Redeeming…",
-      success: () => { refresh(); return "Redeemed"; },
-      error: (err) => err?.data?.error || err?.data?.reason || "Redeem failed",
+      success: () => { refresh(); return "Checked in"; },
+      error: (err) => err?.data?.error || redeemReasonMessage(err?.data?.reason, ticket) || "Redeem failed",
     });
   };
 
-  // Tickets whose product requires a waiver but no participant is bound.
-  // These are blocked at redeem time both server-side (returns
-  // requires_waiver) and here in the UI (button disabled). The cashier
-  // must use HolderPicker / "Add from waiver" before they can check in.
   const waiverBlocked = useMemo(
     () => tickets.filter(
-      (t) =>
-        t.requiresWaiver &&
-        !t.participantId &&
-        t.status !== "redeemed" &&
-        t.status !== "partially_redeemed"
+      (t) => ["requires_waiver", "requires_waiver_no_holder"].includes(ticketBlockers.get(t.ticketCode))
     ),
-    [tickets]
+    [tickets, ticketBlockers]
   );
 
   const handleRedeemSelected = async () => {
@@ -657,12 +820,17 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     let ok = 0;
     const failures = [];
     for (const code of codes) {
+      const ticket = tickets.find((t) => t.ticketCode === code);
+      const blocker = ticket ? ticketBlockers.get(code) : null;
+      if (blocker) {
+        failures.push({ code, reason: blocker });
+        continue;
+      }
       try {
         await redeemTicket({
           ticketCode: code,
           terminalDeviceId: terminal?.deviceId || null,
           gateOrZone: terminal?.deviceName || "Cashier check-in",
-          allowEarlyCheckIn: true,
         }).unwrap();
         ok++;
       } catch (err) {
@@ -675,16 +843,24 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     setSelectedCodes(new Set());
     refresh();
     if (failures.length === 0) {
-      toast.success(`Redeemed ${ok}`);
+      toast.success(`Checked in ${ok}`);
       return;
     }
-    const firstReason = redeemReasonLabel(failures[0]?.reason);
-    const message = `Redeemed ${ok} - ${failures.length} failed (${firstReason})`;
+    const failureSummary = summarizeRedeemFailures(failures);
+    const message = `Checked in ${ok} - ${failures.length} blocked${failureSummary ? ` (${failureSummary})` : ""}`;
     if (ok > 0) toast.warning(message);
     else toast.error(message);
   };
 
   const handleRedeemAll = async () => {
+    if (bulkActionableCount === 0) {
+      const blockers = tickets
+        .map((ticket) => ({ ticketCode: ticket.ticketCode, reason: ticketBlockers.get(ticket.ticketCode) }))
+        .filter((item) => item.reason && item.reason !== "already_redeemed");
+      const summary = summarizeRedeemFailures(blockers);
+      toast.error(summary ? `No tickets ready: ${summary}` : "No tickets ready to check in");
+      return;
+    }
     if (waiverBlocked.length > 0) {
       // Soft-warn (server still enforces). Bulk endpoint already skips these,
       // so this is purely so the cashier knows what won't get checked in.
@@ -699,21 +875,20 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         bookingId: booking.bookingId,
         terminalDeviceId: terminal?.deviceId || null,
         gateOrZone: terminal?.deviceName || "Cashier check-in",
-        allowEarlyCheckIn: true,
       }).unwrap();
       refresh();
       const succ = res?.succeeded ?? 0;
       const att = res?.attempted ?? 0;
       const failures = (res?.results || []).filter((r) => !r.ok);
       const blocked = failures.filter((r) => r.reason === "requires_waiver").length;
-      const firstReason = redeemReasonLabel(failures[0]?.reason);
-      const tail = blocked > 0 ? ` - ${blocked} blocked by waiver` : failures.length > 0 ? ` - ${failures.length} failed (${firstReason})` : "";
-      const message = `Redeemed ${succ} of ${att}${tail}`;
+      const failureSummary = summarizeRedeemFailures(failures);
+      const tail = blocked > 0 ? ` - ${blocked} blocked by waiver` : failures.length > 0 ? ` - ${failureSummary}` : "";
+      const message = `Checked in ${succ} of ${att}${tail}`;
       if (succ === 0 && failures.length > 0) toast.error(message, { id: toastId });
       else if (failures.length > 0) toast.warning(message, { id: toastId });
       else toast.success(message, { id: toastId });
     } catch (err) {
-      toast.error(err?.data?.error || err?.data?.message || err?.message || "Redeem failed", { id: toastId });
+      toast.error(err?.data?.error || err?.data?.message || redeemReasonMessage(err?.data?.reason) || err?.message || "Redeem failed", { id: toastId });
     }
   };
 
@@ -857,7 +1032,11 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         gap: 7,
         marginBottom: 8,
       }}>
-        <CloseoutPill label="Waivers" value="Ready" tone="success" />
+        <CloseoutPill
+          label="Waivers"
+          value={waiverBlocked.length > 0 ? `${waiverBlocked.length} needed` : "Ready"}
+          tone={waiverBlocked.length > 0 ? "danger" : "success"}
+        />
         <CloseoutPill
           label="Check-in"
           value={`${redeemedCount}/${totalCount}`}
@@ -869,6 +1048,21 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           tone={balanceDue > 0 ? "danger" : "success"}
         />
       </div>
+
+      <GuestWorkflowPanel
+        bookingId={booking.bookingId}
+        totalGuests={booking.totalGuests || totalCount}
+        participants={allParticipants}
+        tickets={tickets}
+        onAddFromWaiver={() => setWaiverModalOpen(true)}
+        onAutoAssign={handleAutoBindReadyHolders}
+        onTargetWaiver={(ticketCode = null) => {
+          setWaiverTargetCode(ticketCode);
+          setWaiverModalOpen(true);
+        }}
+        onSaved={refresh}
+        isAssigning={binding}
+      />
 
       {paymentOpen && (
         <CheckInPaymentModal
@@ -959,7 +1153,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         background: "white", border: "1.5px solid var(--ink-200)", borderRadius: 12,
       }}>
         <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, fontWeight: 600, color: "var(--ink-700)" }}>
-          <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+          <input type="checkbox" checked={allActionableSelected} onChange={toggleSelectAll} />
           Select all
         </label>
         <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, fontWeight: 600, color: "var(--ink-700)" }}>
@@ -982,20 +1176,23 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         <button
           type="button"
           onClick={selectedCodes.size > 0 ? handleRedeemSelected : handleRedeemAll}
-          disabled={(selectedCodes.size === 0 && remaining === 0) || redeeming || checkingInAll}
+          disabled={(selectedCodes.size === 0 && bulkActionableCount === 0) || redeeming || checkingInAll}
           className="a-btn a-btn--primary a-btn--sm"
           style={{ minWidth: 110, justifyContent: "center" }}
         >
           <Icon name="check" size={13} stroke={3} />
-          {selectedCodes.size > 0 ? `Redeem (${selectedCodes.size})` : `All (${remaining})`}
+          {selectedCodes.size > 0 ? `Redeem (${selectedCodes.size})` : `All (${bulkActionableCount})`}
         </button>
       </div>
 
       {waiverModalOpen && (
         <WaiverLookupModal
           bookingId={booking.bookingId}
-          onClose={() => setWaiverModalOpen(false)}
-          onLinked={() => { refresh(); }}
+          onClose={() => {
+            setWaiverModalOpen(false);
+            setWaiverTargetCode(null);
+          }}
+          onLinked={handleWaiverLinked}
         />
       )}
 
@@ -1025,12 +1222,11 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       ) : (
         <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
           {visibleTickets.map((t, i) => {
-            const isRedeemed = t.status === "redeemed" || t.status === "partially_redeemed";
+            const isRedeemed = isRedeemedTicket(t);
             const isSelected = selectedCodes.has(t.ticketCode);
-            // Block redemption when the product requires a waiver but no
-            // waiver-bound participant is linked yet. Cashier must use the
-            // HolderPicker / "Add from waiver" flow first.
-            const needsWaiver = !!t.requiresWaiver && !t.participantId && !isRedeemed;
+            const blocker = ticketBlockers.get(t.ticketCode);
+            const blockerMessage = blocker ? redeemReasonMessage(blocker, t) : "";
+            const isBlocked = Boolean(blocker);
             const time = t.validFrom
               ? new Date(t.validFrom).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
               : null;
@@ -1044,19 +1240,19 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                   display: "flex", alignItems: "center", gap: 10,
                   padding: "10px 12px", borderRadius: 10,
                   background: isRedeemed ? "var(--ink-50)" : "white",
-                  border: isSelected ? "2px solid var(--aero-orange-500)" : "1.5px solid var(--ink-200)",
+                  border: isSelected ? "2px solid var(--aero-orange-500)" : isBlocked ? "1.5px solid #F2CA65" : "1.5px solid var(--ink-200)",
                   opacity: isRedeemed ? 0.7 : 1,
                 }}
               >
                 <input
                   type="checkbox"
                   checked={isSelected}
-                  disabled={isRedeemed || needsWaiver}
+                  disabled={isBlocked}
                   onChange={() => toggleSelect(t.ticketCode)}
-                  title={needsWaiver ? "Waiver required — link a guest first" : undefined}
+                  title={blockerMessage || undefined}
                   style={{
                     width: 16, height: 16,
-                    cursor: (isRedeemed || needsWaiver) ? "not-allowed" : "pointer",
+                    cursor: isBlocked ? "not-allowed" : "pointer",
                     flexShrink: 0,
                   }}
                 />
@@ -1080,7 +1276,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                       {t.ticketCode}
                     </span>
                     {time && <span>· {time}{dur ? ` (${dur}h)` : ""}</span>}
-                    {needsWaiver && (
+                    {isBlocked && (
                       <span style={{
                         display: "inline-flex", alignItems: "center", gap: 4,
                         padding: "2px 6px", borderRadius: 6,
@@ -1089,7 +1285,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                         fontWeight: 700, fontSize: 10,
                       }}>
                         <Icon name="alert-triangle" size={10} stroke={2.5} />
-                        Waiver required
+                        {blockerMessage}
                       </span>
                     )}
                   </div>
@@ -1104,7 +1300,10 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                     <HolderPicker
                       candidates={candidatesFor(t)}
                       onPick={(participantId) => handleBind(t.ticketCode, participantId)}
-                      onSearch={() => setWaiverModalOpen(true)}
+                      onSearch={() => {
+                        setWaiverTargetCode(t.ticketCode);
+                        setWaiverModalOpen(true);
+                      }}
                       busy={binding}
                     />
                   )}
@@ -1127,26 +1326,26 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                 )}
                 <button
                   type="button"
-                  onClick={() => !isRedeemed && !needsWaiver && handleRedeemOne(t.ticketCode)}
-                  disabled={isRedeemed || redeeming || needsWaiver}
+                  onClick={() => !isBlocked && handleRedeemOne(t.ticketCode)}
+                  disabled={isBlocked || redeeming}
                   title={
                     isRedeemed
                       ? "Already redeemed"
-                      : needsWaiver
-                        ? "Waiver required — link a guest first"
+                      : isBlocked
+                        ? blockerMessage
                         : "Redeem this ticket"
                   }
                   style={{
                     width: 36, height: 36, flexShrink: 0,
                     borderRadius: 8, border: "1.5px solid",
-                    borderColor: isRedeemed ? "var(--color-success)" : needsWaiver ? "#FFB199" : "var(--ink-200)",
-                    background: isRedeemed ? "var(--color-success)" : needsWaiver ? "#FFF0EA" : "white",
-                    color: isRedeemed ? "white" : needsWaiver ? "#B83210" : "var(--ink-700)",
-                    cursor: (isRedeemed || needsWaiver) ? "not-allowed" : "pointer",
+                    borderColor: isRedeemed ? "var(--color-success)" : isBlocked ? "#F2CA65" : "var(--ink-200)",
+                    background: isRedeemed ? "var(--color-success)" : isBlocked ? "#FFF7E5" : "white",
+                    color: isRedeemed ? "white" : isBlocked ? "#8A5A00" : "var(--ink-700)",
+                    cursor: isBlocked ? "not-allowed" : "pointer",
                     display: "flex", alignItems: "center", justifyContent: "center",
                   }}
                 >
-                  <Icon name={needsWaiver ? "alert-triangle" : "check"} size={16} stroke={3} />
+                  <Icon name={isBlocked ? "alert-triangle" : "check"} size={16} stroke={3} />
                 </button>
               </li>
             );
@@ -1197,6 +1396,156 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 
 function activityNameFromBooking(b) {
   return b?.activityName || "Item";
+}
+
+function GuestWorkflowPanel({
+  bookingId,
+  totalGuests,
+  participants = [],
+  tickets = [],
+  onAddFromWaiver,
+  onTargetWaiver,
+  onAutoAssign,
+  onSaved,
+  isAssigning = false,
+}) {
+  const [namesOpen, setNamesOpen] = useState(false);
+  const boundIds = useMemo(
+    () => new Set(tickets.map((ticket) => Number(ticket.participantId)).filter(Boolean)),
+    [tickets]
+  );
+  const validParticipants = participants.filter((participant) => participant.hasValidWaiver);
+  const availableValidParticipants = validParticipants.filter((participant) => {
+    const id = Number(participant.bookingParticipantId);
+    return id && !participant.checkedInAt && !boundIds.has(id);
+  });
+  const unassignedWaiverTickets = tickets.filter((ticket) =>
+    ticket.status === "issued" &&
+    ticket.requiresWaiver &&
+    !ticket.participantId &&
+    !isRedeemedTicket(ticket)
+  );
+  const missingNames = Math.max(0, Number(totalGuests || tickets.length || 0) - participants.length);
+  const assignedCount = tickets.filter((ticket) => ticket.participantId).length;
+  const sampleParticipants = participants.slice(0, 10);
+
+  return (
+    <div
+      style={{
+        marginBottom: 8,
+        padding: "10px 12px",
+        background: "white",
+        border: "1.5px solid var(--ink-200)",
+        borderRadius: 12,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <Icon name="users" size={15} style={{ color: "var(--ink-600)" }} />
+          <div style={{ fontSize: 12, fontWeight: 900, color: "var(--ink-900)" }}>
+            Guests
+          </div>
+          <span style={{ fontSize: 11, fontWeight: 750, color: "var(--ink-500)" }}>
+            {participants.length}/{totalGuests || tickets.length || 0} named
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            className="a-btn a-btn--ghost a-btn--sm"
+            onClick={() => setNamesOpen((value) => !value)}
+            style={{ justifyContent: "center" }}
+          >
+            <Icon name={namesOpen ? "chevron-up" : "user-plus"} size={13} />
+            Names
+          </button>
+          <button
+            type="button"
+            className="a-btn a-btn--ghost a-btn--sm"
+            onClick={() => (onTargetWaiver || onAddFromWaiver)?.(null)}
+            style={{ justifyContent: "center" }}
+          >
+            <Icon name="search" size={13} />
+            Waiver
+          </button>
+          <button
+            type="button"
+            className="a-btn a-btn--primary a-btn--sm"
+            onClick={onAutoAssign}
+            disabled={isAssigning || availableValidParticipants.length === 0 || unassignedWaiverTickets.length === 0}
+            title={
+              unassignedWaiverTickets.length === 0
+                ? "No waiver tickets need holders"
+                : availableValidParticipants.length === 0
+                  ? "No unassigned waiver holders"
+                  : "Assign waiver holders to tickets"
+            }
+            style={{ justifyContent: "center" }}
+          >
+            <Icon name="wand-2" size={13} />
+            Auto assign
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, marginBottom: participants.length > 0 ? 8 : 0 }}>
+        <MiniStat label="Waiver ready" value={validParticipants.length} tone={validParticipants.length ? "success" : "default"} />
+        <MiniStat label="Unassigned" value={availableValidParticipants.length} tone={availableValidParticipants.length ? "warning" : "default"} />
+        <MiniStat label="Tickets linked" value={assignedCount} tone={assignedCount ? "success" : "default"} />
+        <MiniStat label="Names needed" value={missingNames} tone={missingNames ? "warning" : "success"} />
+      </div>
+
+      {participants.length > 0 && (
+        <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center", marginBottom: namesOpen ? 8 : 0 }}>
+          {sampleParticipants.map((participant) => {
+            const id = Number(participant.bookingParticipantId);
+            const isBound = boundIds.has(id);
+            return (
+              <span
+                key={participant.bookingParticipantId}
+                title={participant.hasValidWaiver ? "Valid waiver" : "No valid waiver"}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  maxWidth: 170,
+                  padding: "4px 8px",
+                  borderRadius: 999,
+                  border: `1.5px solid ${participant.hasValidWaiver ? "#8AD5A3" : "var(--ink-200)"}`,
+                  background: isBound ? "var(--aero-orange-50)" : participant.hasValidWaiver ? "#EAF8EF" : "var(--ink-50)",
+                  color: participant.hasValidWaiver ? "#137A35" : "var(--ink-600)",
+                  fontSize: 11,
+                  fontWeight: 750,
+                }}
+              >
+                <Icon name={participant.hasValidWaiver ? "shield-check" : "user-round"} size={11} />
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {participant.displayName}
+                </span>
+              </span>
+            );
+          })}
+          {participants.length > sampleParticipants.length && (
+            <span style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-500)" }}>
+              +{participants.length - sampleParticipants.length} more
+            </span>
+          )}
+        </div>
+      )}
+
+      {namesOpen && (
+        <NameGuestsForm
+          bookingId={bookingId}
+          totalGuests={Math.max(1, missingNames || totalGuests || tickets.length || 1)}
+          existingParticipants={participants}
+          onSaved={() => {
+            setNamesOpen(false);
+            onSaved?.();
+          }}
+        />
+      )}
+    </div>
+  );
 }
 
 function CloseoutPill({ label, value, tone = "neutral" }) {
@@ -2223,24 +2572,23 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
 
   const handlePick = async (sig) => {
     const waiverSignatureId = sig.signatureId ?? sig.id;
-    const promise = linkFromWaiver({
-      bookingId,
-      waiverSignatureId,
-      includeMinors: true,
-    }).unwrap();
-    toast.promise(promise, {
-      loading: "Linking…",
-      success: (res) => {
-        onLinked?.();
-        closeModal();
-        const n = res?.data?.created || 0;
-        const covered = res?.data?.covered || 0;
-        if (n > 0) return `Linked ${n} guest${n === 1 ? "" : "s"}`;
-        if (covered > 0) return `Attached waiver coverage`;
-        return "Already linked";
-      },
-      error: (err) => err?.data?.error || "Could not link",
-    });
+    const toastId = toast.loading("Linking waiver...");
+    try {
+      const res = await linkFromWaiver({
+        bookingId,
+        waiverSignatureId,
+        includeMinors: true,
+      }).unwrap();
+      await onLinked?.(res);
+      closeModal();
+      const n = res?.data?.created || 0;
+      const covered = res?.data?.covered || 0;
+      if (n > 0) toast.success(`Linked ${n} guest${n === 1 ? "" : "s"}`, { id: toastId });
+      else if (covered > 0) toast.success("Attached waiver coverage", { id: toastId });
+      else toast.success("Already linked", { id: toastId });
+    } catch (err) {
+      toast.error(err?.data?.error || "Could not link", { id: toastId });
+    }
   };
 
   return (
@@ -2398,7 +2746,7 @@ function MiniStat({ label, value, tone }) {
 // ── Inline name-entry form for bookings with no named participants ──
 // Shows N text inputs (one per ticket), saves them as BookingParticipant
 // rows so the cashier can then check each guest in individually.
-function NameGuestsForm({ bookingId, totalGuests, onSaved }) {
+function NameGuestsForm({ bookingId, totalGuests, existingParticipants = [], onSaved }) {
   const [names, setNames] = useState(() =>
     Array.from({ length: Math.max(1, Number(totalGuests) || 1) }, () => ({ displayName: "", isMinor: false }))
   );
@@ -2407,10 +2755,43 @@ function NameGuestsForm({ bookingId, totalGuests, onSaved }) {
   const updateName = (idx, patch) =>
     setNames((prev) => prev.map((n, i) => (i === idx ? { ...n, ...patch } : n)));
 
+  const pasteNames = (startIndex, text) => {
+    const pasted = String(text || "")
+      .split(/[\n,;]+/)
+      .map((name) => name.trim().replace(/\s+/g, " "))
+      .filter(Boolean);
+    if (pasted.length <= 1) return false;
+    setNames((prev) => {
+      const next = [...prev];
+      pasted.forEach((displayName, offset) => {
+        const index = startIndex + offset;
+        if (next[index]) next[index] = { ...next[index], displayName };
+        else next.push({ displayName, isMinor: false });
+      });
+      return next;
+    });
+    return true;
+  };
+
   const handleSave = async () => {
-    const filled = names.filter((n) => n.displayName.trim().length > 0);
+    const filled = names
+      .map((row) => ({ ...row, displayName: row.displayName.trim().replace(/\s+/g, " ") }))
+      .filter((n) => n.displayName.length > 0);
     if (filled.length === 0) {
       toast.error("Type at least one guest name");
+      return;
+    }
+    const existingNames = new Set(existingParticipants.map((participant) => normalizeGuestName(participant.displayName)));
+    const seen = new Set();
+    const duplicate = filled.find((row) => {
+      const key = normalizeGuestName(row.displayName);
+      if (!key) return false;
+      if (existingNames.has(key) || seen.has(key)) return true;
+      seen.add(key);
+      return false;
+    });
+    if (duplicate) {
+      toast.error(`${duplicate.displayName} is already on this booking`);
       return;
     }
     const promise = upsert({ bookingId, participants: filled }).unwrap();
@@ -2440,6 +2821,9 @@ function NameGuestsForm({ bookingId, totalGuests, onSaved }) {
             <input
               value={row.displayName}
               onChange={(e) => updateName(idx, { displayName: e.target.value })}
+              onPaste={(e) => {
+                if (pasteNames(idx, e.clipboardData.getData("text"))) e.preventDefault();
+              }}
               placeholder={`Guest ${idx + 1} name`}
               style={{
                 flex: 1, padding: "8px 10px",
