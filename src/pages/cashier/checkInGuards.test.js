@@ -117,6 +117,30 @@ test("guest counters match live operation labels", () => {
   );
 });
 
+test("guest counters tolerate alternate API summary shapes", () => {
+  assert.deepEqual(
+    buildGuestTotals([
+      { summary: { total: 20, redeemed: 5 } },
+      { totalTickets: 4, redeemedCount: 4 },
+      { ticketSummary: { total: 6, redeemed: 0 } },
+    ]),
+    { totalGuests: 30, checkedInGuests: 9, pendingGuests: 21, completedBookings: 1 }
+  );
+});
+
+test("selected progress falls back to redeemed ticket rows when summary is missing", () => {
+  const rows = [
+    ticket({ ticketCode: "DONE", status: "redeemed" }),
+    ticket({ ticketCode: "READY" }),
+  ];
+  const blockers = new Map(rows.map((row) => [row.ticketCode, getTicketBlocker(row, { now })]));
+
+  assert.deepEqual(
+    buildSelectedProgress({ tickets: rows, ticketBlockers: blockers, redeemedCount: undefined, totalCount: undefined }),
+    { checkedIn: 1, total: 2, ready: 1, blocked: 0, pending: 1, percent: 50 }
+  );
+});
+
 test("auto-bind plan prefers newly linked waiver holders and target ticket", () => {
   const tickets = [
     ticket({ ticketCode: "A", ticketId: 1, requiresWaiver: true }),

@@ -168,7 +168,7 @@ export function CheckIn() {
 
   const visibleBookings = bookingBuckets[bookingBucket] || [];
 
-  const totalToday = stats.total ?? bookings.length;
+  const totalToday = stats.totalBookings ?? stats.bookings ?? stats.total ?? bookings.length;
   const guestTotals = useMemo(() => buildGuestTotals(bookings), [bookings]);
 
   const refreshSelectedBooking = async () => {
@@ -180,9 +180,9 @@ export function CheckIn() {
   };
 
   return (
-    <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+    <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
       {/* Search bar */}
-      <div style={{ padding: "16px 28px", borderBottom: "1px solid var(--ink-100)", display: "flex", gap: 12, alignItems: "center" }}>
+      <div style={{ padding: "16px 28px", borderBottom: "1px solid var(--ink-100)", display: "flex", gap: 12, alignItems: "center", flexShrink: 0 }}>
         <div
           style={{
             display: "flex",
@@ -194,6 +194,7 @@ export function CheckIn() {
             borderRadius: 14,
             flex: 1,
             maxWidth: 480,
+            minWidth: 0,
           }}
         >
           <Icon name="search" size={20} stroke={2} style={{ color: "var(--ink-500)" }} />
@@ -201,7 +202,7 @@ export function CheckIn() {
             value={inputValue}
             onChange={(e) => setDebouncedSearch(e.target.value)}
             placeholder="Search by name, email, phone, or booking ID…"
-            style={{ all: "unset", flex: 1, fontSize: 16 }}
+            style={{ all: "unset", flex: 1, minWidth: 0, fontSize: 16 }}
           />
         </div>
         <button
@@ -223,10 +224,20 @@ export function CheckIn() {
         flexShrink: 0,
         borderBottom: "1px solid var(--ink-100)",
       }}>
-        <Stat label="Booked today" value={totalToday} />
-        <Stat label="Guests checked in" value={guestTotals.checkedInGuests} fg="var(--color-success)" />
-        <Stat label="Pending guests" value={guestTotals.pendingGuests} fg={guestTotals.pendingGuests > 0 ? "#8A5A00" : "var(--color-success)"} />
-        <Stat label="Completed bookings" value={guestTotals.completedBookings} />
+        <Stat label="Booked today" value={totalToday} hint="Bookings" />
+        <Stat
+          label="Guests checked in"
+          value={guestTotals.checkedInGuests}
+          hint={`of ${guestTotals.totalGuests} guests`}
+          fg="var(--color-success)"
+        />
+        <Stat
+          label="Pending guests"
+          value={guestTotals.pendingGuests}
+          hint="Guests remaining"
+          fg={guestTotals.pendingGuests > 0 ? "#8A5A00" : "var(--color-success)"}
+        />
+        <Stat label="Completed bookings" value={guestTotals.completedBookings} hint="Fully checked in" />
       </div>
 
       {/* Body — list (left) + selected detail (right) */}
@@ -236,6 +247,7 @@ export function CheckIn() {
           flex: "0 0 clamp(300px, 24vw, 360px)",
           overflowY: "auto",
           overscrollBehavior: "contain",
+          scrollbarGutter: "stable",
           minHeight: 0,
           padding: "12px 14px 12px 18px",
           borderRight: "1px solid var(--ink-100)",
@@ -322,9 +334,10 @@ function parseTime(range) {
   return d;
 }
 
-function Stat({ label, value, fg }) {
+function Stat({ label, value, fg, hint }) {
   return (
     <div
+      title={hint ? `${label}: ${value} (${hint})` : `${label}: ${value}`}
       style={{
         minWidth: 0,
         padding: "8px 10px",
@@ -349,6 +362,11 @@ function Stat({ label, value, fg }) {
       >
         {value}
       </div>
+      {hint && (
+        <div style={{ marginTop: 4, fontSize: 10, fontWeight: 700, color: "var(--ink-500)", lineHeight: 1.1 }}>
+          {hint}
+        </div>
+      )}
     </div>
   );
 }
@@ -946,10 +964,11 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           display: "flex",
           flexDirection: "column",
           padding: "12px 14px",
+          overflow: "hidden",
         }}
       >
       {/* Booking header */}
-      <div style={{ marginBottom: 14, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+      <div style={{ marginBottom: 14, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexShrink: 0 }}>
         <div style={{ minWidth: 0 }}>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--aero-orange-600)", fontWeight: 700, letterSpacing: "0.05em" }}>
           {booking.bookingNumber}
@@ -972,7 +991,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       </div>
 
       {/* Toolbar — ROLLER-style: select all + hide checked-in + batch redeem */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 12, overscrollBehavior: "contain" }}>
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 12, overscrollBehavior: "contain", scrollbarGutter: "stable" }}>
       <div style={{
         display: "grid",
         gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
@@ -1097,7 +1116,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       )}
 
       <div style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
+        display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap",
         gap: 10, marginBottom: 8, padding: "8px 10px",
         background: "white", border: "1.5px solid var(--ink-200)", borderRadius: 12,
       }}>
@@ -1306,14 +1325,16 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 
       <aside
         style={{
-          width: "clamp(310px, 28vw, 370px)",
-          flex: "0 0 clamp(310px, 28vw, 370px)",
+          width: "clamp(290px, 27vw, 370px)",
+          flex: "0 0 clamp(290px, 27vw, 370px)",
           minHeight: 0,
+          minWidth: 290,
           padding: "12px 14px 12px 0",
           display: "flex",
           flexDirection: "column",
           overflowY: "auto",
           overscrollBehavior: "contain",
+          scrollbarGutter: "stable",
         }}
       >
         <CheckInSettlementPanel

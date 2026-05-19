@@ -76,9 +76,41 @@ export const normalizeGuestName = (value) =>
     .replace(/\s+/g, " ")
     .toLowerCase();
 
-export const buildSelectedProgress = ({ tickets = [], ticketBlockers = new Map(), redeemedCount = 0, totalCount }) => {
-  const total = Number.isFinite(Number(totalCount)) ? Number(totalCount) : tickets.length;
-  const checkedIn = Number(redeemedCount || 0);
+const countValue = (...values) => {
+  for (const value of values) {
+    const count = Number(value);
+    if (Number.isFinite(count)) return Math.max(0, count);
+  }
+  return null;
+};
+
+const bookingGuestTotal = (booking = {}) =>
+  countValue(
+    booking.totalGuests,
+    booking.guestCount,
+    booking.totalGuestCount,
+    booking.totalTickets,
+    booking.ticketCount,
+    booking.summary?.total,
+    booking.ticketSummary?.total,
+    booking.ticketsSummary?.total
+  ) ?? 0;
+
+const bookingCheckedInTotal = (booking = {}) =>
+  countValue(
+    booking.checkedInGuests,
+    booking.checkedInCount,
+    booking.redeemedGuests,
+    booking.redeemedCount,
+    booking.summary?.redeemed,
+    booking.ticketSummary?.redeemed,
+    booking.ticketsSummary?.redeemed
+  ) ?? 0;
+
+export const buildSelectedProgress = ({ tickets = [], ticketBlockers = new Map(), redeemedCount, totalCount }) => {
+  const redeemedFallback = tickets.filter(isRedeemedTicket).length;
+  const total = Math.max(countValue(totalCount) ?? tickets.length, tickets.length, redeemedFallback);
+  const checkedIn = Math.min(total, countValue(redeemedCount) ?? redeemedFallback);
   const ready = tickets.filter((ticket) => isTicketReadyForCheckIn(ticket, ticketBlockers)).length;
   const blocked = tickets.filter((ticket) => {
     const reason = ticketBlockers.get(ticket.ticketCode);
@@ -155,10 +187,13 @@ export const buildAutoBindPlan = ({
 };
 
 export const buildGuestTotals = (bookings = []) => {
-  const totalGuests = bookings.reduce((sum, b) => sum + Number(b.totalGuests || 0), 0);
-  const checkedInGuests = bookings.reduce((sum, b) => sum + Number(b.checkedInGuests || 0), 0);
+  const totalGuests = bookings.reduce((sum, booking) => sum + bookingGuestTotal(booking), 0);
+  const checkedInGuests = bookings.reduce((sum, booking) => sum + bookingCheckedInTotal(booking), 0);
   const completedBookings = bookings.filter(
-    (b) => Number(b.totalGuests || 0) > 0 && Number(b.checkedInGuests || 0) >= Number(b.totalGuests || 0)
+    (booking) => {
+      const total = bookingGuestTotal(booking);
+      return total > 0 && bookingCheckedInTotal(booking) >= total;
+    }
   ).length;
 
   return {
