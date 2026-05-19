@@ -4,6 +4,7 @@ import { Icon } from "./Icon";
 import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discountApi";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
+import { getCartLineSubtotal } from "./cartPricing";
 
 // Compute a discount amount from the validated discount + subtotal.
 // Mirrors what the admin's createBooking pricing logic does:
@@ -138,7 +139,7 @@ export function CartPanel({
     );
   };
 
-  const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
+  const subtotal = items.reduce((s, it) => s + getCartLineSubtotal(it), 0);
   const promoCartLines = React.useMemo(
     () =>
       items
@@ -147,7 +148,7 @@ export function CartPanel({
           variationId: Number(item.variationId || 0) || null,
           activityType: item.activityTypeKey || item.typeKey || item.productType || null,
           quantity: Math.max(1, Number(item.qty || 1) || 1),
-          subtotal: Number(((Number(item.price || 0) * Number(item.qty || 1)) || 0).toFixed(2)),
+          subtotal: getCartLineSubtotal(item),
         }))
         .filter((line) => line.subtotal > 0 && (line.activityId || line.variationId || line.activityType)),
     [items]
@@ -931,7 +932,7 @@ function CartRow({
         <button onClick={() => onQty(1)} style={{ all: "unset", cursor: "pointer", width: 24, height: 24, borderRadius: "50%", background: "#fff", boxShadow: "var(--shadow-1)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>+</button>
       </div>
       <div className="display-num" style={{ fontSize: 18, minWidth: 64, textAlign: "right" }}>
-        ${(item.price * item.qty).toFixed(2)}
+        ${getCartLineSubtotal(item).toFixed(2)}
       </div>
       <button
         type="button"

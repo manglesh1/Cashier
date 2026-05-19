@@ -24,6 +24,7 @@ import { CartWaiverModal } from "./CartWaiverModal";
 import CashierPaymentDialog from "./CashierPaymentDialog";
 import { CashierScreenBoundary } from "./CashierScreenBoundary";
 import { CatalogGrid } from "./CatalogGrid";
+import { ScheduleRequiredDialog } from "./ScheduleRequiredDialog";
 import { WaveBoard } from "./WaveBoard";
 import { QuickBuilder } from "./QuickBuilder";
 import { CheckIn } from "./CheckIn";
@@ -35,6 +36,13 @@ import { WaiverDetail } from "./WaiverDetail";
 import { Redeem } from "./Redeem";
 import { VoucherCounter } from "./VoucherCounter";
 import BookingDetail from "./BookingDetail";
+import {
+  clampCartQuantity,
+  getCartLineSubtotal,
+  getDefaultCartQuantity,
+  hasScheduleSelection,
+  needsScheduleSelection,
+} from "./cartPricing";
 import {
   useGetAllPosDevicesQuery,
   useGetPresetFullQuery,
@@ -115,12 +123,22 @@ function normalizePresetSections(preset) {
           variationId: v.variationId || v.id,
           name: v.name || v.variationName || v.label || "Option",
           price: Number(v.price ?? p.price ?? p.unitPrice ?? 0),
+          pricingMode: v.pricingMode || v.pricingType || p.pricingMode || p.pricingType || null,
+          includedGuests: v.includedGuests ?? p.includedGuests ?? null,
+          additionalPersonPrice: v.additionalPersonPrice ?? p.additionalPersonPrice ?? null,
+          minGuests: v.minGuests ?? v.minimumGuests ?? p.minGuests ?? p.minimumGuests ?? null,
+          maxGuests: v.maxGuests ?? v.maximumGuests ?? p.maxGuests ?? p.maximumGuests ?? null,
         })).filter((v) => v.variationId),
         productItemId: p.productItemId,
         productType,
         name: p.displayName || p.activityName || p.productName || p.name || "Untitled",
         sub,
         price: Number(p.price ?? p.unitPrice ?? p.basePrice ?? NaN),
+        pricingMode: p.pricingMode || p.pricingType || null,
+        includedGuests: p.includedGuests ?? null,
+        additionalPersonPrice: p.additionalPersonPrice ?? null,
+        minGuests: p.minGuests ?? p.minimumGuests ?? null,
+        maxGuests: p.maxGuests ?? p.maximumGuests ?? null,
         icon: pickItemIcon(productType),
         badge,
         featured: p.featured,
@@ -158,7 +176,7 @@ function isNoScheduleSkuItem(item) {
 }
 
 function buildLinePricingSummary(item, cartPricing) {
-  const subtotal = Math.round((Number(item?.price || 0) * Number(item?.qty || 1)) * 100) / 100;
+  const subtotal = getCartLineSubtotal(item);
   const cartSubtotal = Number(cartPricing?.subtotal) || 0;
   const ratio = cartSubtotal > 0 ? subtotal / cartSubtotal : 0;
   const discountAmount = Math.round((Number(cartPricing?.discount?.amount) || 0) * ratio * 100) / 100;
@@ -221,6 +239,7 @@ export function CashierApp() {
   const [paymentBooking, setPaymentBooking] = useState(null);
   const [pendingPaymentBooking, setPendingPaymentBooking] = useState(null);
   const [cartPricing, setCartPricing] = useState(null);
+  const [scheduleRequiredItem, setScheduleRequiredItem] = useState(null);
   const [member] = useState(null);
   // Waivers attached to the current cart. Populated by the waiver-collection
   // modal (search existing / send link). Sent as waiverSignatureIds on
@@ -365,14 +384,20 @@ export function CashierApp() {
 
   // ── Cart actions ──────────────────────────────────────────────────
   const addItem = (productItem, section) => {
+    if (needsScheduleSelection(productItem) && !hasScheduleSelection(productItem)) {
+      setScheduleRequiredItem({ item: productItem, section });
+      return;
+    }
+
     const meta = productItem.sub || section?.title || "";
     setItems((prev) => {
       const idx = prev.findIndex((x) => x.id === productItem.id && x.meta === meta);
       if (idx >= 0) {
         const next = [...prev];
-        next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
+        next[idx] = { ...next[idx], qty: clampCartQuantity(next[idx], next[idx].qty + 1) };
         return next;
       }
+      const initialQty = getDefaultCartQuantity(productItem);
       return [
         ...prev,
         {
@@ -385,7 +410,16 @@ export function CashierApp() {
           name: productItem.name,
           meta,
           price: Number.isFinite(productItem.price) ? productItem.price : 0,
-          qty: 1,
+          pricingMode: productItem.pricingMode || null,
+          includedGuests: productItem.includedGuests ?? null,
+          additionalPersonPrice: productItem.additionalPersonPrice ?? null,
+          minGuests: productItem.minGuests ?? null,
+          maxGuests: productItem.maxGuests ?? null,
+          slotId: productItem.slotId || null,
+          selectedDate: productItem.selectedDate || productItem.date || null,
+          timeRange: productItem.timeRange || null,
+          bundleInclusions: productItem.bundleInclusions || [],
+          qty: initialQty,
           icon: productItem.icon,
           featured: productItem.featured,
           requiresWaiver: !!productItem.requiresWaiver,
@@ -399,7 +433,7 @@ export function CashierApp() {
   const setQty = (idx, delta) =>
     setItems((prev) => {
       const n = [...prev];
-      n[idx] = { ...n[idx], qty: Math.max(1, n[idx].qty + delta) };
+      n[idx] = { ...n[idx], qty: clampCartQuantity(n[idx], n[idx].qty + delta) };
       return n;
     });
 
@@ -422,14 +456,25 @@ export function CashierApp() {
 
     const noScheduleItems = items.filter(isNoScheduleSkuItem);
     const regularItems = items.filter((it) => !isNoScheduleSkuItem(it));
+    const missingScheduleItems = regularItems.filter(
+      (item) => needsScheduleSelection(item) && !hasScheduleSelection(item)
+    );
+    if (missingScheduleItems.length > 0) {
+      const item = missingScheduleItems[0];
+      setScheduleRequiredItem({ item, section: { title: item.meta } });
+      toast.error(`${item.name} needs a date and slot before payment.`);
+      return;
+    }
 
     const sessions = regularItems
       .filter((it) => it.activityId)
       .map((it) => ({
         activityId: it.activityId,
         variationId: it.variationId,
+        slotId: it.slotId || null,
         quantity: it.qty,
         isAddon: String(it.productType || "").toLowerCase().includes("add"),
+        bundleInclusions: it.bundleInclusions || [],
       }));
 
     // Use the first attached guest as the customer-of-record on the
@@ -485,7 +530,7 @@ export function CashierApp() {
       pricingSummary: buildLinePricingSummary(
         {
           price: regularItems.reduce(
-            (sum, item) => sum + Number(item.price || 0) * Number(item.qty || 1),
+            (sum, item) => sum + getCartLineSubtotal(item),
             0
           ),
           qty: 1,
@@ -650,6 +695,13 @@ export function CashierApp() {
             })
           }
         />
+        {scheduleRequiredItem && (
+          <ScheduleRequiredDialog
+            item={scheduleRequiredItem.item}
+            section={scheduleRequiredItem.section}
+            onClose={() => setScheduleRequiredItem(null)}
+          />
+        )}
       </>
     );
     header = (

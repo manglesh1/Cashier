@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Icon } from "./Icon";
+import { needsScheduleSelection } from "./cartPricing";
 
 // Sections come from props (loaded from the device's terminal template).
 // Falls back to a single "Quick" section using whatever items the parent
@@ -16,6 +17,11 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
           variationId: option.variationId,
           variationName: option.name,
           price: Number(option.price ?? item.price ?? 0),
+          pricingMode: option.pricingMode || option.pricingType || item.pricingMode || item.pricingType || null,
+          includedGuests: option.includedGuests ?? item.includedGuests ?? null,
+          additionalPersonPrice: option.additionalPersonPrice ?? item.additionalPersonPrice ?? null,
+          minGuests: option.minGuests ?? option.minimumGuests ?? item.minGuests ?? item.minimumGuests ?? null,
+          maxGuests: option.maxGuests ?? option.maximumGuests ?? item.maxGuests ?? item.maximumGuests ?? null,
         }
       : item;
     onAdd?.(chosen, section);
@@ -123,6 +129,7 @@ function ProductCard({ item, tone = "orange", onClick }) {
     neutral: { bg: "var(--ink-50)", fg: "var(--ink-700)" },
   }[tone];
   const hasChoices = (item.variationOptions || []).length > 1;
+  const requiresSchedule = needsScheduleSelection(item);
 
   return (
     <button
@@ -160,9 +167,9 @@ function ProductCard({ item, tone = "orange", onClick }) {
       <div style={{ minHeight: 44 }}>
         <div style={{ fontWeight: 700, fontSize: 16, lineHeight: 1.2 }}>{item.name}</div>
         {item.sub && <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 2 }}>{item.sub}</div>}
-        {hasChoices && (
+        {(hasChoices || requiresSchedule) && (
           <div style={{ fontSize: 11, color: "var(--aero-orange-700)", fontWeight: 800, marginTop: 4 }}>
-            Choose option
+            {requiresSchedule ? "Pick slot" : "Choose option"}
           </div>
         )}
       </div>
