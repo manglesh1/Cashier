@@ -29,6 +29,13 @@ export const bookingApi = baseApi.injectEndpoints({
       query: (body) => ({ url: "/bookings", method: "POST", body }),
       invalidatesTags: ["Bookings"],
     }),
+    getAvailability: builder.query({
+      query: ({ date, activityId }) => ({
+        url: "/bookings/availability/sessions",
+        params: { date, activityId },
+      }),
+      providesTags: ["Availability"],
+    }),
     validateCart: builder.mutation({
       query: (body) => ({ url: "/bookings/validate-cart", method: "POST", body }),
     }),
@@ -174,6 +181,7 @@ export const {
   useSearchGuestsQuery,
   useLazySearchGuestsQuery,
   useCreateBookingMutation,
+  useGetAvailabilityQuery,
   useValidateCartMutation,
   useSendBookingConfirmationMutation,
   usePaymentSendPaymentLinkMutation,

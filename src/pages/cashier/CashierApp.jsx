@@ -389,7 +389,7 @@ export function CashierApp() {
       return;
     }
 
-    const meta = productItem.sub || section?.title || "";
+    const meta = productItem.meta || productItem.sub || section?.title || "";
     setItems((prev) => {
       const idx = prev.findIndex((x) => x.id === productItem.id && x.meta === meta);
       if (idx >= 0) {
@@ -397,7 +397,10 @@ export function CashierApp() {
         next[idx] = { ...next[idx], qty: clampCartQuantity(next[idx], next[idx].qty + 1) };
         return next;
       }
-      const initialQty = getDefaultCartQuantity(productItem);
+      const initialQty = clampCartQuantity(
+        productItem,
+        productItem.qty ?? getDefaultCartQuantity(productItem)
+      );
       return [
         ...prev,
         {
@@ -465,6 +468,19 @@ export function CashierApp() {
       toast.error(`${item.name} needs a date and slot before payment.`);
       return;
     }
+    const scheduledDates = [
+      ...new Set(
+        regularItems
+          .filter((item) => hasScheduleSelection(item))
+          .map((item) => item.selectedDate || item.date)
+          .filter(Boolean)
+      ),
+    ];
+    if (scheduledDates.length > 1) {
+      toast.error("Please check out one booking date at a time.");
+      return;
+    }
+    const bookingDate = scheduledDates[0] || new Date().toISOString().slice(0, 10);
 
     const sessions = regularItems
       .filter((it) => it.activityId)
@@ -504,8 +520,8 @@ export function CashierApp() {
     }
     const payload = {
       locationId,
-      date: new Date().toISOString().slice(0, 10),
-      bookingDate: new Date().toISOString().slice(0, 10),
+      date: bookingDate,
+      bookingDate,
       sessions,
       // Backend (createBooking) recomputes coverage from these IDs and
       // rejects 400 if total spots covered < waiver-required quantity.
@@ -699,6 +715,7 @@ export function CashierApp() {
           <ScheduleRequiredDialog
             item={scheduleRequiredItem.item}
             section={scheduleRequiredItem.section}
+            onAdd={addItem}
             onClose={() => setScheduleRequiredItem(null)}
           />
         )}
