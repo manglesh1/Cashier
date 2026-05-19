@@ -4,7 +4,7 @@ import { Icon } from "./Icon";
 import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discountApi";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
-import { getCartLineSubtotal } from "./cartPricing";
+import { getCartLineSubtotal, needsScheduleSelection } from "./cartPricing";
 
 // Compute a discount amount from the validated discount + subtotal.
 // Mirrors what the admin's createBooking pricing logic does:
@@ -45,6 +45,7 @@ export function CartPanel({
   ticketAssignments = {},  // { [ticketIndex]: poolKey }
   onAssignTicket,          // (ticketIndex, poolKey) => void
   onDetachTicket,          // (ticketIndex) => void
+  onEditItem,
   recipientAssignments = {},
   onAssignRecipient,
   onClearRecipient,
@@ -542,6 +543,7 @@ export function CartPanel({
             onClearRecipient={onClearRecipient}
             onRemove={() => onRemove?.(idx)}
             onQty={(d) => onQty?.(idx, d)}
+            onEdit={() => onEditItem?.(idx)}
           />
         ))}
 
@@ -862,8 +864,10 @@ function CartRow({
   onClearRecipient,
   onRemove,
   onQty,
+  onEdit,
 }) {
   const qty = Math.max(1, Number(item.qty) || 1);
+  const editableSchedule = needsScheduleSelection(item);
   const recipientRows = requiresRecipient
     ? Array.from({ length: qty }, (_, unitIndex) => {
         const key = `${itemIndex}:${unitIndex}`;
@@ -874,13 +878,31 @@ function CartRow({
     : [];
 
   return (
-    <div style={{
-      display: "grid", gridTemplateColumns: "40px minmax(0, 1fr) auto auto auto", alignItems: "center", gap: 12,
-      padding: "12px 14px",
-      background: item.featured ? "var(--aero-orange-50)" : "#fff",
-      border: item.featured ? "2px solid var(--ink-800)" : "1.5px solid var(--ink-100)",
-      borderRadius: 14,
-    }}>
+    <div
+      role={editableSchedule ? "button" : undefined}
+      tabIndex={editableSchedule ? 0 : undefined}
+      onClick={editableSchedule ? onEdit : undefined}
+      onKeyDown={
+        editableSchedule
+          ? (event) => {
+              if (event.target !== event.currentTarget) return;
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onEdit?.();
+              }
+            }
+          : undefined
+      }
+      title={editableSchedule ? "Edit slot, variation, guests, and package choices" : undefined}
+      style={{
+        display: "grid", gridTemplateColumns: "40px minmax(0, 1fr) auto auto auto", alignItems: "center", gap: 12,
+        padding: "12px 14px",
+        background: item.featured ? "var(--aero-orange-50)" : "#fff",
+        border: item.featured ? "2px solid var(--ink-800)" : "1.5px solid var(--ink-100)",
+        borderRadius: 14,
+        cursor: editableSchedule ? "pointer" : "default",
+      }}
+    >
       <div style={{
         width: 40, height: 40, borderRadius: 10,
         background: item.featured ? "var(--aero-orange-500)" : "var(--ink-50)",
@@ -914,11 +936,25 @@ function CartRow({
                   {recipient?.name || recipient?.guestName || "Assign recipient"}
                 </span>
                 {assigned && (
-                  <button type="button" className="a-btn a-btn--ghost a-btn--xs" onClick={() => onClearRecipient?.(itemIndex, unitIndex)}>
+                  <button
+                    type="button"
+                    className="a-btn a-btn--ghost a-btn--xs"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onClearRecipient?.(itemIndex, unitIndex);
+                    }}
+                  >
                     Clear
                   </button>
                 )}
-                <button type="button" className="a-btn a-btn--ghost a-btn--xs" onClick={() => onAssignRecipient?.(itemIndex, unitIndex)}>
+                <button
+                  type="button"
+                  className="a-btn a-btn--ghost a-btn--xs"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onAssignRecipient?.(itemIndex, unitIndex);
+                  }}
+                >
                   {recipient ? "Change" : "Assign"}
                 </button>
               </div>
@@ -927,16 +963,19 @@ function CartRow({
         )}
       </div>
       <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 6px", background: "var(--ink-50)", borderRadius: 999 }}>
-        <button onClick={() => onQty(-1)} style={{ all: "unset", cursor: "pointer", width: 24, height: 24, borderRadius: "50%", background: "#fff", boxShadow: "var(--shadow-1)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>−</button>
+        <button onClick={(event) => { event.stopPropagation(); onQty(-1); }} style={{ all: "unset", cursor: "pointer", width: 24, height: 24, borderRadius: "50%", background: "#fff", boxShadow: "var(--shadow-1)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>−</button>
         <span style={{ minWidth: 16, textAlign: "center", fontWeight: 700, fontSize: 14 }}>{item.qty}</span>
-        <button onClick={() => onQty(1)} style={{ all: "unset", cursor: "pointer", width: 24, height: 24, borderRadius: "50%", background: "#fff", boxShadow: "var(--shadow-1)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>+</button>
+        <button onClick={(event) => { event.stopPropagation(); onQty(1); }} style={{ all: "unset", cursor: "pointer", width: 24, height: 24, borderRadius: "50%", background: "#fff", boxShadow: "var(--shadow-1)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>+</button>
       </div>
       <div className="display-num" style={{ fontSize: 18, minWidth: 64, textAlign: "right" }}>
         ${getCartLineSubtotal(item).toFixed(2)}
       </div>
       <button
         type="button"
-        onClick={onRemove}
+        onClick={(event) => {
+          event.stopPropagation();
+          onRemove?.();
+        }}
         title="Remove from cart"
         style={{
           all: "unset",

@@ -383,53 +383,75 @@ export function CashierApp() {
   );
 
   // ── Cart actions ──────────────────────────────────────────────────
+  const buildCartLine = (productItem, section) => {
+    const meta = productItem.meta || productItem.sub || section?.title || "";
+    const initialQty = clampCartQuantity(
+      productItem,
+      productItem.qty ?? getDefaultCartQuantity(productItem)
+    );
+
+    return {
+      id: productItem.id,
+      activityId: productItem.activityId,
+      variationId: productItem.variationId,
+      variationName: productItem.variationName,
+      variationOptions: productItem.variationOptions || [],
+      productType: productItem.productType,
+      name: productItem.name,
+      meta,
+      price: Number.isFinite(productItem.price) ? productItem.price : 0,
+      pricingMode: productItem.pricingMode || null,
+      includedGuests: productItem.includedGuests ?? null,
+      additionalPersonPrice: productItem.additionalPersonPrice ?? null,
+      minGuests: productItem.minGuests ?? null,
+      maxGuests: productItem.maxGuests ?? null,
+      slotId: productItem.slotId || null,
+      selectedDate: productItem.selectedDate || productItem.date || null,
+      timeRange: productItem.timeRange || null,
+      bundleInclusions: productItem.bundleInclusions || [],
+      choiceSelections: productItem.choiceSelections || {},
+      resourceSelections: productItem.resourceSelections || {},
+      qty: initialQty,
+      icon: productItem.icon,
+      featured: productItem.featured,
+      requiresWaiver: !!productItem.requiresWaiver,
+      isVoucherPack: isVoucherPackItem(productItem),
+    };
+  };
+
   const addItem = (productItem, section) => {
     if (needsScheduleSelection(productItem) && !hasScheduleSelection(productItem)) {
       setScheduleRequiredItem({ item: productItem, section });
       return;
     }
 
-    const meta = productItem.meta || productItem.sub || section?.title || "";
+    const cartLine = buildCartLine(productItem, section);
     setItems((prev) => {
-      const idx = prev.findIndex((x) => x.id === productItem.id && x.meta === meta);
+      const idx = prev.findIndex((x) => x.id === cartLine.id && x.meta === cartLine.meta);
       if (idx >= 0) {
         const next = [...prev];
         next[idx] = { ...next[idx], qty: clampCartQuantity(next[idx], next[idx].qty + 1) };
         return next;
       }
-      const initialQty = clampCartQuantity(
-        productItem,
-        productItem.qty ?? getDefaultCartQuantity(productItem)
-      );
-      return [
-        ...prev,
-        {
-          id: productItem.id,
-          activityId: productItem.activityId,
-          variationId: productItem.variationId,
-          variationName: productItem.variationName,
-          variationOptions: productItem.variationOptions || [],
-          productType: productItem.productType,
-          name: productItem.name,
-          meta,
-          price: Number.isFinite(productItem.price) ? productItem.price : 0,
-          pricingMode: productItem.pricingMode || null,
-          includedGuests: productItem.includedGuests ?? null,
-          additionalPersonPrice: productItem.additionalPersonPrice ?? null,
-          minGuests: productItem.minGuests ?? null,
-          maxGuests: productItem.maxGuests ?? null,
-          slotId: productItem.slotId || null,
-          selectedDate: productItem.selectedDate || productItem.date || null,
-          timeRange: productItem.timeRange || null,
-          bundleInclusions: productItem.bundleInclusions || [],
-          qty: initialQty,
-          icon: productItem.icon,
-          featured: productItem.featured,
-          requiresWaiver: !!productItem.requiresWaiver,
-          isVoucherPack: isVoucherPackItem(productItem),
-        },
-      ];
+      return [...prev, cartLine];
     });
+  };
+
+  const editCartItem = (idx) => {
+    const item = items[idx];
+    if (!item || !needsScheduleSelection(item)) return;
+    setScheduleRequiredItem({ item, section: { title: item.meta }, editIndex: idx });
+  };
+
+  const applyScheduledCartItem = (productItem, section) => {
+    const editIndex = scheduleRequiredItem?.editIndex;
+    if (Number.isInteger(editIndex)) {
+      const cartLine = buildCartLine(productItem, section);
+      setItems((prev) => prev.map((item, idx) => (idx === editIndex ? cartLine : item)));
+      toast.success(`Updated ${cartLine.name}`);
+      return;
+    }
+    addItem(productItem, section);
   };
 
   const removeItem = (idx) => setItems((prev) => prev.filter((_, i) => i !== idx));
@@ -678,6 +700,7 @@ export function CashierApp() {
           member={member}
           onRemove={removeItem}
           onQty={setQty}
+          onEditItem={editCartItem}
           onCheckout={handleCheckout}
           onPricingChange={setCartPricing}
           variant={v.cartVariant}
@@ -713,9 +736,10 @@ export function CashierApp() {
         />
         {scheduleRequiredItem && (
           <ScheduleRequiredDialog
+            key={`${scheduleRequiredItem.editIndex ?? "new"}:${scheduleRequiredItem.item?.id || ""}:${scheduleRequiredItem.item?.slotId || ""}`}
             item={scheduleRequiredItem.item}
             section={scheduleRequiredItem.section}
-            onAdd={addItem}
+            onAdd={applyScheduledCartItem}
             onClose={() => setScheduleRequiredItem(null)}
           />
         )}

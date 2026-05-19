@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useGetAvailabilityQuery } from "../../features/bookings/bookingApi";
 import { Icon } from "./Icon";
 import {
@@ -35,7 +35,131 @@ const getStartTime = (session) => String(timeRangeFromSession(session) || "").sp
 
 const getEndTime = (session) => String(timeRangeFromSession(session) || "").split(" - ")[1] || "";
 
+const getInclusionRoundingMode = (item) => {
+  const raw = String(item?.roundingMode || item?.rounding || "").toLowerCase();
+  return raw === "down" || raw === "round_down" || raw === "floor" ? "down" : "up";
+};
+
+const calculateEffectiveQty = (item, guestCount = 1) => {
+  const baseQty = Math.max(0, Number(item?.qty ?? item?.quantity ?? 0) || 0);
+  const guests = Math.max(1, Number(guestCount) || 1);
+  const perUnit = String(item?.perUnit || "per_booking");
+  if (perUnit === "per_guest") return baseQty * guests;
+  if (perUnit === "per_n_guests") {
+    const n = Math.max(1, Number(item?.perUnitN) || 1);
+    const groups = getInclusionRoundingMode(item) === "down"
+      ? (guests > 0 ? Math.max(1, Math.floor(guests / n)) : 0)
+      : Math.ceil(guests / n);
+    return baseQty * Math.max(0, groups);
+  }
+  return baseQty;
+};
+
+const getInclusionLabel = (item) =>
+  [item?.activityName, item?.variationName || item?.name]
+    .filter(Boolean)
+    .filter((value, index, arr) => arr.indexOf(value) === index)
+    .join(" - ") || "Included item";
+
+const getAutoIncludedItems = (variation) =>
+  (Array.isArray(variation?.itemsIncluded) ? variation.itemsIncluded : [])
+    .filter((includedItem) => includedItem?.fulfillmentMode !== "customer_choice");
+
+const getIncludedItemSummary = (variation, guestCount) =>
+  getAutoIncludedItems(variation)
+    .map((includedItem) => ({
+      key: `${includedItem.activityId || "item"}:${includedItem.variationId || includedItem.name || getInclusionLabel(includedItem)}`,
+      label: getInclusionLabel(includedItem),
+      quantity: calculateEffectiveQty(includedItem, guestCount),
+    }))
+    .filter((includedItem) => includedItem.quantity > 0);
+
+const expandChoiceItems = (includedItem) => {
+  const options = Array.isArray(includedItem?.variationOptions) ? includedItem.variationOptions : [];
+  if (!options.length) return [includedItem];
+
+  return options
+    .map((option) => ({
+      ...includedItem,
+      variationId: Number(option.variationId || option.id) || null,
+      variationName: option.variationName || option.name || option.label || "",
+      name: option.name || option.variationName || option.label || includedItem.activityName,
+      price: 0,
+      listedPrice: 0,
+      variationOptions: [],
+    }))
+    .filter((option) => option.variationId);
+};
+
+const getChoiceItemKey = (includedItem) =>
+  `${includedItem.choiceGroup || includedItem.activityName || "choice"}:${includedItem.activityId}:${includedItem.variationId || "base"}`;
+
+const getChoiceGroups = (variation = {}, guestCount = 1) => {
+  const items = Array.isArray(variation.itemsIncluded) ? variation.itemsIncluded : [];
+  const groups = new Map();
+
+  items
+    .filter((includedItem) => includedItem?.fulfillmentMode === "customer_choice")
+    .forEach((includedItem) => {
+      const groupName = includedItem.choiceGroup || `${includedItem.activityName || "Guest"} choice`;
+      const effectiveQty = calculateEffectiveQty(includedItem, guestCount);
+      if (effectiveQty <= 0) return;
+      if (!groups.has(groupName)) {
+        groups.set(groupName, {
+          key: groupName,
+          label: groupName.replace(/\s+choice$/i, ""),
+          choiceQuantity: effectiveQty,
+          items: [],
+        });
+      } else {
+        const group = groups.get(groupName);
+        group.choiceQuantity = Math.max(group.choiceQuantity, effectiveQty);
+      }
+      groups.get(groupName).items.push(...expandChoiceItems(includedItem));
+    });
+
+  return [...groups.values()].filter((group) => group.items.length > 0);
+};
+
+const buildResolvedInclusions = (variation, selections) => {
+  const items = Array.isArray(variation?.itemsIncluded) ? variation.itemsIncluded : [];
+  const selectedCounts = Object.values(selections || {})
+    .flat()
+    .reduce((acc, key) => {
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+  const includedItems = items
+    .filter((includedItem) => includedItem.fulfillmentMode !== "customer_choice")
+    .map((includedItem) => ({ ...includedItem, fulfillmentMode: "included" }));
+
+  const selectedChoiceItems = items
+    .filter((includedItem) => includedItem.fulfillmentMode === "customer_choice")
+    .flatMap(expandChoiceItems)
+    .filter((includedItem) => selectedCounts[getChoiceItemKey(includedItem)] > 0)
+    .map((includedItem) => ({
+      ...includedItem,
+      qty: selectedCounts[getChoiceItemKey(includedItem)],
+      quantity: selectedCounts[getChoiceItemKey(includedItem)],
+      perUnit: "per_booking",
+      perUnitN: null,
+      fulfillmentMode: "included",
+      selectedFromChoice: true,
+    }));
+
+  return [...includedItems, ...selectedChoiceItems];
+};
+
 const normalizeVariationId = (value) => String(value || "");
+
+const normalizeSlotIds = (value) => {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .map((slotId) => Number(slotId))
+    .filter((slotId) => Number.isFinite(slotId) && slotId > 0)
+    .map(String);
+};
 
 const isVariationUnavailable = (variation) =>
   variation?.isAvailable === false ||
@@ -66,6 +190,23 @@ const getMaxGuestCount = (variation) => {
 const getResourceGroupRoomLimit = (group) =>
   Math.max(1, Number(group?.maxResourcesPerBooking || group?.requiredCount || 1) || 1);
 
+const getAvailableResourceOptions = (group) =>
+  (group?.options || []).filter((option) => option?.isAvailable && option?.slotId);
+
+const getVariationAvailabilitySummary = (variation, session) => {
+  if (isVariationUnavailable(variation)) return variation?.unavailableReason || "Unavailable";
+
+  const remaining = Math.max(
+    0,
+    Number(session?.capacityRemaining ?? variation?.capacityRemaining ?? 0) || 0
+  );
+  const label =
+    variation?.availabilityLabel ||
+    session?.availabilityLabel ||
+    (remaining === 1 ? "spot" : "spots");
+  return `${remaining} ${label.replace(/\s+left$/i, "")} left`;
+};
+
 const chooseResourceSlots = (group, guestCount = 1) => {
   const explicit = (group?.selectedSlotIds || group?.candidateSlotIds || [])
     .map(String)
@@ -73,8 +214,7 @@ const chooseResourceSlots = (group, guestCount = 1) => {
   if (explicit.length) return explicit;
 
   const roomLimit = getResourceGroupRoomLimit(group);
-  const available = (group?.options || [])
-    .filter((option) => option?.isAvailable && option?.slotId)
+  const available = getAvailableResourceOptions(group)
     .sort((left, right) => {
       const leftCap = Number(left.availableCapacity) || 0;
       const rightCap = Number(right.availableCapacity) || 0;
@@ -93,6 +233,63 @@ const chooseResourceSlots = (group, guestCount = 1) => {
 
 const getResourceGroupKey = (variation, group) =>
   `${variation?.variationId || "variation"}:${group?.groupKey || `${group?.fromTime || ""}:${group?.toTime || ""}`}`;
+
+const getVariationSlotIds = (variation) => {
+  const resourceIds = (variation?.resources || [])
+    .map((resource) => resource?.slotId)
+    .filter(Boolean);
+  const groupIds = (variation?.resourceGroups || [])
+    .flatMap((group) => group?.options || [])
+    .map((option) => option?.slotId)
+    .filter(Boolean);
+  return [...resourceIds, ...groupIds].map(String);
+};
+
+const sessionMatchesCartLine = (session, variationId, slotIds, timeRange) => {
+  const variations = session?.variations || [];
+  const matchingVariation = variations.find((variation) =>
+    normalizeVariationId(variation.variationId) === normalizeVariationId(variationId)
+  );
+  const candidates = matchingVariation ? [matchingVariation] : variations;
+  const slotMatch =
+    slotIds.length > 0 &&
+    candidates.some((variation) => {
+      const variationSlotIds = new Set(getVariationSlotIds(variation));
+      return slotIds.some((slotId) => variationSlotIds.has(String(slotId)));
+    });
+  if (slotMatch) return true;
+  return Boolean(timeRange && timeRangeFromSession(session) === timeRange);
+};
+
+const buildResourceSelectionsFromSlotIds = (variation, slotIds, guestCount) => {
+  if (!slotIds.length) return buildDefaultResourceSelections(variation, guestCount);
+  const selected = new Set(slotIds.map(String));
+  const selections = {};
+  for (const group of variation?.resourceGroups || []) {
+    const key = getResourceGroupKey(variation, group);
+    const ids = (group.options || [])
+      .map((option) => option?.slotId)
+      .filter((slotId) => selected.has(String(slotId)))
+      .map(String);
+    selections[key] = ids.length ? ids : chooseResourceSlots(group, guestCount);
+  }
+  return selections;
+};
+
+const buildChoiceDraftsFromItem = (variation, guestCount, item) => {
+  const groups = getChoiceGroups(variation, guestCount);
+  const savedSelections = item?.choiceSelections || {};
+  return groups.reduce((acc, group) => {
+    const saved =
+      savedSelections[group.key] ||
+      savedSelections[`${variation.variationId}:${group.key}`] ||
+      null;
+    if (Array.isArray(saved)) {
+      acc[`${variation.variationId}:${group.key}`] = saved;
+    }
+    return acc;
+  }, {});
+};
 
 const getSelectedResourceSlots = (variation, resourceSelections, guestCount) => {
   const groups = variation?.resourceGroups || [];
@@ -125,12 +322,15 @@ const buildDefaultResourceSelections = (variation, guestCount) => {
 };
 
 export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
-  const [selectedDate, setSelectedDate] = useState(formatDateValue(new Date()));
+  const initialDate = item?.selectedDate || item?.date || formatDateValue(new Date());
+  const [selectedDate, setSelectedDate] = useState(initialDate);
   const [selectedSession, setSelectedSession] = useState(null);
   const [selectedVariationId, setSelectedVariationId] = useState(normalizeVariationId(item?.variationId));
   const [guestCountByVariation, setGuestCountByVariation] = useState({});
+  const [choiceSelectionDrafts, setChoiceSelectionDrafts] = useState({});
   const [resourceSelections, setResourceSelections] = useState({});
   const [openResourceGroup, setOpenResourceGroup] = useState(null);
+  const [hydratedExistingKey, setHydratedExistingKey] = useState("");
 
   const activityId = item?.activityId;
   const { data, isFetching, error } = useGetAvailabilityQuery(
@@ -140,6 +340,52 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
 
   const sessionsData = data?.data || data || {};
   const sessions = Array.isArray(sessionsData.sessions) ? sessionsData.sessions : [];
+
+  useEffect(() => {
+    const slotIds = normalizeSlotIds(item?.slotId);
+    if (!slotIds.length || !sessions.length) return;
+
+    const key = `${item?.id || ""}:${selectedDate}:${item?.variationId || ""}:${slotIds.join(",")}`;
+    if (hydratedExistingKey === key) return;
+
+    const session =
+      sessions.find((candidate) =>
+        sessionMatchesCartLine(candidate, item?.variationId, slotIds, item?.timeRange)
+      ) || null;
+    if (!session) return;
+
+    const variation =
+      (session.variations || []).find((candidate) =>
+        normalizeVariationId(candidate.variationId) === normalizeVariationId(item?.variationId)
+      ) ||
+      (session.variations || []).find((candidate) =>
+        getVariationSlotIds(candidate).some((slotId) => slotIds.includes(String(slotId)))
+      ) ||
+      (session.variations || [])[0] ||
+      null;
+    if (!variation) return;
+
+    const count = clampCartQuantity(
+      {
+        ...item,
+        minGuests: variation.minGuests ?? item?.minGuests ?? null,
+        maxGuests: variation.maxGuests ?? item?.maxGuests ?? null,
+      },
+      item?.qty || getDefaultGuestCount(variation, item)
+    );
+
+    setSelectedSession(session);
+    setSelectedVariationId(normalizeVariationId(variation.variationId));
+    setGuestCountByVariation({ [variation.variationId]: count });
+    setResourceSelections(
+      item?.resourceSelections && Object.keys(item.resourceSelections).length
+        ? item.resourceSelections
+        : buildResourceSelectionsFromSlotIds(variation, slotIds, count)
+    );
+    setChoiceSelectionDrafts(buildChoiceDraftsFromItem(variation, count, item));
+    setOpenResourceGroup(null);
+    setHydratedExistingKey(key);
+  }, [hydratedExistingKey, item, selectedDate, sessions]);
   const selectedVariation = useMemo(() => {
     const variations = selectedSession?.variations || [];
     if (!variations.length) return null;
@@ -157,7 +403,28 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
   const slotIds = selectedVariation
     ? getSelectedResourceSlots(selectedVariation, resourceSelections, guestCount)
     : [];
-  const readyToAdd = Boolean(selectedSession && selectedVariation && slotIds.length > 0 && guestCount > 0);
+  const choiceGroups = useMemo(
+    () => selectedVariation ? getChoiceGroups(selectedVariation, guestCount) : [],
+    [selectedVariation, guestCount]
+  );
+  const choiceSelections = useMemo(() => {
+    if (!choiceGroups.length || !selectedVariation) return {};
+    return choiceGroups.reduce((acc, group) => {
+      const key = `${selectedVariation.variationId}:${group.key}`;
+      const firstItem = group.items[0];
+      const existing = choiceSelectionDrafts[key] || [];
+      acc[key] = Array.from({ length: group.choiceQuantity }, (_, index) =>
+        Object.prototype.hasOwnProperty.call(existing, index)
+          ? existing[index]
+          : firstItem ? getChoiceItemKey(firstItem) : ""
+      );
+      return acc;
+    }, {});
+  }, [choiceGroups, choiceSelectionDrafts, selectedVariation]);
+  const choiceReady = !choiceGroups.some((group) =>
+    (choiceSelections[`${selectedVariation?.variationId}:${group.key}`] || []).filter(Boolean).length !== group.choiceQuantity
+  );
+  const readyToAdd = Boolean(selectedSession && selectedVariation && slotIds.length > 0 && guestCount > 0 && choiceReady);
   const selectedLine = selectedVariation
     ? {
         ...item,
@@ -191,6 +458,7 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
     setSelectedVariationId(normalizeVariationId(preferred?.variationId));
     setGuestCountByVariation(preferred ? { [preferred.variationId]: defaultCount } : {});
     setResourceSelections(preferred ? buildDefaultResourceSelections(preferred, defaultCount) : {});
+    setChoiceSelectionDrafts({});
     setOpenResourceGroup(null);
   };
 
@@ -201,6 +469,7 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
     setSelectedVariationId(normalizeVariationId(variation.variationId));
     setGuestCountByVariation({ [variation.variationId]: nextCount });
     setResourceSelections(buildDefaultResourceSelections(variation, nextCount));
+    setChoiceSelectionDrafts({});
     setOpenResourceGroup(null);
   };
 
@@ -239,6 +508,10 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
   const handleAdd = () => {
     if (!readyToAdd || !selectedVariation) return;
     const timeRange = timeRangeFromSession(selectedSession);
+    const resolvedChoiceSelections = choiceGroups.reduce((acc, group) => {
+      acc[group.key] = choiceSelections[`${selectedVariation.variationId}:${group.key}`] || [];
+      return acc;
+    }, {});
     const nextItem = {
       ...item,
       variationId: selectedVariation.variationId,
@@ -252,7 +525,11 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
       slotId: slotIds.length > 1 ? slotIds.map(Number) : Number(slotIds[0]),
       selectedDate,
       timeRange,
-      bundleInclusions: selectedVariation.itemsIncluded || [],
+      bundleInclusions: choiceGroups.length
+        ? buildResolvedInclusions(selectedVariation, resolvedChoiceSelections)
+        : selectedVariation.itemsIncluded || [],
+      choiceSelections: resolvedChoiceSelections,
+      resourceSelections,
       qty: guestCount,
       meta: [section?.title || item.sub, formatShortDate(selectedDate), timeRange]
         .filter(Boolean)
@@ -260,6 +537,17 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
     };
     onAdd?.(nextItem, section);
     onClose?.();
+  };
+
+  const handleChoiceSelect = (group, index, itemKey) => {
+    if (!selectedVariation) return;
+    const key = `${selectedVariation.variationId}:${group.key}`;
+    setChoiceSelectionDrafts((prev) => {
+      const current = prev[key] || [];
+      const next = Array.from({ length: group.choiceQuantity }, (_, idx) => current[idx] || "");
+      next[index] = itemKey;
+      return { ...prev, [key]: next };
+    });
   };
 
   return (
@@ -334,6 +622,7 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
                   setSelectedVariationId(normalizeVariationId(item?.variationId));
                   setGuestCountByVariation({});
                   setResourceSelections({});
+                  setChoiceSelectionDrafts({});
                   setOpenResourceGroup(null);
                 }}
                 style={{
@@ -410,6 +699,8 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
                   const active = normalizeVariationId(variation.variationId) === normalizeVariationId(selectedVariation?.variationId);
                   const unavailable = isVariationUnavailable(variation);
                   const lineQty = active ? guestCount : getDefaultGuestCount(variation, item);
+                  const availabilitySummary = getVariationAvailabilitySummary(variation, selectedSession);
+                  const includedItems = getIncludedItemSummary(variation, lineQty);
                   const priceLine = {
                     ...item,
                     productType: item.productType,
@@ -449,6 +740,41 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
                           <div style={{ marginTop: 3, color: unavailable ? "var(--ink-500)" : "var(--aero-orange-700)", fontSize: 12, fontWeight: 800 }}>
                             {unavailable ? variation.unavailableReason || "Unavailable" : `$${getCartLineSubtotal(priceLine).toFixed(2)}`}
                           </div>
+                          {availabilitySummary && (
+                            <div style={{ marginTop: 3, color: unavailable ? "var(--ink-500)" : "var(--ink-600)", fontSize: 12, fontWeight: 700, lineHeight: 1.35 }}>
+                              {availabilitySummary}
+                            </div>
+                          )}
+                          {includedItems.length > 0 && (
+                            <div style={{ marginTop: 8 }}>
+                              <div style={{ fontSize: 10, fontWeight: 900, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--ink-500)", marginBottom: 5 }}>
+                                Includes
+                              </div>
+                              <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                                {includedItems.slice(0, 5).map((includedItem) => (
+                                  <span
+                                    key={includedItem.key}
+                                    style={{
+                                      padding: "3px 7px",
+                                      borderRadius: 999,
+                                      background: "var(--aero-orange-50)",
+                                      color: "var(--aero-orange-700)",
+                                      border: "1px solid var(--aero-orange-100)",
+                                      fontSize: 11,
+                                      fontWeight: 800,
+                                    }}
+                                  >
+                                    {includedItem.quantity} x {includedItem.label}
+                                  </span>
+                                ))}
+                                {includedItems.length > 5 && (
+                                  <span style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-500)", alignSelf: "center" }}>
+                                    +{includedItems.length - 5} more
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          )}
                         </button>
                         {active && (
                           <div style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "4px 7px", background: "var(--ink-50)", borderRadius: 999 }}>
@@ -515,6 +841,75 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
                           })}
                         </div>
                       )}
+
+                      {active && choiceGroups.length > 0 && (
+                        <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                          {choiceGroups.map((group) => {
+                            const selectionKey = `${variation.variationId}:${group.key}`;
+                            const current = choiceSelections[selectionKey] || [];
+                            return (
+                              <div key={group.key} style={{ border: "1px solid var(--ink-100)", borderRadius: 12, padding: 10, background: "var(--ink-50)" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 8 }}>
+                                  <div>
+                                    <div className="eyebrow" style={{ fontSize: 10 }}>Choose {group.label}</div>
+                                    <div style={{ fontWeight: 850, color: "var(--ink-800)", fontSize: 13 }}>
+                                      Select {group.choiceQuantity}
+                                    </div>
+                                  </div>
+                                  <span style={{ fontSize: 11, fontWeight: 900, color: current.filter(Boolean).length === group.choiceQuantity ? "var(--color-success)" : "var(--aero-orange-700)" }}>
+                                    {current.filter(Boolean).length}/{group.choiceQuantity}
+                                  </span>
+                                </div>
+                                <div style={{ display: "grid", gap: 6 }}>
+                                  {group.items.map((choiceItem) => {
+                                    const itemKey = getChoiceItemKey(choiceItem);
+                                    const selectedCount = current.filter((selectedKey) => selectedKey === itemKey).length;
+                                    const canIncrease = current.filter(Boolean).length < group.choiceQuantity || group.choiceQuantity === 1;
+                                    return (
+                                      <div key={itemKey} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, background: "white", border: "1px solid var(--ink-100)", borderRadius: 10, padding: "8px 10px" }}>
+                                        <div style={{ minWidth: 0 }}>
+                                          <div style={{ fontSize: 12, fontWeight: 850, color: "var(--ink-900)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                            {getInclusionLabel(choiceItem)}
+                                          </div>
+                                        </div>
+                                        <div style={{ display: "grid", gridTemplateColumns: "30px 30px 30px", overflow: "hidden", border: "1px solid var(--ink-200)", borderRadius: 8, flex: "0 0 auto" }}>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              const index = current.lastIndexOf(itemKey);
+                                              if (index === -1) return;
+                                              handleChoiceSelect(group, index, "");
+                                            }}
+                                            disabled={selectedCount <= 0}
+                                            style={{ border: 0, background: "var(--ink-50)", fontWeight: 900, cursor: selectedCount <= 0 ? "not-allowed" : "pointer", opacity: selectedCount <= 0 ? 0.45 : 1 }}
+                                          >
+                                            -
+                                          </button>
+                                          <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", background: "white", fontSize: 12, fontWeight: 900 }}>
+                                            {selectedCount}
+                                          </span>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              if (!canIncrease) return;
+                                              const nextIndex = current.findIndex((selectedKey) => !selectedKey);
+                                              handleChoiceSelect(group, nextIndex === -1 ? 0 : nextIndex, itemKey);
+                                            }}
+                                            disabled={!canIncrease}
+                                            style={{ border: 0, background: "white", fontWeight: 900, cursor: !canIncrease ? "not-allowed" : "pointer", opacity: !canIncrease ? 0.45 : 1 }}
+                                          >
+                                            +
+                                          </button>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -526,10 +921,24 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
                 <div style={{ marginTop: 4, color: "var(--ink-600)", fontWeight: 700 }}>{timeRangeFromSession(selectedSession)}</div>
                 <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
                   <SummaryRow label="Option" value={selectedVariation?.name || "-"} />
+                  <SummaryRow label="Available" value={selectedVariation ? getVariationAvailabilitySummary(selectedVariation, selectedSession) : "-"} />
                   <SummaryRow label="Guests" value={guestCount} />
                   <SummaryRow label="Slots" value={slotIds.length || "-"} />
                   <SummaryRow label="Line total" value={selectedLine ? `$${getCartLineSubtotal(selectedLine).toFixed(2)}` : "-"} accent="var(--ink-900)" />
                 </div>
+                {selectedVariation && getIncludedItemSummary(selectedVariation, guestCount).length > 0 && (
+                  <div style={{ marginTop: 14 }}>
+                    <div className="eyebrow" style={{ fontSize: 10, marginBottom: 7 }}>Includes</div>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      {getIncludedItemSummary(selectedVariation, guestCount).slice(0, 6).map((includedItem) => (
+                        <div key={includedItem.key} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12 }}>
+                          <span style={{ color: "var(--ink-600)", fontWeight: 750 }}>{includedItem.label}</span>
+                          <span style={{ color: "var(--ink-900)", fontWeight: 900 }}>{includedItem.quantity}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </aside>
             </section>
           )}
@@ -542,7 +951,7 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
           <div style={{ display: "flex", gap: 10 }}>
             <button type="button" className="a-btn a-btn--ghost" onClick={onClose}>Cancel</button>
             <button type="button" className="a-btn a-btn--primary" disabled={!readyToAdd} onClick={handleAdd}>
-              Add to cart
+              {normalizeSlotIds(item?.slotId).length ? "Update cart" : "Add to cart"}
             </button>
           </div>
         </div>
