@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildAutoBindPlan,
   buildGuestTotals,
   buildSelectedProgress,
   getTicketBlocker,
@@ -113,5 +114,34 @@ test("guest counters match live operation labels", () => {
       { totalGuests: 1, checkedInGuests: 0 },
     ]),
     { totalGuests: 63, checkedInGuests: 14, pendingGuests: 49, completedBookings: 1 }
+  );
+});
+
+test("auto-bind plan prefers newly linked waiver holders and target ticket", () => {
+  const tickets = [
+    ticket({ ticketCode: "A", ticketId: 1, requiresWaiver: true }),
+    ticket({ ticketCode: "B", ticketId: 2, requiresWaiver: true }),
+  ];
+  const participants = [
+    { bookingParticipantId: 10, hasValidWaiver: true },
+    { bookingParticipantId: 20, hasValidWaiver: true },
+  ];
+
+  const plan = buildAutoBindPlan({
+    participants,
+    tickets,
+    preferredTicketCode: "B",
+    preferredParticipantIds: [20],
+  });
+
+  assert.deepEqual(
+    plan.assignments.map((assignment) => ({
+      ticketCode: assignment.ticket.ticketCode,
+      participantId: assignment.participant.bookingParticipantId,
+    })),
+    [
+      { ticketCode: "B", participantId: 20 },
+      { ticketCode: "A", participantId: 10 },
+    ]
   );
 });

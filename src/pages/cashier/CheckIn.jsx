@@ -35,6 +35,7 @@ import { useDebounceSearch } from "../../hooks/useDebounceSearch";
 import { getTerminal } from "../../lib/terminal";
 import { adminBookingDetailUrl } from "../../lib/adminLink";
 import {
+  buildAutoBindPlan,
   buildGuestTotals,
   buildSelectedProgress,
   getTicketBlocker,
@@ -576,36 +577,24 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     });
   };
 
-  const autoBindReadyHolders = async ({ participantRows = allParticipants, ticketRows = tickets, preferredTicketCode = null } = {}) => {
-    const boundParticipantIds = new Set(
-      ticketRows
-        .map((ticket) => Number(ticket.participantId))
-        .filter(Boolean)
-    );
-    const availableParticipants = participantRows.filter((participant) => {
-      const id = Number(participant.bookingParticipantId);
-      return id && participant.hasValidWaiver && !participant.checkedInAt && !boundParticipantIds.has(id);
+  const autoBindReadyHolders = async ({
+    participantRows = allParticipants,
+    ticketRows = tickets,
+    preferredTicketCode = null,
+    preferredParticipantIds = [],
+  } = {}) => {
+    const plan = buildAutoBindPlan({
+      participants: participantRows,
+      tickets: ticketRows,
+      preferredTicketCode,
+      preferredParticipantIds,
     });
-    const targetTickets = ticketRows
-      .filter((ticket) =>
-        ticket.status === "issued" &&
-        ticket.requiresWaiver &&
-        !ticket.participantId &&
-        !isRedeemedTicket(ticket)
-      )
-      .sort((a, b) => {
-        if (!preferredTicketCode) return 0;
-        if (a.ticketCode === preferredTicketCode) return -1;
-        if (b.ticketCode === preferredTicketCode) return 1;
-        return 0;
-      });
-    const count = Math.min(availableParticipants.length, targetTickets.length);
-    if (count <= 0) return { bound: 0, available: availableParticipants.length, target: targetTickets.length };
+    if (plan.assignments.length <= 0) {
+      return { bound: 0, available: plan.available, target: plan.target };
+    }
 
     let bound = 0;
-    for (let index = 0; index < count; index += 1) {
-      const ticket = targetTickets[index];
-      const participant = availableParticipants[index];
+    for (const { ticket, participant } of plan.assignments) {
       await bindHolder({
         ticketCode: ticket.ticketCode,
         participantId: participant.bookingParticipantId,
@@ -615,7 +604,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     }
     await Promise.all([refetchTickets(), refetchStatus()]);
     await onCheckedIn?.();
-    return { bound, available: availableParticipants.length, target: targetTickets.length };
+    return { bound, available: plan.available, target: plan.target };
   };
 
   const handleAutoBindReadyHolders = async () => {
@@ -641,6 +630,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       participantRows: nextParticipants,
       ticketRows: nextTickets,
       preferredTicketCode: waiverTargetCode,
+      preferredParticipantIds: linkResult?.data?.linkedParticipantIds || [],
     });
     await onCheckedIn?.();
     if (autoResult.bound > 0) {
@@ -2550,7 +2540,7 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
 
   React.useEffect(() => {
     const t = setTimeout(() => {
-      if (query.trim().length >= 2) trigger({ search: query.trim(), limit: 12 });
+      if (query.trim().length >= 2) trigger({ search: query.trim(), limit: 50 });
     }, 250);
     return () => clearTimeout(t);
   }, [query, trigger]);

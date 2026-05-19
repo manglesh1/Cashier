@@ -95,6 +95,65 @@ export const buildSelectedProgress = ({ tickets = [], ticketBlockers = new Map()
   };
 };
 
+export const buildAutoBindPlan = ({
+  participants = [],
+  tickets = [],
+  preferredTicketCode = null,
+  preferredParticipantIds = [],
+} = {}) => {
+  const boundParticipantIds = new Set(
+    tickets
+      .map((ticket) => Number(ticket.participantId))
+      .filter(Boolean)
+  );
+  const preferredParticipantOrder = new Map(
+    preferredParticipantIds
+      .map(Number)
+      .filter(Boolean)
+      .map((id, index) => [id, index])
+  );
+  const availableParticipants = participants
+    .filter((participant) => {
+      const id = Number(participant.bookingParticipantId);
+      return id && participant.hasValidWaiver && !participant.checkedInAt && !boundParticipantIds.has(id);
+    })
+    .sort((left, right) => {
+      const leftId = Number(left.bookingParticipantId);
+      const rightId = Number(right.bookingParticipantId);
+      const leftPreferred = preferredParticipantOrder.has(leftId);
+      const rightPreferred = preferredParticipantOrder.has(rightId);
+      if (leftPreferred !== rightPreferred) return leftPreferred ? -1 : 1;
+      if (leftPreferred && rightPreferred) {
+        return preferredParticipantOrder.get(leftId) - preferredParticipantOrder.get(rightId);
+      }
+      return 0;
+    });
+  const targetTickets = tickets
+    .filter((ticket) =>
+      ticket.status === "issued" &&
+      ticket.requiresWaiver &&
+      !ticket.participantId &&
+      !isRedeemedTicket(ticket)
+    )
+    .sort((a, b) => {
+      if (!preferredTicketCode) return 0;
+      if (a.ticketCode === preferredTicketCode) return -1;
+      if (b.ticketCode === preferredTicketCode) return 1;
+      return 0;
+    });
+  const count = Math.min(availableParticipants.length, targetTickets.length);
+  const assignments = Array.from({ length: count }, (_, index) => ({
+    ticket: targetTickets[index],
+    participant: availableParticipants[index],
+  }));
+
+  return {
+    assignments,
+    available: availableParticipants.length,
+    target: targetTickets.length,
+  };
+};
+
 export const buildGuestTotals = (bookings = []) => {
   const totalGuests = bookings.reduce((sum, b) => sum + Number(b.totalGuests || 0), 0);
   const checkedInGuests = bookings.reduce((sum, b) => sum + Number(b.checkedInGuests || 0), 0);
