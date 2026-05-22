@@ -13,6 +13,7 @@ import {
 } from "../../features/vouchers/voucherApi";
 import { useRedeemTicketMutation } from "../../features/tickets/ticketApi";
 import { getTerminal } from "../../lib/terminal";
+import { usePersistentState } from "../../lib/usePersistentState";
 
 function formatExpiry(ts) {
   if (!ts) return "No expiry";
@@ -89,7 +90,8 @@ export function VoucherCounter() {
   const [token, setToken] = useState("");
   const [active, setActive] = useState(null);
   const [error, setError] = useState(null);
-  const [recent, setRecent] = useState([]);
+  // Persisted so "Recent scans" survives a hard refresh / kiosk reload.
+  const [recent, setRecent] = usePersistentState("cashier:recent:vouchers", []);
   const [tab, setTab] = useState("scan");
   const [gcCode, setGcCode] = useState("");
   const [gcPin, setGcPin] = useState("");

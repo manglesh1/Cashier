@@ -10,6 +10,7 @@ import { StatusPill } from "./StatusPill";
 import {
   useLazyGetTicketByCodeQuery,
   useRedeemTicketMutation,
+  useGetRecentRedemptionsQuery,
 } from "../../features/tickets/ticketApi";
 import { getTerminal } from "../../lib/terminal";
 
@@ -27,7 +28,11 @@ const REASON_COPY = {
 export function Redeem() {
   const inputRef = useRef(null);
   const [code, setCode] = useState("");
-  const [recent, setRecent] = useState([]); // [{ ticket, ok, reason, at }]
+  // "Recent activity" comes from the backend redemption log (TicketRedemptions)
+  // so it survives refresh and reflects real redemption times. The redeem
+  // mutation invalidates the "Redemption" tag, so this refetches automatically.
+  const deviceId = getTerminal()?.deviceId || null;
+  const { data: recent = [] } = useGetRecentRedemptionsQuery({ deviceId });
   const [lookup, { isFetching: isLookingUp }] = useLazyGetTicketByCodeQuery();
   const [redeem, { isLoading: isRedeeming }] = useRedeemTicketMutation();
   useEffect(() => {
@@ -69,12 +74,10 @@ export function Redeem() {
         gateOrZone: terminal?.deviceName || null,
       }).unwrap();
       const ticket = res?.data;
-      setRecent((prev) => [{ ticket, ok: true, at: Date.now() }, ...prev].slice(0, 8));
+      // The "Redemption" tag invalidation refetches the Recent activity feed.
       toast.success(`Redeemed · ${ticket?.activity?.activityName || ticket?.productType || "ticket"}`);
     } catch (err) {
       const reason = err?.data?.reason || "not_found";
-      const ticket = err?.data?.data;
-      setRecent((prev) => [{ ticket, ok: false, reason, at: Date.now() }, ...prev].slice(0, 8));
       const copy = REASON_COPY[reason] || { title: "Scan failed", body: err?.data?.error || "" };
       toast.error(`${copy.title} — ${copy.body}`, { duration: 4000 });
     } finally {
@@ -183,8 +186,8 @@ export function Redeem() {
           </div>
         ) : (
           <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 10 }}>
-            {recent.map((entry, i) => (
-              <RecentRow key={i} entry={entry} />
+            {recent.map((entry) => (
+              <RecentRow key={entry.redemptionId} entry={entry} />
             ))}
           </ul>
         )}
@@ -194,8 +197,12 @@ export function Redeem() {
 }
 
 function RecentRow({ entry }) {
-  const t = entry.ticket;
-  const time = new Date(entry.at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" });
+  // entry comes from the backend redemption log:
+  // { redemptionId, code, activityName, redeemedAt, status, gateOrZone, redemptionType }
+  const ok = (entry.status || "success") === "success";
+  const time = entry.redeemedAt
+    ? new Date(entry.redeemedAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" })
+    : "";
   return (
     <li
       style={{
@@ -204,21 +211,20 @@ function RecentRow({ entry }) {
         alignItems: "center",
         gap: 14,
         padding: "14px 18px",
-        background: entry.ok ? "var(--color-success-soft)" : "var(--color-danger-soft)",
-        border: `2px solid ${entry.ok ? "var(--color-success)" : "var(--color-danger)"}`,
+        background: ok ? "var(--color-success-soft)" : "var(--color-danger-soft)",
+        border: `2px solid ${ok ? "var(--color-success)" : "var(--color-danger)"}`,
         borderRadius: 14,
       }}
     >
-      <Icon name={entry.ok ? "check" : "x"} size={22} stroke={3} style={{ color: entry.ok ? "var(--color-success)" : "var(--color-danger)" }} />
+      <Icon name={ok ? "check" : "x"} size={22} stroke={3} style={{ color: ok ? "var(--color-success)" : "var(--color-danger)" }} />
       <div style={{ lineHeight: 1.3 }}>
         <div style={{ fontWeight: 700, fontSize: 14 }}>
-          {t?.ticketCode || "—"}
-          {entry.ok && t?.activity?.activityName && <span style={{ color: "var(--ink-500)", fontWeight: 500, marginLeft: 6 }}>· {t.activity.activityName}</span>}
+          {entry.code || "—"}
+          {entry.activityName && <span style={{ color: "var(--ink-500)", fontWeight: 500, marginLeft: 6 }}>· {entry.activityName}</span>}
         </div>
         <div style={{ fontSize: 12, color: "var(--ink-600)" }}>
-          {entry.ok
-            ? `Redeemed ${t?.redemptionCount ?? 1}/${t?.maxRedemptions ?? 1}`
-            : (REASON_COPY[entry.reason]?.title || entry.reason || "Failed")}
+          {ok ? "Redeemed" : (entry.status || "Failed")}
+          {entry.gateOrZone ? ` · ${entry.gateOrZone}` : ""}
         </div>
       </div>
       <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-500)" }}>{time}</div>

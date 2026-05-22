@@ -656,6 +656,8 @@ export function CashierApp() {
       : {
           amountPaid: Number(payment?.amountPaid || 0),
           paymentMethod: payment?.paymentMethod,
+          // Reference (e.g. check number) recorded on the initial payment.
+          referenceNumber: payment?.referenceNumber || null,
           paymentDetails: {
             tenderedAmount: Number(payment?.tenderedAmount || 0),
             changeDue: Number(payment?.changeDue || 0),
@@ -1123,7 +1125,7 @@ export function CashierApp() {
       <Header
         breadcrumb="GATE · REDEMPTION"
         title="Scan ticket"
-        subtitle="Wristband / QR / typed code"
+        subtitle="Admit guests — scan a wristband / ticket at the gate"
       />
     );
   } else if (screen === "vouchers") {
@@ -1132,7 +1134,7 @@ export function CashierApp() {
       <Header
         breadcrumb="COUNTER · VOUCHERS"
         title="Voucher counter"
-        subtitle="Stock-item credits + slot-bound voucher lookup"
+        subtitle="Stored value — gift cards, visit packs & memberships"
       />
     );
   } else if (screen === "checkin") {

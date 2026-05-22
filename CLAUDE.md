@@ -29,6 +29,24 @@ Waiver / Refund. Backend is the Express + Sequelize app at
   persisted via redux-persist (whitelist `["auth","cart"]` in `store/index.js`)
   so refresh/reboot don't lose the cart. Transient UI (paymentBooking, modals,
   scheduleRequiredItem) stays in component `useState` on purpose.
+  - **Recent activity/scans** were plain `useState([])` → blanked on every hard
+    refresh. Two different fixes by screen:
+    - **Redeem "Recent activity" → BACKEND-driven.** The backend logs every
+      redeem to `TicketRedemptions` (redeemedAt, sourceToken, activityId,
+      terminalDeviceId, gateOrZone, status). New endpoint
+      `GET /tickets/redemptions/recent?locationId=&deviceId=&limit=`
+      (`ticketController.getRecentRedemptions`, location-scoped via the
+      redemption's booking, optional deviceId). Cashier:
+      `useGetRecentRedemptionsQuery({ deviceId })` (`Redemption` tag);
+      `redeemTicket` invalidates `Redemption` so the feed auto-refreshes after a
+      scan. Source of truth, survives refresh, shared across terminals. NOTE:
+      shows successful redemptions only (failed scans → toast, not the list).
+    - **VoucherCounter "Recent scans" → persisted local list.** It redeems mixed
+      types (vouchers/memberships/gift cards/tickets) and only TICKET redemptions
+      land in `TicketRedemptions`, so the backend feed would be incomplete here.
+      Kept on `lib/usePersistentState.js` (localStorage `useState`, key
+      `cashier:recent:vouchers`, capped 12) so it survives reload and still
+      covers every action type.
 - **Icons:** Lucide is BUNDLED (`main.jsx` wraps `createIcons({ icons })` onto
   `window.lucide`). The old unpkg CDN script was removed (kiosk works offline).
 
@@ -99,6 +117,22 @@ Waiver / Refund. Backend is the Express + Sequelize app at
   submit-lock (no double-charge), shared cash-drawer ack, ad-hoc receipt email
   field, discount gated by limit/manager. Charge uses validate-cart's
   authoritative pricing (no tax drift).
+- **Split tender (gift card + cash/card/check) — SELL flow.** In
+  `CashierPaymentDialog`, gift card is no longer a mutually-exclusive method —
+  it's an APPLIED CREDIT (lookup → Apply panel) that covers up to its balance,
+  and the method selector (cash/card/check) settles the REMAINDER in the same
+  Complete. Flow: create booking UNPAID (draft) → `gift-cards/redeem` for the
+  card portion → `recordPayment` for the remainder → booking paid. Receipt shows
+  "$X gift card + $Y method". If the card covers the full balance, the method
+  step is skipped (pure gift card). NOTE: the Check-in take-payment modal
+  (`CheckIn` `PaymentModal`) still uses the OLD single-tender gift card — split
+  tender there is the remaining parity item.
+- **Check number capture.** Selecting Check reveals a check-number field. It's
+  stored as the PaymentTransaction `referenceNumber` (`CHK-<n>`) AND in remarks
+  (`Check #<n>`). Threaded through `recordPayment` (existing booking / split
+  remainder) and through `createBooking` for draft sales (new `referenceNumber`
+  + initial-payment `remarks` on the first PaymentTransaction). Check-in modal:
+  pending (same parity follow-up).
 - **Check-in buckets:** route by status — fully checked-in → Completed,
   partial → In Progress, else Upcoming. Row pill shows Checked in / N/N in /
   Ready / N waivers missing. Bucketing compares `checkedInGuests >= totalGuests`.
@@ -210,6 +244,20 @@ Waiver / Refund. Backend is the Express + Sequelize app at
   dupes merged via `scripts/mergeDuplicateGuests.js` (dry-run default;
   `--apply`, `--email=`). Keeps the named profile, repoints all guest FKs,
   deletes dupes; resilient to unique-constraint collisions via savepoints.
+- **A booking must NEVER silently rename a returning guest.** `createBooking`
+  used to overwrite an existing guest's `guestName` from `guestInfo.guestName`
+  on every booking. That payload name mirrors the booking name, which can be a
+  descriptive "Name - Product" string (the no-schedule loop sets
+  `bookingName = \`${guestName} - ${item.name}\``; the cart customer is also set
+  to the waiver holder). Once a combined value reached `createBooking`, the
+  guest was permanently renamed (e.g. "Bimal Gayali - Birthday Bowl Popcorn"),
+  and since the cashier then sends that stored name back, it stuck. Fix:
+  `createBooking` only fills `guestName` when the guest has no real name yet
+  (empty / "Walk-in" placeholder); a real name is never overwritten by a
+  booking. Real edits go through the audited Edit-booking / customer page
+  (`editBooking`, which keeps name in its updatable set on purpose). Repaired
+  data: guest, the 2 stock bookings' names, and 2 BookingParticipant
+  displayNames. `GuestWaiverSignature.signedByName` was already clean.
 
 ## Gotchas / conventions
 - **Rules of Hooks:** all hooks BEFORE any early return. A `useMemo`/`useRef`

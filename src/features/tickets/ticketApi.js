@@ -47,6 +47,18 @@ export const ticketApi = baseApi.injectEndpoints({
       query: (ticketCode) => `/tickets/${ticketCode}`,
     }),
 
+    // Recent redemptions feed — authoritative "Recent activity" (survives
+    // refresh, shared across terminals). locationId is auto-injected by
+    // baseApi; pass deviceId to narrow to this terminal.
+    getRecentRedemptions: builder.query({
+      query: ({ deviceId, limit = 20 } = {}) => ({
+        url: "/tickets/redemptions/recent",
+        params: { ...(deviceId ? { deviceId } : {}), limit },
+      }),
+      transformResponse: (resp) => resp?.data || [],
+      providesTags: ["Redemption"],
+    }),
+
     // Redemption — single ticket scan
     redeemTicket: builder.mutation({
       query: ({ ticketCode, terminalDeviceId, gateOrZone, notes, managerOverride, allowEarlyCheckIn = false }) => ({
@@ -55,8 +67,9 @@ export const ticketApi = baseApi.injectEndpoints({
         body: { terminalDeviceId, gateOrZone, notes, managerOverride, allowEarlyCheckIn },
       }),
       invalidatesTags: (result) => {
-        if (!result?.data?.bookingId) return [];
-        return [{ type: "Tickets", id: result.data.bookingId }];
+        const tags = ["Redemption"];
+        if (result?.data?.bookingId) tags.push({ type: "Tickets", id: result.data.bookingId });
+        return tags;
       },
     }),
 
@@ -94,6 +107,7 @@ export const {
   useCheckInAllTicketsMutation,
   useGetTicketByCodeQuery,
   useLazyGetTicketByCodeQuery,
+  useGetRecentRedemptionsQuery,
   useRedeemTicketMutation,
   useVoidTicketMutation,
   useBindTicketHolderMutation,

@@ -52,10 +52,12 @@ function buildBookingPromoCartLines(booking) {
 // CheckIn screen and any future payment surface share the same ack +
 // fallback semantics.
 
+// Gift card is NOT a method here — it's an applied CREDIT (see the gift-card
+// panel). These are the tenders that settle whatever remains after the gift
+// card, so a gift card + cash/card/check is one flow (split tender).
 const PAYMENT_METHODS = [
   { value: "cash", label: "Cash", icon: "banknote", bg: "#F23B20" },
   { value: "card", label: "Credit / Debit", icon: "credit-card", bg: "#FF8A00" },
-  { value: "gift_card", label: "Gift Card", icon: "gift", bg: "#1687F5" },
   { value: "check", label: "Check", icon: "receipt", bg: "#D8D8D8", fg: "#111" },
 ];
 const QUICK_CASH = [1, 5, 10, 20, 50, 100];
@@ -87,6 +89,11 @@ export default function CashierPaymentDialog({
   const [gcCode, setGcCode] = useState("");
   const [gcPin, setGcPin] = useState("");
   const [gcCard, setGcCard] = useState(null);
+  // Applied gift-card credit: { code, pin, amount }. When set, the gift card
+  // covers up to its balance and the method below settles the remainder.
+  const [gcApplied, setGcApplied] = useState(null);
+  // Check tender: capture the check number (stored as the payment reference).
+  const [checkNumber, setCheckNumber] = useState("");
   // Idempotency: one base key per opened dialog (per booking attempt).
   // Sub-scoped (":discount", ":payment") when used so the two recordPayment
   // calls have independent dedupe identities. Retrying after a failed
@@ -112,6 +119,8 @@ export default function CashierPaymentDialog({
     setGcCode("");
     setGcPin("");
     setGcCard(null);
+    setGcApplied(null);
+    setCheckNumber("");
     setReceiptEmail(
       booking?.guestEmail ||
         booking?.guest?.guestEmail ||
@@ -150,16 +159,18 @@ export default function CashierPaymentDialog({
   const discountAmount = roundMoney(Math.min(Number(discount?.amount || 0), balanceDue));
   const payableBalance = roundMoney(Math.max(0, balanceDue - discountAmount));
   const totalDiscountShown = roundMoney(cartDiscountAmount + discountAmount);
+  // Gift card credit applied to the order (clamped to the current payable
+  // balance — a discount may have been applied after the card was looked up).
+  const gcBalance = roundMoney(Number(gcCard?.currentBalance || 0));
+  const giftApplied = gcApplied ? roundMoney(Math.min(Number(gcApplied.amount || 0), payableBalance)) : 0;
+  // What cash / card / check must still settle AFTER the gift card credit.
+  // This is the split-tender remainder (0 when the card covers the order).
+  const remainingAfterGift = roundMoney(Math.max(0, payableBalance - giftApplied));
   const tendered = Number(amount) || 0;
   const isCash = method === "cash";
-  const isGiftCard = method === "gift_card";
-  // Gift card pays up to its remaining balance (partial allowed; any
-  // shortfall stays as the booking's balance due).
-  const gcBalance = roundMoney(Number(gcCard?.currentBalance || 0));
-  const gcApply = isGiftCard && gcCard ? roundMoney(Math.min(payableBalance, gcBalance)) : 0;
-  const recordAmount = isCash ? Math.min(payableBalance, tendered) : isGiftCard ? gcApply : tendered;
-  const remaining = Math.max(0, payableBalance - recordAmount);
-  const changeDue = isCash ? Math.max(0, tendered - payableBalance) : 0;
+  const isCheck = method === "check";
+  const methodRecord = remainingAfterGift > 0 ? (isCash ? Math.min(remainingAfterGift, tendered) : tendered) : 0;
+  const changeDue = isCash && remainingAfterGift > 0 ? Math.max(0, tendered - remainingAfterGift) : 0;
   const isDraftSale = booking?.draftSale === true;
   const isBusy = isSubmitting || draftSubmitting || gcLooking || gcRedeeming;
 
@@ -173,9 +184,8 @@ export default function CashierPaymentDialog({
   };
   const handleMethodChange = (next) => {
     setMethod(next);
-    // Gift card amount is driven by the looked-up card, not the keypad.
-    setAmount(next === "cash" || next === "gift_card" ? "" : payableBalance.toFixed(2));
-    if (next !== "gift_card") setGcCard(null);
+    // The method tender settles whatever remains after the gift-card credit.
+    setAmount(next === "cash" ? "" : remainingAfterGift.toFixed(2));
   };
 
   const handleGcLookup = async () => {
@@ -202,6 +212,29 @@ export default function CashierPaymentDialog({
     } catch (err) {
       toast.error(err?.data?.message || err?.data?.error || "Gift card lookup failed.");
     }
+  };
+
+  // Apply the looked-up card as a credit (up to its balance / the order total).
+  // Whatever is left becomes the cash/card/check remainder — that's the split.
+  const applyGiftCard = () => {
+    if (!gcCard) return;
+    const amt = roundMoney(Math.min(Number(gcCard.currentBalance || 0), payableBalance));
+    if (amt <= 0) { toast.error("Gift card has no balance to apply."); return; }
+    setGcApplied({ code: gcCode.trim(), pin: gcPin.trim(), amount: amt });
+    const rem = roundMoney(Math.max(0, payableBalance - amt));
+    setAmount(method === "cash" ? "" : rem.toFixed(2));
+    toast.success(
+      rem > 0
+        ? `${moneyFmt(amt)} gift card applied · ${moneyFmt(rem)} remaining`
+        : `${moneyFmt(amt)} gift card covers the order`
+    );
+  };
+  const removeGiftCard = () => {
+    setGcApplied(null);
+    setGcCard(null);
+    setGcCode("");
+    setGcPin("");
+    setAmount(method === "cash" ? "" : payableBalance.toFixed(2));
   };
 
   const applyCoupon = async () => {
@@ -253,108 +286,130 @@ export default function CashierPaymentDialog({
   const handleSubmit = async () => {
     if (submitLockRef.current) return;
 
-    // ── Gift card tender ──────────────────────────────────────────────
-    // The gift-cards/redeem endpoint atomically decrements the card AND
-    // records the payment on the booking, so we don't use recordPayment for
-    // the gift-card amount. For a draft sale we first create the booking
-    // (unpaid) so we have a bookingId to redeem against.
-    if (isGiftCard) {
-      if (!gcCard) { toast.error("Look up the gift card first."); return; }
-      if (gcApply <= 0) { toast.error("Gift card has no balance to apply."); return; }
-      submitLockRef.current = true;
-      const terminal = getTerminal();
-      try {
+    const hasGift = giftApplied > 0 && !!gcApplied;
+    const needRemainder = remainingAfterGift > 0;
+
+    // Validate the remainder tender (cash / card / check), if there is one.
+    if (needRemainder) {
+      if (!Number.isFinite(tendered) || tendered <= 0) {
+        toast.error(isCash ? "Enter cash received." : "Enter a payment amount.");
+        return;
+      }
+      if (isCash && tendered < remainingAfterGift) {
+        toast.error(`Cash received must cover ${moneyFmt(remainingAfterGift)}.`);
+        return;
+      }
+      if (!isCash && tendered > remainingAfterGift) {
+        toast.error(`Amount cannot exceed ${moneyFmt(remainingAfterGift)}.`);
+        return;
+      }
+      if (isCheck && !checkNumber.trim()) {
+        toast.error("Enter the check number.");
+        return;
+      }
+    } else if (!hasGift && payableBalance > 0) {
+      toast.error("Enter a payment amount.");
+      return;
+    }
+
+    // Lock now, synchronously, before any await.
+    submitLockRef.current = true;
+    const terminal = getTerminal();
+    const methodAmount = isCash ? remainingAfterGift : (needRemainder ? tendered : 0);
+    const cashRemark = isCash && needRemainder
+      ? `Cash tendered ${moneyFmt(tendered)}; change due ${moneyFmt(changeDue)}.`
+      : "";
+    const checkRemark = isCheck && needRemainder ? `Check #${checkNumber.trim()}.` : "";
+    const methodRef = isCheck && needRemainder ? `CHK-${checkNumber.trim()}` : undefined;
+    const methodRemarks = [note || "Payment recorded at POS sell", cashRemark, checkRemark].filter(Boolean).join(" ");
+    const discountRemarks = [
+      `POS discount applied: ${discount?.label || "Discount"}`,
+      discount?.code ? `Code ${discount.code}.` : "",
+      discount?.managerName ? `Approved by ${discount.managerName}.` : "",
+    ].filter(Boolean).join(" ");
+    // Tracks whether the discount call already committed so a later failure
+    // surfaces a clear partial-paid retry message (idempotency prevents dupes).
+    let discountCommitted = false;
+
+    try {
+      // ── Path A: gift card applied (covers all, or split with a method) ──
+      if (hasGift) {
         let bookingId = booking?.bookingId || null;
         let receiptInfo = null;
         if (isDraftSale) {
           setDraftSubmitting(true);
+          // Create the booking UNPAID, then settle with gift card (+remainder).
           const result = await onCompleteDraft?.({
-            paymentMethod: "gift_card",
-            giftCard: true, // completeDraftCheckout: create UNPAID, skip payment payload
+            giftCard: true,
             discountAmount,
             discount,
             note,
-            remarks: note || "Gift card payment at POS sell",
+            remarks: note || "Split tender at POS sell",
           });
           bookingId = result?.bookingId || null;
           receiptInfo = result || {};
           if (!bookingId) throw new Error("Booking could not be created.");
         } else if (discountAmount > 0) {
-          // Existing booking: record the POS discount as complimentary first.
           await recordPayment({
             bookingId,
             amountPaid: discountAmount,
             paymentMethod: "complimentary",
             terminalDeviceId: terminal?.deviceId || null,
-            remarks: [
-              `POS discount applied: ${discount?.label || "Discount"}`,
-              discount?.code ? `Code ${discount.code}.` : "",
-              discount?.managerName ? `Approved by ${discount.managerName}.` : "",
-            ].filter(Boolean).join(" "),
+            remarks: discountRemarks,
             idempotencyKey: sessionKey ? `${sessionKey}:discount` : undefined,
           }).unwrap();
+          discountCommitted = true;
         }
+        // Redeem the gift-card portion (records its own payment on the booking).
         const gc = await redeemGiftCard({
-          code: gcCode.trim(),
-          pin: gcPin.trim(),
-          amount: gcApply,
+          code: gcApplied.code,
+          pin: gcApplied.pin,
+          amount: giftApplied,
           bookingId,
           note: note || "POS gift card payment",
         }).unwrap();
         const balanceAfter = Number(gc?.data?.balanceAfter ?? 0);
+        // Settle the remainder (if any) with the chosen method.
+        if (needRemainder && methodAmount > 0) {
+          await recordPayment({
+            bookingId,
+            amountPaid: methodAmount,
+            paymentMethod: method,
+            tenderedAmount: tendered,
+            changeDue,
+            referenceNumber: methodRef,
+            terminalDeviceId: terminal?.deviceId || null,
+            remarks: methodRemarks,
+            idempotencyKey: sessionKey ? `${sessionKey}:payment` : undefined,
+          }).unwrap();
+          if (isCash) openCashDrawer({ bookingId, terminal });
+        }
         setComplete({
           ...(receiptInfo || {}),
           bookingId,
-          amountPaid: roundMoney(gcApply),
+          amountPaid: roundMoney(giftApplied + methodAmount),
           discountAmount: totalDiscountShown,
           discountLabel: discount?.label || booking.discount?.name || null,
-          paymentAmount: gcApply,
-          paymentMethod: "gift_card",
+          paymentMethod: needRemainder ? method : "gift_card",
+          giftCardAmount: giftApplied,
           giftCardBalanceAfter: balanceAfter,
-          balanceRemaining: remaining,
-          changeDue: 0,
+          methodAmount,
+          tenderedAmount: tendered,
+          changeDue,
+          checkNumber: isCheck && needRemainder ? checkNumber.trim() : null,
+          balanceRemaining: 0,
+          drawerOpened: isCash && needRemainder,
         });
         toast.success(
-          remaining > 0
-            ? `${moneyFmt(gcApply)} on gift card · ${moneyFmt(remaining)} still due`
-            : `${moneyFmt(gcApply)} paid by gift card`
+          needRemainder
+            ? `${moneyFmt(giftApplied)} gift card + ${moneyFmt(methodAmount)} ${method}`
+            : `${moneyFmt(giftApplied)} paid by gift card`
         );
-      } catch (err) {
-        toast.error(err?.data?.message || err?.data?.error || "Gift card payment failed.");
-      } finally {
-        setDraftSubmitting(false);
-        submitLockRef.current = false;
+        return;
       }
-      return;
-    }
 
-    if (payableBalance > 0 && (!Number.isFinite(tendered) || tendered <= 0)) {
-      toast.error(isCash ? "Enter cash received." : "Enter a payment amount.");
-      return;
-    }
-    if (isCash && tendered < payableBalance) {
-      toast.error(`Cash received must cover ${moneyFmt(payableBalance)}.`);
-      return;
-    }
-    if (!isCash && tendered > payableBalance) {
-      toast.error(`Amount cannot exceed ${moneyFmt(payableBalance)}.`);
-      return;
-    }
-    // Lock now, synchronously, before any await. A second tap that arrives
-    // before isBusy flips will hit the guard at the top and exit cleanly.
-    submitLockRef.current = true;
-    const finalRecord = isCash ? payableBalance : tendered;
-    const cashRemark = isCash
-      ? `Cash tendered ${moneyFmt(tendered)}; change due ${moneyFmt(changeDue)}.`
-      : "";
-    const terminal = getTerminal();
-    // Tracks whether we've already committed the discount. If the tender
-    // call fails after this, the cashier sees a clear partial-paid message
-    // (instead of a generic "Could not record payment") and can retry —
-    // idempotency keys on each call ensure no double-charge.
-    let discountCommitted = false;
-
-    try {
+      // ── Path B: no gift card — cash / card / check only ──
+      const finalRecord = isCash ? remainingAfterGift : tendered; // == payableBalance here
       if (isDraftSale) {
         setDraftSubmitting(true);
         const result = await onCompleteDraft?.({
@@ -362,11 +417,12 @@ export default function CashierPaymentDialog({
           paymentMethod: method,
           tenderedAmount: tendered,
           changeDue,
+          referenceNumber: methodRef,
           terminalDeviceId: terminal?.deviceId || null,
           discountAmount,
           discount,
           note,
-          remarks: [note || "Payment recorded at POS sell", cashRemark].filter(Boolean).join(" "),
+          remarks: methodRemarks,
         });
         if (isCash && finalRecord > 0) {
           openCashDrawer({ bookingId: result?.bookingId || null, terminal });
@@ -376,10 +432,11 @@ export default function CashierPaymentDialog({
           amountPaid: roundMoney(finalRecord),
           discountAmount: totalDiscountShown,
           discountLabel: discount?.label || booking.discount?.name || null,
-          paymentAmount: finalRecord,
           paymentMethod: method,
+          methodAmount: finalRecord,
           tenderedAmount: tendered,
           changeDue,
+          checkNumber: isCheck ? checkNumber.trim() : null,
           drawerOpened: isCash && finalRecord > 0,
         });
         toast.success(isCash ? `${moneyFmt(finalRecord)} recorded · drawer opened` : `${moneyFmt(finalRecord)} recorded`);
@@ -393,11 +450,7 @@ export default function CashierPaymentDialog({
           amountPaid: discountAmount,
           paymentMethod: "complimentary",
           terminalDeviceId: terminal?.deviceId || null,
-          remarks: [
-            `POS discount applied: ${discount?.label || "Discount"}`,
-            discount?.code ? `Code ${discount.code}.` : "",
-            discount?.managerName ? `Approved by ${discount.managerName}.` : "",
-          ].filter(Boolean).join(" "),
+          remarks: discountRemarks,
           idempotencyKey: sessionKey ? `${sessionKey}:discount` : undefined,
         }).unwrap();
         discountCommitted = true;
@@ -409,8 +462,9 @@ export default function CashierPaymentDialog({
           paymentMethod: method,
           tenderedAmount: tendered,
           changeDue,
+          referenceNumber: methodRef,
           terminalDeviceId: terminal?.deviceId || null,
-          remarks: [note || "Payment recorded at POS sell", cashRemark].filter(Boolean).join(" "),
+          remarks: methodRemarks,
           idempotencyKey: sessionKey ? `${sessionKey}:payment` : undefined,
         }).unwrap();
       }
@@ -422,10 +476,11 @@ export default function CashierPaymentDialog({
         amountPaid: roundMoney(finalRecord + discountAmount),
         discountAmount,
         discountLabel: discount?.label || null,
-        paymentAmount: finalRecord,
         paymentMethod: method,
+        methodAmount: finalRecord,
         tenderedAmount: tendered,
         changeDue,
+        checkNumber: isCheck ? checkNumber.trim() : null,
         drawerOpened: isCash && finalRecord > 0,
       });
       toast.success(isCash ? `${moneyFmt(finalRecord)} recorded · drawer opened` : `${moneyFmt(finalRecord)} recorded`);
@@ -519,9 +574,14 @@ export default function CashierPaymentDialog({
                 {moneyFmt(complete.amountPaid)} received
               </div>
               <div style={{ fontSize: 13, color: "var(--ink-700)", marginTop: 4 }}>
-                {complete.paymentMethod === "cash"
-                  ? `Cash · change due ${moneyFmt(complete.changeDue)}`
-                  : `${complete.paymentMethod} payment`}
+                {complete.giftCardAmount > 0 && complete.methodAmount > 0
+                  ? `${moneyFmt(complete.giftCardAmount)} gift card + ${moneyFmt(complete.methodAmount)} ${complete.paymentMethod}`
+                  : complete.giftCardAmount > 0
+                    ? `Gift card${complete.giftCardBalanceAfter != null ? ` · ${moneyFmt(complete.giftCardBalanceAfter)} left` : ""}`
+                    : complete.paymentMethod === "cash"
+                      ? `Cash · change due ${moneyFmt(complete.changeDue)}`
+                      : `${complete.paymentMethod} payment`}
+                {complete.checkNumber ? ` · Check #${complete.checkNumber}` : ""}
                 {complete.discountAmount > 0 ? ` · ${moneyFmt(complete.discountAmount)} discount applied` : ""}
               </div>
             </div>
@@ -577,6 +637,14 @@ export default function CashierPaymentDialog({
                 )}
                 <span style={{ fontWeight: 800, fontSize: 16, marginTop: 6, color: "var(--ink-900)" }}>Balance due</span>
                 <span style={{ fontWeight: 800, fontSize: 16, marginTop: 6, color: "var(--ink-900)" }}>{moneyFmt(payableBalance)}</span>
+                {giftApplied > 0 && (
+                  <>
+                    <span style={{ color: "#1687F5" }}>Gift card</span>
+                    <span style={{ color: "#1687F5" }}>−{moneyFmt(giftApplied)}</span>
+                    <span style={{ fontWeight: 800, color: "var(--ink-900)" }}>Remaining</span>
+                    <span style={{ fontWeight: 800, color: "var(--ink-900)" }}>{moneyFmt(remainingAfterGift)}</span>
+                  </>
+                )}
               </div>
 
               <div style={{ marginTop: 14, padding: "10px 12px", background: "white",
@@ -611,9 +679,59 @@ export default function CashierPaymentDialog({
                 )}
               </div>
 
+              {/* Gift card credit — apply up to its balance; the method below
+                  settles whatever remains (split tender in one flow). */}
+              <div style={{ marginTop: 14, padding: "10px 12px", background: "white",
+                border: "1.5px solid var(--ink-200)", borderRadius: 10 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: ".06em",
+                  textTransform: "uppercase", color: "var(--ink-500)", marginBottom: 6 }}>Gift card</div>
+                {gcApplied ? (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 13 }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: "var(--font-mono)" }}>
+                      <Icon name="gift" size={13} style={{ color: "#1687F5" }} />
+                      {gcApplied.code} · <strong style={{ color: "#1687F5" }}>{moneyFmt(giftApplied)}</strong>
+                    </span>
+                    <button type="button" onClick={removeGiftCard} title="Remove gift card"
+                      style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)" }}>
+                      <Icon name="x" size={13} />
+                    </button>
+                  </div>
+                ) : !gcCard ? (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input value={gcCode} onChange={(e) => setGcCode(e.target.value.toUpperCase())}
+                      onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }}
+                      placeholder="Card code" autoComplete="off"
+                      style={{ flex: 1, fontSize: 13, padding: "6px 8px", border: "1.5px solid var(--ink-200)", borderRadius: 6, fontFamily: "var(--font-mono)", fontWeight: 700 }} />
+                    <input value={gcPin} onChange={(e) => setGcPin(e.target.value.replace(/\D/g, ""))}
+                      onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }}
+                      placeholder="PIN" inputMode="numeric" maxLength={6} type="password" autoComplete="off"
+                      style={{ width: 64, fontSize: 13, padding: "6px 8px", border: "1.5px solid var(--ink-200)", borderRadius: 6 }} />
+                    <button type="button" className="a-btn a-btn--secondary a-btn--sm" onClick={handleGcLookup}
+                      disabled={gcLooking || !gcCode.trim() || !gcPin.trim()}>
+                      {gcLooking ? "…" : "Look up"}
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 13 }}>
+                    <span>Balance <strong>{moneyFmt(gcBalance)}</strong></span>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <button type="button" className="a-btn a-btn--primary a-btn--sm" onClick={applyGiftCard}>
+                        Apply {moneyFmt(Math.min(gcBalance, payableBalance))}
+                      </button>
+                      <button type="button" onClick={() => setGcCard(null)} title="Cancel"
+                        style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)" }}>
+                        <Icon name="x" size={13} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div style={{ marginTop: 14 }}>
                 <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: ".06em",
-                  textTransform: "uppercase", color: "var(--ink-500)", marginBottom: 6 }}>Method</div>
+                  textTransform: "uppercase", color: "var(--ink-500)", marginBottom: 6 }}>
+                  {remainingAfterGift > 0 ? "Method (remaining)" : "Method"}
+                </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                   {PAYMENT_METHODS.map((m) => {
                     const active = method === m.value;
@@ -647,48 +765,15 @@ export default function CashierPaymentDialog({
 
             {/* Right — keypad / quick tender */}
             <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column" }}>
-              {isGiftCard ? (
-                <div style={{ display: "grid", gap: 10 }}>
-                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: ".06em",
-                    textTransform: "uppercase", color: "var(--ink-500)" }}>Gift card</div>
-                  {!gcCard ? (
-                    <>
-                      <input value={gcCode} onChange={(e) => setGcCode(e.target.value.toUpperCase())}
-                        onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }}
-                        placeholder="Card code" autoComplete="off"
-                        style={{ fontSize: 15, padding: "12px 14px", border: "1.5px solid var(--ink-200)", borderRadius: 8, fontFamily: "var(--font-mono)", fontWeight: 800 }} />
-                      <input value={gcPin} onChange={(e) => setGcPin(e.target.value.replace(/\D/g, ""))}
-                        onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }}
-                        placeholder="PIN" inputMode="numeric" maxLength={6} type="password" autoComplete="off"
-                        style={{ fontSize: 15, padding: "12px 14px", border: "1.5px solid var(--ink-200)", borderRadius: 8 }} />
-                      <button type="button" className="a-btn a-btn--secondary" onClick={handleGcLookup}
-                        disabled={gcLooking || !gcCode.trim() || !gcPin.trim()}
-                        style={{ justifyContent: "center", minHeight: 48 }}>
-                        <Icon name="search" size={16} /> {gcLooking ? "Looking…" : "Look up card"}
-                      </button>
-                    </>
-                  ) : (
-                    <div style={{ border: "1.5px solid var(--ink-200)", borderRadius: 10, padding: 12, background: "white", display: "grid", gap: 6 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontFamily: "var(--font-mono)", fontWeight: 900 }}>
-                        <span>{gcCard.code}</span>
-                        <button type="button" onClick={() => setGcCard(null)} title="Use a different card"
-                          style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)" }}>
-                          <Icon name="x" size={14} />
-                        </button>
-                      </div>
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                        <span>Card balance</span><span style={{ fontWeight: 800 }}>{moneyFmt(gcBalance)}</span>
-                      </div>
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                        <span>Applies to order</span><span style={{ fontWeight: 900, color: "#137A35" }}>{moneyFmt(gcApply)}</span>
-                      </div>
-                      {remaining > 0 && (
-                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#B83210" }}>
-                          <span>Balance remaining</span><span style={{ fontWeight: 800 }}>{moneyFmt(remaining)}</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
+              {remainingAfterGift <= 0 && giftApplied > 0 ? (
+                // Gift card covers the entire balance — nothing left to collect.
+                <div style={{ border: "1.5px solid #8AD5A3", background: "#EAF8EF",
+                  borderRadius: 12, padding: 22, textAlign: "center", display: "grid", gap: 6 }}>
+                  <Icon name="gift" size={30} style={{ color: "#137A35", margin: "0 auto" }} />
+                  <div style={{ fontWeight: 900, fontSize: 17, color: "#137A35" }}>
+                    Gift card covers {moneyFmt(giftApplied)}
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--ink-600)" }}>Nothing left to collect.</div>
                 </div>
               ) : (
               <>
@@ -702,6 +787,18 @@ export default function CashierPaymentDialog({
                   {moneyFmt(amount || 0)}
                 </div>
               </div>
+              {isCheck && (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-500)", marginBottom: 4 }}>
+                    Check number
+                  </div>
+                  <input value={checkNumber} onChange={(e) => setCheckNumber(e.target.value.replace(/[^\w-]/g, ""))}
+                    placeholder="e.g. 10421" autoComplete="off"
+                    style={{ width: "100%", fontSize: 15, padding: "10px 12px",
+                      border: "1.5px solid var(--ink-200)", borderRadius: 8,
+                      fontFamily: "var(--font-mono)", fontWeight: 700 }} />
+                </div>
+              )}
               {isCash && (
                 <div style={{ marginTop: 8, fontSize: 12, color: "var(--ink-700)",
                   display: "flex", justifyContent: "space-between" }}>
@@ -741,7 +838,7 @@ export default function CashierPaymentDialog({
                     borderRadius: 7, fontSize: 16, fontWeight: 900, cursor: "pointer" }}>
                   <Icon name="delete" size={16} />
                 </button>
-                <button type="button" onClick={() => applyAmount(payableBalance.toFixed(2))}
+                <button type="button" onClick={() => applyAmount(remainingAfterGift.toFixed(2))}
                   style={{ minHeight: 54, border: "1px solid var(--ink-200)", background: "white",
                     borderRadius: 7, fontSize: 14, fontWeight: 900, cursor: "pointer" }}>
                   Exact
@@ -750,10 +847,16 @@ export default function CashierPaymentDialog({
               </>
               )}
               <button type="button" className="a-btn a-btn--primary" onClick={handleSubmit}
-                disabled={isBusy || (isGiftCard && !gcCard)}
+                disabled={isBusy}
                 style={{ width: "100%", justifyContent: "center", minHeight: 52, marginTop: 10, fontSize: 16 }}>
                 <Icon name="check" size={16} />
-                {isBusy ? "Completing…" : isGiftCard ? `Pay ${moneyFmt(gcApply)} by gift card` : `Complete order · ${moneyFmt(payableBalance)}`}
+                {isBusy
+                  ? "Completing…"
+                  : remainingAfterGift <= 0 && giftApplied > 0
+                    ? `Pay ${moneyFmt(giftApplied)} by gift card`
+                    : giftApplied > 0
+                      ? `Complete · ${moneyFmt(giftApplied)} gift + ${moneyFmt(remainingAfterGift)}`
+                      : `Complete order · ${moneyFmt(remainingAfterGift)}`}
               </button>
             </div>
           </div>
