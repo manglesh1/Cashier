@@ -5,8 +5,8 @@
 // localStorage at pair time. Reading from there means every screen has
 // settings synchronously without an API round-trip.
 
-import { useMemo } from "react";
-import { getTerminal } from "./terminal";
+import { useEffect, useMemo, useState } from "react";
+import { getTerminal, SETTINGS_UPDATED_EVENT } from "./terminal";
 
 const FALLBACKS = {
   // Location-wide cashier behaviour
@@ -29,11 +29,35 @@ const FALLBACKS = {
   openDrawerForCashOnly: true,
   deviceTimeoutMinutes: 10,
   receiptPrinterId: null,
+  // Walk-in slot auto-pick (POS quick checkout). A running slot is offered
+  // only if it started within joinGraceMinutes AND has at least
+  // minRemainingMinutes left before it ends; otherwise the next upcoming
+  // slot is chosen. See scheduleHelpers.pickNearestSession.
+  joinGraceMinutes: 15,
+  // 0 = the "minimum time remaining" rule is OFF (only the join window
+  // applies). Managers opt in by setting a positive value in admin.
+  minRemainingMinutes: 0,
+  // Sales tax — comes from the paired location's default TaxRate so the
+  // cart matches the booking the backend creates. taxRate is a percent
+  // (e.g. 10 = 10%). null → CartPanel uses its own fallback. taxCalculation
+  // mirrors the location: "add_to_price" (tax on top) or "include_in_price".
+  taxRate: null,
+  taxCalculation: "add_to_price",
 };
 
 export function useEffectiveSettings() {
-  const terminal = getTerminal();
+  // Re-read on mount and whenever the heartbeat refreshes settings, so admin
+  // edits propagate live without a re-pair (terminal.updateTerminalSettings
+  // dispatches SETTINGS_UPDATED_EVENT after writing to localStorage).
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    const bump = () => setVersion((n) => n + 1);
+    window.addEventListener(SETTINGS_UPDATED_EVENT, bump);
+    return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, bump);
+  }, []);
+
   return useMemo(() => {
+    const terminal = getTerminal();
     return { ...FALLBACKS, ...(terminal?.settings || {}) };
-  }, [terminal?.settings, terminal?.deviceId]);
+  }, [version]);
 }

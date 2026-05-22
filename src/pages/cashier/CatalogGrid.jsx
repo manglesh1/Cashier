@@ -5,7 +5,7 @@ import { needsScheduleSelection } from "./cartPricing";
 // Sections come from props (loaded from the device's terminal template).
 // Falls back to a single "Quick" section using whatever items the parent
 // supplied if no sections array is given.
-export function CatalogGrid({ sections = [], loading, error, onAdd }) {
+export function CatalogGrid({ sections = [], loading, error, onAdd, busyItemId = null }) {
   const [activeChip, setActiveChip] = useState("all");
   const [search, setSearch] = useState("");
   const [variantPicker, setVariantPicker] = useState(null);
@@ -102,7 +102,13 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 14 }}>
                 {sec.items.map((it) => (
-                  <ProductCard key={it.id} item={it} tone={sec.tone} onClick={() => handleProductClick(it, sec)} />
+                  <ProductCard
+                    key={it.id}
+                    item={it}
+                    tone={sec.tone}
+                    busy={busyItemId != null && String(busyItemId) === String(it.id)}
+                    onClick={() => handleProductClick(it, sec)}
+                  />
                 ))}
               </div>
             </section>
@@ -122,7 +128,7 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
   );
 }
 
-function ProductCard({ item, tone = "orange", onClick }) {
+function ProductCard({ item, tone = "orange", onClick, busy = false }) {
   const accent = {
     orange: { bg: "var(--aero-orange-50)", fg: "var(--aero-orange-600)" },
     yellow: { bg: "var(--aero-yellow-50)", fg: "var(--aero-yellow-500)" },
@@ -133,7 +139,8 @@ function ProductCard({ item, tone = "orange", onClick }) {
 
   return (
     <button
-      onClick={onClick}
+      onClick={busy ? undefined : onClick}
+      disabled={busy}
       style={{
         all: "unset", cursor: "pointer",
         background: "var(--ink-0)",
@@ -169,7 +176,11 @@ function ProductCard({ item, tone = "orange", onClick }) {
         {item.sub && <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 2 }}>{item.sub}</div>}
         {(hasChoices || requiresSchedule) && (
           <div style={{ fontSize: 11, color: "var(--aero-orange-700)", fontWeight: 800, marginTop: 4 }}>
-            {requiresSchedule ? "Pick slot" : "Choose option"}
+            {busy
+              ? "Finding nearest slot…"
+              : requiresSchedule
+                ? "Nearest slot"
+                : "Choose option"}
           </div>
         )}
       </div>

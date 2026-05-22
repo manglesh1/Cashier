@@ -55,10 +55,21 @@ const waiverStatus = (row) => {
   return { tone: "success", label: `Active until ${formatDate(row.expiredAt)}` };
 };
 
-const documentText = (detail) =>
+const documentHtml = (detail) =>
   detail?.waiverVersionSnapshot?.content ||
   detail?.waiver?.content ||
-  "No waiver document content was returned for this signature.";
+  "";
+
+// Waiver bodies are stored as HTML with [CHECKBOX]…[/CHECKBOX] markers for
+// the agreed clauses (same format the admin renders). Turn each marker into
+// a green "✓ …" agreed line; the rest is trusted template HTML (<p> etc.).
+const cleanWaiverHtml = (html = "") =>
+  String(html || "").replace(
+    /\[CHECKBOX\]([\s\S]*?)\[\/CHECKBOX\]/gi,
+    '<p class="waiver-agreed"><span class="waiver-tick">✓</span><span>$1</span></p>'
+  );
+
+const isDataImage = (value) => typeof value === "string" && value.startsWith("data:image");
 
 const publicAgreementUrl = (waiver) => {
   const raw = waiver?.publicAgreementUrl || waiver?.publicAgreementPath || "";
@@ -74,6 +85,32 @@ function InfoCard({ label, value }) {
       <div style={{ marginTop: 8, fontWeight: 800, color: "var(--ink-900)", overflow: "hidden", textOverflow: "ellipsis" }}>
         {value}
       </div>
+    </div>
+  );
+}
+
+// Compact label/value pair (admin "Field" look) for grouped detail grids.
+function Field({ label, value }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--ink-500)" }}>
+        {label}
+      </div>
+      <div style={{ marginTop: 3, fontWeight: 700, color: "var(--ink-900)", wordBreak: "break-word" }}>
+        {value || "—"}
+      </div>
+    </div>
+  );
+}
+
+function DetailCard({ title, count, children }) {
+  return (
+    <div style={{ background: "#fff", border: "1.5px solid var(--ink-200)", borderRadius: 14, padding: "18px", marginBottom: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
+        <h2 style={{ margin: 0, fontFamily: "var(--font-display)", fontSize: 18, fontWeight: 800 }}>{title}</h2>
+        {count != null && <span style={{ fontSize: 12, color: "var(--ink-500)", fontWeight: 700 }}>{count}</span>}
+      </div>
+      {children}
     </div>
   );
 }
@@ -134,23 +171,49 @@ function HolderRow({ row, active, onClick }) {
         <Icon name={row.isMinor ? "user-round" : "shield-check"} size={17} />
       </div>
       <div style={{ minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
           <span style={{ fontWeight: 800, color: "var(--ink-900)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {row.name || row.signedBy || "Guest"}
           </span>
-          {row.isMinor && <span style={{ fontSize: 10, fontWeight: 800, color: "var(--ink-500)", textTransform: "uppercase" }}>Minor</span>}
+          {row.isMinor && (
+            <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em", color: "var(--aero-orange-700)", background: "var(--aero-orange-50)", border: "1px solid var(--aero-orange-100)", borderRadius: 999, padding: "1px 6px" }}>
+              Minor
+            </span>
+          )}
         </div>
-        <div style={{ fontSize: 11, color: "var(--ink-500)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {contact}
+        {/* "Signed by" — meaningful for minors (guardian) or when it differs. */}
+        {row.signedBy && row.signedBy !== row.name && (
+          <div style={{ fontSize: 11, color: "var(--ink-500)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            Signed by {row.signedBy}
+          </div>
+        )}
+        {/* Admin-table columns, compact for a touch list row. */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginTop: 8 }}>
+          <MiniCol label="DOB" value={formatDate(row.dateOfBirth, "—")} />
+          <MiniCol label="Signed" value={formatDate(row.signedAt, "—")} />
+          <MiniCol label="Expires" value={formatDate(row.expiredAt, "—")} />
         </div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 8 }}>
-          <span style={{ fontSize: 11, color: "var(--ink-600)" }}>
+          <span style={{ fontSize: 11, color: "var(--ink-600)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {row.waiverName || "Waiver"}
           </span>
           <StatusPill tone={status.tone}>{status.tone === "danger" ? "Expired" : "Active"}</StatusPill>
         </div>
       </div>
     </button>
+  );
+}
+
+function MiniCol({ label, value }) {
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--ink-400)" }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--ink-800)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {value}
+      </div>
+    </div>
   );
 }
 
@@ -244,6 +307,19 @@ export function WaiverDetail() {
 
   return (
     <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
+      <style>{`
+        .waiver-doc { font-size: 14px; line-height: 1.6; color: var(--ink-700); }
+        .waiver-doc p { margin: 0 0 10px; }
+        .waiver-doc p:last-child { margin-bottom: 0; }
+        .waiver-doc ul, .waiver-doc ol { margin: 0 0 10px; padding-left: 20px; }
+        .waiver-doc strong, .waiver-doc b { color: var(--ink-900); }
+        .waiver-doc .waiver-agreed {
+          display: flex; gap: 8px; align-items: flex-start;
+          background: #EAF8EF; border: 1px solid #BFE7CC; border-radius: 8px;
+          padding: 8px 10px; margin: 0 0 8px; color: #137A35; font-weight: 600;
+        }
+        .waiver-doc .waiver-tick { font-weight: 900; flex-shrink: 0; }
+      `}</style>
       <section style={{
         width: "clamp(330px, 28vw, 430px)",
         flex: "0 0 clamp(330px, 28vw, 430px)",
@@ -372,13 +448,18 @@ export function WaiverDetail() {
               <InfoCard label="Expires" value={formatDate(detail?.expiredAt || selectedRow.expiredAt, "No expiry")} />
             </div>
 
-            <div style={{ background: "#fff", border: "1.5px solid var(--ink-200)", borderRadius: 14, padding: "18px", marginBottom: 20 }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
-                <h2 style={{ margin: 0, fontFamily: "var(--font-display)", fontSize: 18, fontWeight: 800 }}>Covered guests</h2>
-                <span style={{ fontSize: 12, color: "var(--ink-500)", fontWeight: 700 }}>
-                  {coveredGuests.length} covered
-                </span>
+            <DetailCard title="Holder details">
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14 }}>
+                <Field label="Name" value={detail?.guest?.name || selectedRow.name || detail?.signedByName} />
+                <Field label="Email" value={detail?.guest?.email} />
+                <Field label="Phone" value={detail?.guest?.phone} />
+                <Field label="Date of birth" value={formatDate(detail?.guestDateOfBirth, "—")} />
+                <Field label="Address" value={[detail?.guest?.address, detail?.guest?.postcode].filter(Boolean).join(", ")} />
+                {detail?.waiver?.locationName && <Field label="Location" value={detail.waiver.locationName} />}
               </div>
+            </DetailCard>
+
+            <DetailCard title="Covered guests" count={`${coveredGuests.length} covered`}>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 8 }}>
                 {coveredGuests.map((person) => (
                   <div key={person.key} style={{ border: "1.5px solid var(--ink-100)", background: "var(--ink-25)", borderRadius: 12, padding: "10px 12px" }}>
@@ -389,7 +470,17 @@ export function WaiverDetail() {
                   </div>
                 ))}
               </div>
-            </div>
+            </DetailCard>
+
+            {Array.isArray(detail?.formResponses) && detail.formResponses.length > 0 && (
+              <DetailCard title="Additional responses">
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
+                  {detail.formResponses.map((r) => (
+                    <Field key={r.waiverFormResponseId} label={r.label} value={r.value} />
+                  ))}
+                </div>
+              </DetailCard>
+            )}
 
             <div style={{ background: "#fff", border: "1.5px solid var(--ink-200)", borderRadius: 14, padding: "18px", marginBottom: 20 }}>
               <h2 style={{ margin: "0 0 14px", fontFamily: "var(--font-display)", fontSize: 18, fontWeight: 800 }}>Document</h2>
@@ -398,28 +489,51 @@ export function WaiverDetail() {
                 border: "1.5px solid var(--ink-100)",
                 borderRadius: 14,
                 padding: "18px 20px",
-                fontSize: 14,
-                lineHeight: 1.6,
-                color: "var(--ink-700)",
-                maxHeight: 280,
-                overflow: "auto",
-                whiteSpace: "pre-wrap",
               }}>
                 <div style={{ fontWeight: 800, fontSize: 16, color: "var(--ink-800)", fontFamily: "var(--font-display)", marginBottom: 10 }}>
                   {detail?.waiver?.name || selectedRow.waiverName || "Waiver"}
                 </div>
-                {documentText(detail)}
+                {documentHtml(detail) ? (
+                  <div
+                    className="waiver-doc"
+                    dangerouslySetInnerHTML={{ __html: cleanWaiverHtml(documentHtml(detail)) }}
+                  />
+                ) : (
+                  <div style={{ fontSize: 14, color: "var(--ink-500)" }}>
+                    No waiver document content was returned for this signature.
+                  </div>
+                )}
               </div>
             </div>
 
             {detail?.signatureImage && (
               <div style={{ background: "#fff", border: "1.5px solid var(--ink-200)", borderRadius: 14, padding: "18px" }}>
                 <h2 style={{ margin: "0 0 14px", fontFamily: "var(--font-display)", fontSize: 18, fontWeight: 800 }}>Signature</h2>
-                <img
-                  src={detail.signatureImage}
-                  alt="Guest signature"
-                  style={{ maxWidth: 420, width: "100%", border: "1.5px solid var(--ink-100)", borderRadius: 12, background: "#fff" }}
-                />
+                {isDataImage(detail.signatureImage) ? (
+                  <img
+                    src={detail.signatureImage}
+                    alt="Guest signature"
+                    style={{ maxWidth: 420, width: "100%", maxHeight: 120, objectFit: "contain", border: "1.5px solid var(--ink-100)", borderRadius: 12, background: "#fff" }}
+                  />
+                ) : (
+                  // Typed signature — render the name in a script-like style,
+                  // not as a (broken) image.
+                  <div style={{
+                    fontFamily: "Georgia, 'Times New Roman', serif",
+                    fontStyle: "italic",
+                    fontSize: 30,
+                    color: "var(--ink-900)",
+                    borderBottom: "2px solid var(--ink-300)",
+                    paddingBottom: 6,
+                    maxWidth: 420,
+                  }}>
+                    {detail.signatureImage}
+                  </div>
+                )}
+                <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 8 }}>
+                  Signed by {detail?.signedByName || selectedRow.signedBy || "guest"}
+                  {detail?.signedAt ? ` · ${formatDate(detail.signedAt)}` : ""}
+                </div>
               </div>
             )}
           </>

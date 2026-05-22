@@ -11,6 +11,8 @@ import {
   useLazyLookupGiftCardQuery,
   useRedeemGiftCardMutation,
 } from "../../features/vouchers/voucherApi";
+import { useRedeemTicketMutation } from "../../features/tickets/ticketApi";
+import { getTerminal } from "../../lib/terminal";
 
 function formatExpiry(ts) {
   if (!ts) return "No expiry";
@@ -34,6 +36,7 @@ function formatTime(ts) {
 function titleForRecord(record) {
   if (!record) return "Ready for scan";
   if (record.kind === "entitlement") return "Stock-item credit";
+  if (record.kind === "ticket") return "Stock-item credit";
   if (record.kind === "membership") return "Membership pass";
   if (record.kind === "voucher") return "Slot-bound voucher";
   if (record.kind === "gift_card") return "Gift card";
@@ -95,6 +98,7 @@ export function VoucherCounter() {
 
   const [lookup, { isFetching }] = useLazyLookupVoucherByTokenQuery();
   const [redeem, { isLoading: redeeming }] = useRedeemEntitlementMutation();
+  const [redeemTicket, { isLoading: redeemingTicket }] = useRedeemTicketMutation();
   const [redeemMembership, { isLoading: redeemingMembership }] =
     useRedeemMembershipMutation();
   const [gcLookup, { isFetching: gcLooking }] = useLazyLookupGiftCardQuery();
@@ -141,7 +145,9 @@ export function VoucherCounter() {
           ? `Member #${data.membershipId}`
           : data.kind === "entitlement"
             ? `Entitlement #${data.entitlementId}`
-            : `Voucher #${data.bookingItemId}`,
+            : data.kind === "ticket"
+              ? `Ticket ${data.ticketCode}`
+              : `Voucher #${data.bookingItemId}`,
         meta: data.status || "active",
       });
     } catch (err) {
@@ -189,6 +195,47 @@ export function VoucherCounter() {
         action: "Failed",
         title: "Stock-item credit",
         detail: `Entitlement #${active.entitlementId}`,
+        meta: msg,
+      });
+      toast.error(msg);
+    } finally {
+      focusInput();
+    }
+  };
+
+  const handleRedeemTicket = async () => {
+    if (active?.kind !== "ticket") return;
+    const terminal = getTerminal();
+    try {
+      await redeemTicket({
+        ticketCode: active.ticketCode,
+        terminalDeviceId: terminal?.deviceId || null,
+        gateOrZone: terminal?.deviceName || "Voucher counter",
+        allowEarlyCheckIn: true,
+      }).unwrap();
+      const remainingQty = Math.max(0, (active.remainingQty ?? 1) - 1);
+      toast.success(remainingQty > 0 ? `Redeemed 1 - ${remainingQty} left` : "Redeemed");
+      pushRecent({
+        ok: true,
+        tone: remainingQty > 0 ? "success" : "neutral",
+        action: "Redeemed",
+        title: "Stock-item credit",
+        detail: `Ticket ${active.ticketCode}`,
+        meta: `${remainingQty} left`,
+      });
+      setActive(
+        remainingQty > 0
+          ? { ...active, remainingQty, redemptionCount: (active.redemptionCount || 0) + 1 }
+          : null
+      );
+    } catch (err) {
+      const msg = err?.data?.error || err?.data?.message || "Redemption failed.";
+      pushRecent({
+        ok: false,
+        tone: "danger",
+        action: "Failed",
+        title: "Stock-item credit",
+        detail: `Ticket ${active.ticketCode}`,
         meta: msg,
       });
       toast.error(msg);
@@ -321,7 +368,7 @@ export function VoucherCounter() {
     }
   };
 
-  const busy = isFetching || redeeming || redeemingMembership || gcLooking || gcRedeeming;
+  const busy = isFetching || redeeming || redeemingTicket || redeemingMembership || gcLooking || gcRedeeming;
 
   return (
     <div
@@ -446,11 +493,13 @@ export function VoucherCounter() {
             <CurrentResult
               active={active}
               redeeming={redeeming}
+              redeemingTicket={redeemingTicket}
               redeemingMembership={redeemingMembership}
               gcRedeeming={gcRedeeming}
               gcAmount={gcAmount}
               setGcAmount={setGcAmount}
               onRedeem={handleRedeem}
+              onRedeemTicket={handleRedeemTicket}
               onRedeemMembership={handleRedeemMembership}
               onRedeemGiftCard={handleGcRedeem}
               onClear={() => {
@@ -712,11 +761,13 @@ function GiftCardLookup({
 function CurrentResult({
   active,
   redeeming,
+  redeemingTicket,
   redeemingMembership,
   gcRedeeming,
   gcAmount,
   setGcAmount,
   onRedeem,
+  onRedeemTicket,
   onRedeemMembership,
   onRedeemGiftCard,
   onClear,
@@ -796,6 +847,30 @@ function CurrentResult({
               >
                 <Icon name="check-circle-2" size={18} />
                 {redeeming ? "Redeeming" : "Redeem 1"}
+              </button>
+              <button type="button" className="a-btn a-btn--ghost" onClick={onClear}>
+                Clear
+              </button>
+            </ActionBar>
+          </>
+        )}
+
+        {active.kind === "ticket" && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+              <Stat label="Ticket" value={active.ticketCode} mono />
+              <Stat label="Remaining" value={`${active.remainingQty} of ${active.originalQty}`} />
+              <Stat label="Expiry" value={formatExpiry(active.expiresAt)} />
+            </div>
+            <ActionBar>
+              <button
+                type="button"
+                className="a-btn a-btn--primary"
+                onClick={onRedeemTicket}
+                disabled={redeemingTicket || active.remainingQty < 1 || ["redeemed", "voided", "refunded", "expired"].includes(String(active.status || "").toLowerCase())}
+              >
+                <Icon name="check-circle-2" size={18} />
+                {redeemingTicket ? "Redeeming" : "Redeem 1"}
               </button>
               <button type="button" className="a-btn a-btn--ghost" onClick={onClear}>
                 Clear

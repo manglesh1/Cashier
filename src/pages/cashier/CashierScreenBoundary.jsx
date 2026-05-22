@@ -15,6 +15,10 @@ export class CashierScreenBoundary extends React.Component {
     console.error("Cashier screen failed", error, info);
   }
 
+  reset = () => {
+    this.setState({ error: null });
+  };
+
   componentDidUpdate(prevProps) {
     if (prevProps.screenKey !== this.props.screenKey && this.state.error) {
       this.setState({ error: null });
@@ -23,6 +27,11 @@ export class CashierScreenBoundary extends React.Component {
 
   render() {
     if (!this.state.error) return this.props.children;
+
+    const canShowDetails =
+      typeof window !== "undefined" &&
+      (window.location.hostname === "localhost" || import.meta.env.DEV);
+    const errorText = this.state.error?.message || String(this.state.error || "");
 
     return (
       <div
@@ -80,6 +89,34 @@ export class CashierScreenBoundary extends React.Component {
           <div style={{ marginTop: 12, color: "var(--ink-600)", fontSize: 14 }}>
             Use another menu item to continue working. The error has been logged in the console.
           </div>
+          {canShowDetails && errorText && (
+            <pre
+              style={{
+                margin: "14px 0 0",
+                maxHeight: 120,
+                overflow: "auto",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                background: "var(--ink-25)",
+                border: "1px solid var(--ink-200)",
+                borderRadius: 10,
+                padding: 10,
+                fontSize: 12,
+                lineHeight: 1.35,
+                color: "var(--ink-700)",
+              }}
+            >
+              {errorText}
+            </pre>
+          )}
+          <button
+            type="button"
+            onClick={this.reset}
+            className="a-btn a-btn--secondary a-btn--sm"
+            style={{ marginTop: 14, justifyContent: "center" }}
+          >
+            <Icon name="refresh-cw" size={14} /> Retry screen
+          </button>
         </div>
       </div>
     );

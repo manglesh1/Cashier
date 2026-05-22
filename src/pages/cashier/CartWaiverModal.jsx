@@ -22,6 +22,7 @@ export function CartWaiverModal({
   mode = "customer",
   needed,
   attached = [],
+  customer = null,
   onChange,
   onCustomerChange,
   onClose,
@@ -31,11 +32,20 @@ export function CartWaiverModal({
   const [triggerWaiverSearch, { data: waiverData, isFetching: isFetchingWaivers }] = useLazySearchWaiversQuery();
   const [triggerGuestSearch, { data: guestData, isFetching: isFetchingGuests }] = useLazySearchGuestsQuery();
   const [showLink, setShowLink] = useState(false);
+  const [quickName, setQuickName] = useState("");
+  const [quickEmail, setQuickEmail] = useState("");
+  const [quickPhone, setQuickPhone] = useState("");
 
   useEffect(() => {
     if (!open) return;
     setQuery("");
     setShowLink(false);
+    // In customer mode, pre-fill the quick-create form from the current
+    // customer so the cashier can EDIT it (not just add a new one).
+    setQuickName(customerMode ? (customer?.name || "") : "");
+    setQuickEmail(customerMode ? (customer?.contactEmail || customer?.email || "") : "");
+    setQuickPhone(customerMode ? (customer?.contactPhone || customer?.phone || "") : "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const handleClose = () => {
@@ -235,6 +245,41 @@ export function CartWaiverModal({
     handleClose();
   };
 
+  const handleQuickCreateCustomer = () => {
+    const name = quickName.trim();
+    const email = quickEmail.trim();
+    const phone = quickPhone.trim();
+    if (!name) {
+      toast.error("Customer name is required.");
+      return;
+    }
+    if (!email && !phone) {
+      toast.error("Add email or phone for the booking owner.");
+      return;
+    }
+    onCustomerChange?.({
+      // Preserve the guestId when editing an existing (searched) customer.
+      guestId: customer?.guestId ?? null,
+      name,
+      contact: email || phone,
+      contactEmail: email,
+      contactPhone: phone,
+      isQuickCreate: !customer?.guestId,
+    });
+    toast.success(`Customer ${customer ? "updated" : "added"}: ${name}`);
+    handleClose();
+  };
+
+  // Single confirm action for customer mode: save the typed customer (if
+  // any) then close. Empty form → just close (customer stays optional).
+  const handleCustomerDone = () => {
+    if (quickName.trim()) {
+      handleQuickCreateCustomer();
+      return;
+    }
+    handleClose();
+  };
+
   const waiverPageUrl = (() => {
     const base = import.meta.env.VITE_BOOKING_PORTAL_URL || "/waivers";
     return `${base}/waivers`;
@@ -428,6 +473,44 @@ export function CartWaiverModal({
           )}
         </div>
 
+        {customerMode && (
+          <div style={{
+            padding: "12px",
+            background: "var(--ink-25)",
+            border: "1.5px solid var(--ink-200)",
+            borderRadius: 12,
+            display: "grid",
+            gap: 8,
+            marginBottom: 12,
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 900, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--ink-500)" }}>
+              Quick create customer
+            </div>
+            <input
+              value={quickName}
+              onChange={(e) => setQuickName(e.target.value)}
+              placeholder="Booking owner name"
+              style={{ fontSize: 13, padding: "8px 10px", border: "1.5px solid var(--ink-200)", borderRadius: 8 }}
+            />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              <input
+                value={quickEmail}
+                onChange={(e) => setQuickEmail(e.target.value)}
+                placeholder="Email"
+                inputMode="email"
+                style={{ fontSize: 13, padding: "8px 10px", border: "1.5px solid var(--ink-200)", borderRadius: 8 }}
+              />
+              <input
+                value={quickPhone}
+                onChange={(e) => setQuickPhone(e.target.value)}
+                placeholder="Phone"
+                inputMode="tel"
+                style={{ fontSize: 13, padding: "8px 10px", border: "1.5px solid var(--ink-200)", borderRadius: 8 }}
+              />
+            </div>
+          </div>
+        )}
+
         {!customerMode && <div style={{
           padding: "10px 12px",
           background: "var(--ink-25)",
@@ -474,7 +557,7 @@ export function CartWaiverModal({
         </div>}
 
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
-          <button type="button" onClick={handleClose} className="a-btn a-btn--primary" disabled={!customerMode && totalCovered < needed}>
+          <button type="button" onClick={customerMode ? handleCustomerDone : handleClose} className="a-btn a-btn--primary" disabled={!customerMode && totalCovered < needed}>
             {customerMode ? "Done" : totalCovered >= needed ? "Done" : `${needed - totalCovered} more needed`}
           </button>
         </div>

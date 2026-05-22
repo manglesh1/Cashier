@@ -5,10 +5,11 @@
 // pending tickets, mints redemption events, and respects waiver/expiry
 // rules — the exact same path the Redeem screen takes).
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
+import { CashierScreenBoundary } from "./CashierScreenBoundary";
 import {
   useGetAllBookingQuery,
   useGetCheckInStatusQuery,
@@ -22,6 +23,8 @@ import {
   useSendBookingConfirmationMutation,
   useAdjustBookingOrderMutation,
   useGetOrderAdjustmentCatalogQuery,
+  useReslotBookingMutation,
+  useGetAvailabilityQuery,
 } from "../../features/bookings/bookingApi";
 import {
   useGetBookingTicketsQuery,
@@ -30,17 +33,39 @@ import {
   useBindTicketHolderMutation,
 } from "../../features/tickets/ticketApi";
 import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discountApi";
+import {
+  useLazyLookupGiftCardQuery,
+  useRedeemGiftCardMutation,
+} from "../../features/vouchers/voucherApi";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import { useDebounceSearch } from "../../hooks/useDebounceSearch";
 import { getTerminal } from "../../lib/terminal";
+import { printReceipt, openCashDrawer } from "../../lib/hardware";
+import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
+import { moneyFmt, roundMoney } from "../../lib/money";
+import {
+  isSessionBookable,
+  isVariationUnavailable,
+  getVariationSlotIds,
+  getStartTime,
+  timeRangeFromSession,
+  formatShortDate,
+} from "./scheduleHelpers";
 import { adminBookingDetailUrl } from "../../lib/adminLink";
 import {
   buildAutoBindPlan,
+  buildCheckInAllPlan,
   buildGuestTotals,
   buildSelectedProgress,
+  getBookingBalanceDue,
   getTicketBlocker,
+  isRedeemedTicket,
   isTicketReadyForCheckIn,
+  isPaidBooking,
+  normalizeBookingTicketsPayload,
+  normalizeCheckInParticipantsPayload,
   normalizeGuestName,
+  normalizeTicketSummaryPayload,
   redeemReasonMessage,
   summarizeRedeemFailures,
 } from "./checkInGuards";
@@ -52,8 +77,26 @@ const localIsoDate = (date = new Date()) => {
   return `${year}-${month}-${day}`;
 };
 const today = localIsoDate();
-const moneyFmt = (value) => `$${(Number(value) || 0).toFixed(2)}`;
-const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
+const asArray = (value) => (Array.isArray(value) ? value : []);
+const displayText = (value, fallback = "") => {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (["string", "number", "boolean"].includes(typeof value)) return String(value);
+  if (typeof value === "object") {
+    return displayText(
+      value.displayName ?? value.name ?? value.activityName ?? value.variationName ?? value.label,
+      fallback
+    );
+  }
+  return fallback;
+};
+const firstText = (...values) => {
+  const fallback = values[values.length - 1] ?? "";
+  for (const value of values) {
+    const text = displayText(value, "");
+    if (text) return text;
+  }
+  return displayText(fallback, "");
+};
 
 function buildBookingPromoCartLines(booking) {
   const bookingItems = Array.isArray(booking?.bookingItems) ? booking.bookingItems : [];
@@ -83,28 +126,6 @@ function buildBookingPromoCartLines(booking) {
 const fmtTime = (range) => (range || "").split(/[–-]/)[0].trim() || "—";
 
 
-const completedWithinHours = (booking, hours = 2) => {
-  const value = booking.lastCheckedInAt || booking.completedAt || booking.checkedInAt;
-  if (!value) return false;
-  const completedAt = new Date(value);
-  if (Number.isNaN(completedAt.getTime())) return false;
-  return Date.now() - completedAt.getTime() <= hours * 60 * 60 * 1000;
-};
-
-function triggerCashDrawer({ bookingId, terminal }) {
-  const payload = {
-    bookingId,
-    terminalDeviceId: terminal?.deviceId || null,
-    terminalName: terminal?.deviceName || terminal?.name || null,
-    openedAt: new Date().toISOString(),
-  };
-  window.dispatchEvent(new CustomEvent("cashier:open-cash-drawer", { detail: payload }));
-  try {
-    localStorage.setItem("cashier:lastDrawerOpen", JSON.stringify(payload));
-  } catch {
-    // best effort only
-  }
-}
 
 export function CheckIn() {
   const { searchTerm, inputValue, setDebouncedSearch } = useDebounceSearch(400);
@@ -122,7 +143,7 @@ export function CheckIn() {
     activityId: [],
   });
 
-  const bookings = data?.data || [];
+  const bookings = asArray(data?.data);
   const stats = data?.stats || {};
 
   useEffect(() => {
@@ -138,7 +159,7 @@ export function CheckIn() {
         ...b,
         _arrival: parseTime(b.timeRange),
         _waiverComplete: !b.waiverRequired || (b.signedWaivers ?? 0) >= (b.totalGuests ?? 0),
-        _isPaid: String(b.paymentStatus || "").toLowerCase() === "paid",
+        _isPaid: isPaidBooking(b),
         _totalGuests: Number(b.totalGuests || 0),
         _checkedInGuests: Number(b.checkedInGuests || 0),
       }))
@@ -159,7 +180,10 @@ export function CheckIn() {
       completed: [],
     };
     partition.forEach((b) => {
-      if (b._isCompleted && completedWithinHours(b, 2)) buckets.completed.push(b);
+      // Route by check-in status. A fully checked-in booking belongs in
+      // Completed (it was previously mis-routed to Upcoming whenever the
+      // list payload lacked a completion timestamp).
+      if (b._isCompleted) buckets.completed.push(b);
       else if (b._isInProgress) buckets.inProgress.push(b);
       else buckets.upcoming.push(b);
     });
@@ -173,7 +197,7 @@ export function CheckIn() {
 
   const refreshSelectedBooking = async () => {
     const result = await refetch();
-    const nextRows = result?.data?.data || [];
+    const nextRows = asArray(result?.data?.data);
     if (!selected?.bookingId) return;
     const updated = nextRows.find((b) => String(b.bookingId) === String(selected.bookingId));
     if (updated) setSelected(updated);
@@ -284,7 +308,7 @@ export function CheckIn() {
           ) : visibleBookings.length === 0 ? (
             <div style={{ padding: 32, textAlign: "center", color: "var(--ink-500)" }}>
               {bookingBucket === "completed"
-                ? "No bookings completed in the last 2 hours."
+                ? "No fully checked-in bookings yet."
                 : `No ${bookingBucket === "inProgress" ? "in progress" : bookingBucket} bookings.`}
             </div>
           ) : (
@@ -311,7 +335,9 @@ export function CheckIn() {
           }}
         >
           {selected ? (
-            <SelectedBookingDetail booking={selected} onCheckedIn={refreshSelectedBooking} />
+            <CashierScreenBoundary screenKey={`checkin-detail:${selected.bookingId}`}>
+              <SelectedBookingDetail booking={selected} onCheckedIn={refreshSelectedBooking} />
+            </CashierScreenBoundary>
           ) : (
             <EmptyDetail />
           )}
@@ -401,10 +427,24 @@ function BookingBucketTab({ label, count, active, onClick }) {
 }
 
 function BookingRow({ b, isSelected, onClick }) {
-  const tone = b._waiverComplete ? "success" : "danger";
-  const waiverLabel = b._waiverComplete
-    ? "Ready"
-    : `${b.totalGuests - (b.signedWaivers || 0)} waiver${b.totalGuests - (b.signedWaivers || 0) === 1 ? "" : "s"} missing`;
+  // Primary pill reflects check-in state first (Checked in / partly in),
+  // falling back to waiver readiness only when nobody's checked in yet.
+  let statusTone;
+  let statusLabel;
+  if (b._isCompleted) {
+    statusTone = "success";
+    statusLabel = "Checked in";
+  } else if (b._isInProgress) {
+    statusTone = "info";
+    statusLabel = `${b._checkedInGuests}/${b._totalGuests} in`;
+  } else if (b._waiverComplete) {
+    statusTone = "success";
+    statusLabel = "Ready";
+  } else {
+    const missing = (b.totalGuests || 0) - (b.signedWaivers || 0);
+    statusTone = "danger";
+    statusLabel = `${missing} waiver${missing === 1 ? "" : "s"} missing`;
+  }
 
   return (
     <div
@@ -446,7 +486,7 @@ function BookingRow({ b, isSelected, onClick }) {
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
         }}>
-          {b.bookingName || "Walk-in"}
+          {displayText(b.bookingName, "Walk-in")}
         </div>
       </div>
       <div style={{
@@ -460,7 +500,7 @@ function BookingRow({ b, isSelected, onClick }) {
         minWidth: 0,
       }}>
         <span style={{ fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {b.bookingNumber}
+          {displayText(b.bookingNumber, "Booking")}
         </span>
         <span style={{ flexShrink: 0 }}>{b.totalGuests || 0} pax</span>
       </div>
@@ -473,7 +513,7 @@ function BookingRow({ b, isSelected, onClick }) {
         minWidth: 0,
         overflow: "hidden",
       }}>
-        <StatusPill tone={tone}>{waiverLabel}</StatusPill>
+        <StatusPill tone={statusTone}>{statusLabel}</StatusPill>
         {!b._isPaid && <StatusPill tone="danger">Unpaid</StatusPill>}
       </div>
       <Icon name="chevron-right" size={18} style={{ color: "var(--ink-400)", gridColumn: "3", gridRow: "1 / span 3", justifySelf: "end" }} />
@@ -492,6 +532,11 @@ function EmptyDetail() {
 }
 
 function SelectedBookingDetail({ booking, onCheckedIn }) {
+  const bookingNumber = displayText(booking.bookingNumber, "Booking");
+  const bookingName = displayText(booking.bookingName, "Walk-in");
+  const bookingActivityName = displayText(booking.activityName, "Activity");
+  const bookingTimeRange = displayText(booking.timeRange, "—");
+
   // Tickets are the source of truth — one row per redeemable line.
   const { data: ticketsData, isLoading: ticketsLoading, refetch: refetchTickets } =
     useGetBookingTicketsQuery(booking.bookingId, { skip: !booking.bookingId });
@@ -514,13 +559,14 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const [recordPayment, { isLoading: recordingPayment }] = useRecordPaymentMutation();
   const [sendBookingConfirmation, { isLoading: sendingReceipt }] = useSendBookingConfirmationMutation();
   const [adjustBookingOrder, { isLoading: adjustingOrder }] = useAdjustBookingOrderMutation();
+  const [redeemGiftCard, { isLoading: gcRedeeming }] = useRedeemGiftCardMutation();
 
-  const tickets = ticketsData?.data || [];
-  const summary = ticketsData?.summary || {};
+  const tickets = useMemo(() => normalizeBookingTicketsPayload(ticketsData), [ticketsData]);
+  const summary = useMemo(() => normalizeTicketSummaryPayload(ticketsData, tickets), [ticketsData, tickets]);
   const redeemedCount = (summary.redeemed ?? 0);
   const totalCount = summary.total ?? tickets.length;
   const remaining = Math.max(0, totalCount - redeemedCount);
-  const balanceDue = Math.max(0, Number(booking.balance || 0));
+  const balanceDue = getBookingBalanceDue(booking);
   const isFullyCheckedIn = totalCount > 0 && redeemedCount >= totalCount;
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
   const [removeParticipant] = useRemoveParticipantMutation();
@@ -565,7 +611,10 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 
   // Booking-wide pool of waiver-eligible holders. The candidate set per
   // ticket is this pool minus participants already bound to other tickets.
-  const allParticipants = checkInData?.data?.participants || [];
+  const allParticipants = useMemo(
+    () => normalizeCheckInParticipantsPayload(checkInData),
+    [checkInData]
+  );
   const participantsById = useMemo(() => {
     const map = new Map();
     allParticipants.forEach((participant) => {
@@ -642,11 +691,11 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 
   const handleWaiverLinked = async (linkResult) => {
     const [ticketResult, statusResult] = await Promise.all([refetchTickets(), refetchStatus()]);
-    const nextTickets = ticketResult?.data?.data || tickets;
-    const nextParticipants = statusResult?.data?.data?.participants || allParticipants;
+    const nextTickets = normalizeBookingTicketsPayload(ticketResult?.data);
+    const nextParticipants = normalizeCheckInParticipantsPayload(statusResult?.data);
     const autoResult = await autoBindReadyHolders({
-      participantRows: nextParticipants,
-      ticketRows: nextTickets,
+      participantRows: nextParticipants.length ? nextParticipants : allParticipants,
+      ticketRows: nextTickets.length ? nextTickets : tickets,
       preferredTicketCode: waiverTargetCode,
       preferredParticipantIds: linkResult?.data?.linkedParticipantIds || [],
     });
@@ -702,18 +751,68 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     return map;
   }, [tickets, balanceDue, participantsById]);
 
-  const isTicketActionable = (ticket) => isTicketReadyForCheckIn(ticket, ticketBlockers);
-
-  const safeSelectableCodes = useMemo(
-    () => visibleTickets
-      .filter(isTicketActionable)
-      .map((t) => t.ticketCode),
-    [visibleTickets, ticketBlockers]
-  );
-  const bulkActionableCount = useMemo(
-    () => tickets.filter(isTicketActionable).length,
+  // Late arrival: if a session ticket has expired, the cashier can move the
+  // booking into an available slot today (capacity-correct re-slot) so the
+  // guest can still be checked in. Only payment_required does NOT count as
+  // expired — that's a separate (pay-first) gate.
+  const [reslotOpen, setReslotOpen] = useState(false);
+  const [reslotBooking, { isLoading: reslotting }] = useReslotBookingMutation();
+  const expiredTicket = useMemo(
+    () => tickets.find((t) => ticketBlockers.get(t.ticketCode) === "expired") || null,
     [tickets, ticketBlockers]
   );
+  // An in-progress session (started, not yet ended) that can still be checked
+  // in. The cashier may ALSO move the party to another open slot today if they
+  // want — but check-in here stays available (it's not blocked).
+  const ongoingTicket = useMemo(() => {
+    const now = new Date();
+    return (
+      tickets.find((t) => {
+        if (ticketBlockers.get(t.ticketCode)) return false; // blocked → handled elsewhere
+        if (isRedeemedTicket(t)) return false; // already checked in
+        const start = t.validFrom ? new Date(t.validFrom) : null;
+        const end = t.validUntil ? new Date(t.validUntil) : null;
+        return start && end && start <= now && now < end;
+      }) || null
+    );
+  }, [tickets, ticketBlockers]);
+  const reslotSource = expiredTicket || ongoingTicket;
+  const reslotIsExpired = Boolean(expiredTicket);
+  const reslotActivity = reslotSource
+    ? {
+        activityId: Number(reslotSource.activityId || reslotSource.activity?.activityId) || null,
+        variationId: Number(reslotSource.variationId || reslotSource.variation?.variationId) || null,
+        name: reslotSource.activity?.activityName || reslotSource.productName || "this session",
+      }
+    : null;
+
+  const handleReslot = async (slotId) => {
+    try {
+      const res = await reslotBooking({ bookingId: booking.bookingId, slotId }).unwrap();
+      setReslotOpen(false);
+      await refresh();
+      const d = res?.data;
+      toast.success(d?.fromTime ? `Moved to ${d.fromTime} – ${d.toTime}` : "Moved to the selected slot");
+    } catch (err) {
+      toast.error(err?.data?.error || err?.data?.message || "Could not move booking");
+    }
+  };
+
+  const allBulkPlan = useMemo(
+    () => buildCheckInAllPlan({ tickets, ticketBlockers }),
+    [tickets, ticketBlockers]
+  );
+  // "Select all" must match the per-row checkboxes: every visible ticket that
+  // can be checked in individually (issued + not blocked). buildCheckInAllPlan's
+  // readyCodes is intentionally stricter — it skips transferable tickets that
+  // have no participant for the AUTO "check in all" flow — which left party
+  // tickets (no waiver, no participant) unselectable via Select all even though
+  // each row's own checkbox worked. Use the looser per-row gate here.
+  const safeSelectableCodes = useMemo(
+    () => visibleTickets.filter((t) => isTicketReadyForCheckIn(t, ticketBlockers)).map((t) => t.ticketCode),
+    [visibleTickets, ticketBlockers]
+  );
+  const bulkActionableCount = allBulkPlan.readyCount;
   const selectedProgress = useMemo(
     () => buildSelectedProgress({ tickets, ticketBlockers, redeemedCount, totalCount }),
     [tickets, ticketBlockers, redeemedCount, totalCount]
@@ -763,6 +862,8 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       ticketCode: code,
       terminalDeviceId: terminal?.deviceId || null,
       gateOrZone: terminal?.deviceName || "Cashier check-in",
+      // Cashier check-in allows same-day early arrivals (backend gates to today).
+      allowEarlyCheckIn: true,
     }).unwrap();
     toast.promise(promise, {
       loading: "Redeeming…",
@@ -796,6 +897,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           ticketCode: code,
           terminalDeviceId: terminal?.deviceId || null,
           gateOrZone: terminal?.deviceName || "Cashier check-in",
+          allowEarlyCheckIn: true,
         }).unwrap();
         ok++;
       } catch (err) {
@@ -819,10 +921,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 
   const handleRedeemAll = async () => {
     if (bulkActionableCount === 0) {
-      const blockers = tickets
-        .map((ticket) => ({ ticketCode: ticket.ticketCode, reason: ticketBlockers.get(ticket.ticketCode) }))
-        .filter((item) => item.reason && item.reason !== "already_redeemed");
-      const summary = summarizeRedeemFailures(blockers);
+      const summary = summarizeRedeemFailures(allBulkPlan.blocked);
       toast.error(summary ? `No tickets ready: ${summary}` : "No tickets ready to check in");
       return;
     }
@@ -840,11 +939,12 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         bookingId: booking.bookingId,
         terminalDeviceId: terminal?.deviceId || null,
         gateOrZone: terminal?.deviceName || "Cashier check-in",
+        allowEarlyCheckIn: true,
       }).unwrap();
       refresh();
       const succ = res?.succeeded ?? 0;
       const att = res?.attempted ?? 0;
-      const failures = (res?.results || []).filter((r) => !r.ok);
+      const failures = asArray(res?.results).filter((r) => !r.ok);
       const blocked = failures.filter((r) => r.reason === "requires_waiver").length;
       const failureSummary = summarizeRedeemFailures(failures);
       const tail = blocked > 0 ? ` - ${blocked} blocked by waiver` : failures.length > 0 ? ` - ${failureSummary}` : "";
@@ -857,16 +957,27 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     }
   };
 
+  // Idempotency key for the current payment attempt + a synchronous lock so a
+  // fast double-tap or wifi retry can't double-charge (mirrors the Sell dialog).
+  const paymentSessionRef = useRef(null);
+  const paymentLockRef = useRef(false);
+
   const openPayment = () => {
     setPaymentAmount(balanceDue.toFixed(2));
     setPaymentMethod("card");
     setPaymentNote("");
     setPaymentDiscount(null);
     setPaymentComplete(null);
+    paymentSessionRef.current =
+      (typeof crypto !== "undefined" && crypto.randomUUID)
+        ? `pay_${crypto.randomUUID()}`
+        : `pay_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    paymentLockRef.current = false;
     setPaymentOpen(true);
   };
 
   const handleRecordPayment = async () => {
+    if (paymentLockRef.current) return;
     const discountAmount = roundMoney(Math.min(Number(paymentDiscount?.amount || 0), balanceDue));
     const payableBalance = roundMoney(Math.max(0, balanceDue - discountAmount));
     const tenderedAmount = Number(paymentAmount);
@@ -883,14 +994,17 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       return;
     }
 
+    paymentLockRef.current = true;
     const recordAmount = paymentMethod === "cash" ? payableBalance : tenderedAmount;
     const changeDue = paymentMethod === "cash"
       ? Math.max(0, Number((tenderedAmount - payableBalance).toFixed(2)))
       : 0;
     const terminal = getTerminal();
+    const sessionKey = paymentSessionRef.current;
     const cashRemark = paymentMethod === "cash"
       ? `Cash tendered ${moneyFmt(tenderedAmount)}; change due ${moneyFmt(changeDue)}.`
       : "";
+    let discountCommitted = false;
 
     try {
       let discountRes = null;
@@ -900,12 +1014,14 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           amountPaid: discountAmount,
           paymentMethod: "complimentary",
           terminalDeviceId: terminal?.deviceId || null,
+          idempotencyKey: sessionKey ? `${sessionKey}:discount` : undefined,
           remarks: [
             `POS discount applied: ${paymentDiscount?.label || "Discount"}`,
             paymentDiscount?.code ? `Code ${paymentDiscount.code}.` : "",
             paymentDiscount?.managerName ? `Approved by ${paymentDiscount.managerName}.` : "",
           ].filter(Boolean).join(" "),
         }).unwrap();
+        discountCommitted = true;
       }
       let res = discountRes;
       if (recordAmount > 0) {
@@ -916,11 +1032,12 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           tenderedAmount,
           changeDue,
           terminalDeviceId: terminal?.deviceId || null,
+          idempotencyKey: sessionKey ? `${sessionKey}:payment` : undefined,
           remarks: [paymentNote || "Payment recorded at POS check-in", cashRemark].filter(Boolean).join(" "),
         }).unwrap();
       }
       if (paymentMethod === "cash" && recordAmount > 0) {
-        triggerCashDrawer({ bookingId: booking.bookingId, terminal });
+        openCashDrawer({ bookingId: booking.bookingId, terminal });
       }
       setPaymentComplete({
         ...(res?.data || {}),
@@ -936,20 +1053,93 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       refresh();
       toast.success("Payment recorded");
     } catch (err) {
-      toast.error(err?.data?.message || err?.data?.error || "Could not record payment");
+      const baseMsg = err?.data?.message || err?.data?.error || "Could not record payment";
+      toast.error(
+        discountCommitted
+          ? `Discount applied but payment did not record. Tap "Complete The Order" to retry. ${baseMsg}`
+          : baseMsg
+      );
+    } finally {
+      paymentLockRef.current = false;
+    }
+  };
+
+  // Gift-card tender for an existing booking. The gift-cards/redeem endpoint
+  // decrements the card AND records the payment on the booking atomically.
+  const handleGiftCardPayment = async ({ code, pin, amount }) => {
+    if (paymentLockRef.current) return;
+    const discountAmount = roundMoney(Math.min(Number(paymentDiscount?.amount || 0), balanceDue));
+    const payable = roundMoney(Math.max(0, balanceDue - discountAmount));
+    const apply = roundMoney(Math.min(payable, Number(amount) || 0));
+    if (apply <= 0) { toast.error("Gift card has no balance to apply."); return; }
+    paymentLockRef.current = true;
+    const terminal = getTerminal();
+    const sessionKey = paymentSessionRef.current;
+    try {
+      if (discountAmount > 0) {
+        await recordPayment({
+          bookingId: booking.bookingId,
+          amountPaid: discountAmount,
+          paymentMethod: "complimentary",
+          terminalDeviceId: terminal?.deviceId || null,
+          idempotencyKey: sessionKey ? `${sessionKey}:discount` : undefined,
+          remarks: [
+            `POS discount applied: ${paymentDiscount?.label || "Discount"}`,
+            paymentDiscount?.code ? `Code ${paymentDiscount.code}.` : "",
+            paymentDiscount?.managerName ? `Approved by ${paymentDiscount.managerName}.` : "",
+          ].filter(Boolean).join(" "),
+        }).unwrap();
+      }
+      const gc = await redeemGiftCard({
+        code: String(code).trim(),
+        pin: String(pin).trim(),
+        amount: apply,
+        bookingId: booking.bookingId,
+        note: paymentNote || "POS gift card payment",
+      }).unwrap();
+      const balanceRemaining = roundMoney(Math.max(0, payable - apply));
+      setPaymentComplete({
+        amountPaid: roundMoney(apply + discountAmount),
+        discountAmount,
+        discountLabel: paymentDiscount?.label || null,
+        paymentAmount: apply,
+        paymentMethod: "gift_card",
+        giftCardBalanceAfter: Number(gc?.data?.balanceAfter ?? 0),
+        balanceRemaining,
+        changeDue: 0,
+      });
+      refresh();
+      toast.success(
+        balanceRemaining > 0
+          ? `${moneyFmt(apply)} on gift card · ${moneyFmt(balanceRemaining)} still due`
+          : `${moneyFmt(apply)} paid by gift card`
+      );
+    } catch (err) {
+      toast.error(err?.data?.error || err?.data?.message || "Gift card payment failed.");
+    } finally {
+      paymentLockRef.current = false;
     }
   };
 
   const handlePrintReceipt = () => {
-    window.print();
+    printReceipt({
+      bookingId: booking?.bookingId || null,
+      bookingNumber: booking?.bookingNumber || null,
+      terminal: getTerminal(),
+    });
   };
 
-  const handleEmailReceipt = async () => {
+  const handleEmailReceipt = async (email) => {
     if (!booking?.bookingId) return;
-    const promise = sendBookingConfirmation({ bookingId: booking.bookingId }).unwrap();
+    const clean = String(email || "").trim();
+    if (!clean || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean)) {
+      toast.error("Enter a valid email address.");
+      return;
+    }
+    const promise = sendBookingConfirmation({ bookingId: booking.bookingId, email: clean }).unwrap();
     toast.promise(promise, {
       loading: "Sending receipt...",
-      success: "Receipt emailed",
+      success: `Receipt emailed to ${clean}`,
       error: (err) => err?.data?.message || err?.data?.error || "Could not email receipt",
     });
   };
@@ -971,13 +1161,13 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       <div style={{ marginBottom: 14, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexShrink: 0 }}>
         <div style={{ minWidth: 0 }}>
         <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--aero-orange-600)", fontWeight: 700, letterSpacing: "0.05em" }}>
-          {booking.bookingNumber}
+          {bookingNumber}
         </div>
         <div style={{ fontFamily: "var(--font-display, inherit)", fontSize: 22, fontWeight: 800, color: "var(--ink-900)", letterSpacing: "-0.02em", marginTop: 2 }}>
-          {booking.bookingName || "Walk-in"}
+          {bookingName}
         </div>
         <div style={{ fontSize: 13, color: "var(--ink-500)", marginTop: 4 }}>
-          {booking.activityName} · {booking.totalGuests || totalCount} pax · {booking.timeRange || "—"}
+          {bookingActivityName} · {booking.totalGuests || totalCount} pax · {bookingTimeRange}
         </div>
         </div>
         <button
@@ -1047,10 +1237,23 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           onNoteChange={setPaymentNote}
           onDiscountChange={setPaymentDiscount}
           onSubmit={handleRecordPayment}
+          onGiftCardSubmit={handleGiftCardPayment}
+          gcRedeeming={gcRedeeming}
           onPrintReceipt={handlePrintReceipt}
           onEmailReceipt={handleEmailReceipt}
           isSendingReceipt={sendingReceipt}
           onClose={() => { setPaymentOpen(false); setPaymentComplete(null); refresh(); }}
+        />
+      )}
+
+      {reslotOpen && reslotActivity && (
+        <ReslotModal
+          activityId={reslotActivity.activityId}
+          variationId={reslotActivity.variationId}
+          activityName={reslotActivity.name}
+          busy={reslotting}
+          onPick={handleReslot}
+          onClose={() => setReslotOpen(false)}
         />
       )}
 
@@ -1096,7 +1299,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
               }}
             >
               <div style={{ fontSize: 13, fontWeight: 800, color: "var(--ink-900)" }}>
-                Edit {booking.bookingNumber}
+                Edit {bookingNumber}
               </div>
               <button
                 type="button"
@@ -1107,11 +1310,37 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
               </button>
             </div>
             <iframe
-              title={`Edit booking ${booking.bookingNumber}`}
+              title={`Edit booking ${bookingNumber}`}
               src={adminBookingDetailUrl(booking.bookingId, "embedded=1&returnTo=pos-checkin")}
               style={{ width: "100%", flex: 1, minHeight: 0, border: 0, background: "var(--ink-25, #FAF7EE)" }}
             />
           </div>
+        </div>
+      )}
+
+      {reslotActivity && (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap",
+          gap: 10, marginBottom: 8, padding: "10px 12px",
+          background: reslotIsExpired ? "#FFF7ED" : "#EFF6FF",
+          border: reslotIsExpired ? "1.5px solid #FFB199" : "1.5px solid #9DC4F0",
+          borderRadius: 12,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, color: reslotIsExpired ? "#B83210" : "#1D4ED8", fontWeight: 700, fontSize: 13 }}>
+            <Icon name="clock" size={16} stroke={2.5} />
+            {reslotIsExpired
+              ? "This session's time has passed — move the guest to an open slot today."
+              : "Session in progress — check in here, or move the guest to another open slot today."}
+          </div>
+          <button
+            type="button"
+            onClick={() => setReslotOpen(true)}
+            disabled={reslotting || !reslotActivity.activityId}
+            className={reslotIsExpired ? "a-btn a-btn--primary a-btn--sm" : "a-btn a-btn--ghost a-btn--sm"}
+            style={{ justifyContent: "center" }}
+          >
+            <Icon name="calendar-clock" size={14} /> Move to available slot
+          </button>
         </div>
       )}
 
@@ -1195,6 +1424,9 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
             const blocker = ticketBlockers.get(t.ticketCode);
             const blockerMessage = blocker ? redeemReasonMessage(blocker, t) : "";
             const isBlocked = Boolean(blocker);
+            const productName = firstText(t.product?.name, t.activity?.name, activityNameFromBooking(booking), "Item");
+            const variationName = displayText(t.variation?.name, "");
+            const ticketCode = displayText(t.ticketCode, "");
             const time = t.validFrom
               ? new Date(t.validFrom).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
               : null;
@@ -1236,12 +1468,12 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                     fontWeight: 700, fontSize: 13, color: "var(--ink-900)",
                     textDecoration: isRedeemed ? "line-through" : "none",
                   }}>
-                    {t.product?.name || t.activity?.name || activityNameFromBooking(booking)}
-                    {t.variation?.name && <span style={{ marginLeft: 6, fontWeight: 600, color: "var(--ink-600)" }}>· {t.variation.name}</span>}
+                    {productName}
+                    {variationName && <span style={{ marginLeft: 6, fontWeight: 600, color: "var(--ink-600)" }}>· {variationName}</span>}
                   </div>
                   <div style={{ fontSize: 11, color: "var(--ink-500)", display: "flex", gap: 8, marginTop: 2, alignItems: "center", flexWrap: "wrap" }}>
                     <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, color: "var(--aero-orange-600)" }}>
-                      {t.ticketCode}
+                      {ticketCode}
                     </span>
                     {time && <span>· {time}{dur ? ` (${dur}h)` : ""}</span>}
                     {isBlocked && (
@@ -1366,7 +1598,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
 }
 
 function activityNameFromBooking(b) {
-  return b?.activityName || "Item";
+  return displayText(b?.activityName, "Item");
 }
 
 function SelectedProgressPanel({ progress }) {
@@ -1531,7 +1763,7 @@ function GuestWorkflowPanel({
               >
                 <Icon name={participant.hasValidWaiver ? "shield-check" : "user-round"} size={11} />
                 <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {participant.displayName}
+                  {displayText(participant.displayName, "Guest")}
                 </span>
               </span>
             );
@@ -1613,9 +1845,9 @@ function CheckInSettlementPanel({
       .filter((item) => Number(item.totalPrice || 0) > 0 || Number(item.noOfTickets || 0) > 0)
       .map((item) => ({
         key: `bookingItem:${item.bookingItemId}`,
-        name: booking?.activityName || item.variation?.activityName || "Booking item",
+        name: firstText(booking?.activityName, item.variation?.activityName, "Booking item"),
         detail: [
-          item.variation?.name,
+          displayText(item.variation?.name, ""),
           item.timefrom && item.timeto ? `${item.timefrom} - ${item.timeto}` : "",
         ].filter(Boolean).join(" - "),
         qty: Number(item.noOfTickets || 1) || 1,
@@ -1638,8 +1870,8 @@ function CheckInSettlementPanel({
     const groups = new Map();
     rows.forEach((ticket) => {
       if (ticket.bookingItemId) return;
-      const productName = ticket.product?.name || ticket.activity?.name || activityNameFromBooking(booking);
-      const variationName = ticket.variation?.name || ticket.ticketTypeName || ticket.priceName || "";
+      const productName = firstText(ticket.product?.name, ticket.activity?.name, activityNameFromBooking(booking), "Item");
+      const variationName = firstText(ticket.variation?.name, ticket.ticketTypeName, ticket.priceName, "");
       const bookingItemId = ticket.bookingItemId || ticket.bookingItem?.bookingItemId || null;
       const key = bookingItemId ? `bookingItem:${bookingItemId}` : `${productName}|${variationName}`;
       const unitAmount = Number(
@@ -1677,8 +1909,8 @@ function CheckInSettlementPanel({
       .filter((item) => !item.isBundleInclusion)
       .map((item) => ({
         key: `purchased:${item.variationId}`,
-        name: item.activityName || item.variation?.name || "Item",
-        detail: item.variation?.name || "",
+        name: firstText(item.activityName, item.variation?.name, "Item"),
+        detail: displayText(item.variation?.name, ""),
         qty: Number(item.count || item.quantity || 1) || 1,
         amount: Number(item.total || 0),
         source: "purchasedItem",
@@ -1767,10 +1999,10 @@ function CheckInSettlementPanel({
             >
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 12, fontWeight: 850, color: "var(--ink-900)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {item.name}
+                  {displayText(item.name, "Item")}
                 </div>
                 <div style={{ marginTop: 2, fontSize: 11, color: "var(--ink-500)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  x{item.qty}{item.detail ? ` - ${item.detail}` : ""}
+                  x{item.qty}{displayText(item.detail, "") ? ` - ${displayText(item.detail, "")}` : ""}
                 </div>
               </div>
               <div style={{ fontSize: 12, fontWeight: 850, color: "var(--ink-900)", alignSelf: "center" }}>
@@ -2024,10 +2256,10 @@ function OrderAddItemModal({ bookingId, onAdd, onClose }) {
                 >
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 900, color: "var(--ink-900)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {item.activityName}
+                      {displayText(item.activityName, "Item")}
                     </div>
                     <div style={{ marginTop: 2, fontSize: 12, color: "var(--ink-500)" }}>
-                      {item.variationName} - {moneyFmt(item.price)}
+                      {displayText(item.variationName, "Option")} - {moneyFmt(item.price)}
                     </div>
                   </div>
                   <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
@@ -2055,6 +2287,87 @@ function OrderAddItemModal({ bookingId, onAdd, onClose }) {
   );
 }
 
+// Picker of today's open sessions to move a late/expired booking into.
+function ReslotModal({ activityId, variationId, activityName, busy, onPick, onClose }) {
+  const today = localIsoDate();
+  const { data, isFetching, error } = useGetAvailabilityQuery(
+    { date: today, activityId },
+    { skip: !activityId }
+  );
+  const sessionsData = data?.data || data || {};
+  const sessions = Array.isArray(sessionsData.sessions) ? sessionsData.sessions : [];
+
+  const now = new Date();
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const toMin = (v) => {
+    const [h, m] = String(v).split(":").map(Number);
+    return Number.isFinite(h) ? h * 60 + (Number.isFinite(m) ? m : 0) : null;
+  };
+  // Resolve the concrete slotId for the booking's variation in a session.
+  const slotIdForSession = (session) => {
+    const vars = session.variations || [];
+    const v =
+      vars.find((x) => String(x.variationId) === String(variationId) && !isVariationUnavailable(x)) ||
+      vars.find((x) => !isVariationUnavailable(x));
+    if (!v) return null;
+    const ids = getVariationSlotIds(v);
+    return ids.length ? Number(ids[0]) : null;
+  };
+  const options = sessions
+    .map((s) => ({ session: s, slotId: slotIdForSession(s) }))
+    .filter((o) => o.slotId && isSessionBookable(o.session))
+    .filter((o) => {
+      // Only slots that START at or after the current time — never a slot
+      // already in progress or past (e.g. at 14:48 the list begins at 14:50,
+      // not 13:50). An unknown start time is shown rather than hidden.
+      const start = toMin(getStartTime(o.session));
+      return start == null ? true : start >= nowMinutes;
+    })
+    .sort((a, b) => (toMin(getStartTime(a.session)) ?? 0) - (toMin(getStartTime(b.session)) ?? 0));
+
+  return (
+    <div role="dialog" aria-modal="true" style={{ position: "fixed", inset: 0, zIndex: 1200, background: "rgba(26,24,20,.62)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18 }}>
+      <div style={{ width: "min(560px, 100%)", maxHeight: "calc(100vh - 36px)", background: "#F6F1E8", border: "2px solid var(--ink-900)", borderRadius: 14, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <div style={{ padding: "16px 18px", borderBottom: "1.5px solid var(--ink-200)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+          <div>
+            <div className="eyebrow">Move to available slot</div>
+            <div style={{ fontSize: 18, fontWeight: 900, marginTop: 2 }}>{activityName} · {formatShortDate(today)}</div>
+          </div>
+          <button type="button" className="a-btn a-btn--ghost a-btn--sm" onClick={onClose}>
+            <Icon name="x" size={14} /> Close
+          </button>
+        </div>
+        <div style={{ padding: 16, overflowY: "auto" }}>
+          {isFetching ? (
+            <div style={{ color: "var(--ink-500)", padding: 12 }}>Loading today's slots…</div>
+          ) : error ? (
+            <div style={{ color: "var(--color-danger)", padding: 12 }}>Couldn't load availability.</div>
+          ) : options.length === 0 ? (
+            <div style={{ color: "var(--ink-500)", padding: 12 }}>No open slots left today for this activity.</div>
+          ) : (
+            <div style={{ display: "grid", gap: 10 }}>
+              {options.map(({ session, slotId }) => (
+                <button
+                  key={slotId}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onPick(slotId)}
+                  style={{ all: "unset", cursor: busy ? "wait" : "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, background: "#fff", border: "1.5px solid var(--ink-200)", borderRadius: 12, padding: "14px 16px" }}
+                >
+                  <div style={{ fontWeight: 900, color: "var(--ink-900)" }}>{timeRangeFromSession(session)}</div>
+                  <div style={{ fontSize: 12, color: "var(--ink-600)", fontWeight: 700 }}>
+                    {Number(session.capacityRemaining || 0)} {session.availabilityLabel || "spots left"}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CheckInPaymentModal({
   booking,
   balanceDue,
@@ -2069,6 +2382,8 @@ function CheckInPaymentModal({
   onNoteChange,
   onDiscountChange,
   onSubmit,
+  onGiftCardSubmit,
+  gcRedeeming,
   onPrintReceipt,
   onEmailReceipt,
   isSendingReceipt,
@@ -2077,16 +2392,61 @@ function CheckInPaymentModal({
   const [couponCode, setCouponCode] = useState("");
   const [manualDiscount, setManualDiscount] = useState("");
   const [managerOpen, setManagerOpen] = useState(false);
+  const [receiptEmail, setReceiptEmail] = useState("");
+  const [gcCode, setGcCode] = useState("");
+  const [gcPin, setGcPin] = useState("");
+  const [gcCard, setGcCard] = useState(null);
   const [validateDiscountCode, { isFetching: validatingCoupon }] = useLazyValidateDiscountCodeQuery();
+  const [lookupGiftCard, { isFetching: gcLooking }] = useLazyLookupGiftCardQuery();
+  const settings = useEffectiveSettings();
+  // Pre-fill the receipt email from any address on the booking; for a
+  // walk-in with none, the cashier types one on the complete view.
+  useEffect(() => {
+    setReceiptEmail(booking?.guestEmail || booking?.guest?.guestEmail || "");
+  }, [booking?.bookingId, booking?.guestEmail, booking?.guest?.guestEmail]);
   const discountAmount = roundMoney(Math.min(Number(discount?.amount || 0), balanceDue));
   const payableBalance = roundMoney(Math.max(0, balanceDue - discountAmount));
   const tendered = Number(amount) || 0;
   const isCash = method === "cash";
-  const recordAmount = isCash ? Math.min(payableBalance, tendered) : tendered;
+  const isGiftCard = method === "gift_card";
+  const gcBalance = roundMoney(Number(gcCard?.currentBalance || 0));
+  const gcApply = isGiftCard && gcCard ? roundMoney(Math.min(payableBalance, gcBalance)) : 0;
+  const recordAmount = isCash ? Math.min(payableBalance, tendered) : isGiftCard ? gcApply : tendered;
   const remaining = Math.max(0, payableBalance - recordAmount);
   const changeDue = isCash ? Math.max(0, tendered - payableBalance) : 0;
+
+  const handleGcLookup = async () => {
+    const code = gcCode.trim();
+    const pin = gcPin.trim();
+    if (!code || !pin) { toast.error("Enter gift card code and PIN."); return; }
+    try {
+      const res = await lookupGiftCard({ code, pin }).unwrap();
+      const card = res?.data;
+      if (!card) { toast.error("Card not found."); return; }
+      if (String(card.status || "").toLowerCase() !== "active") { toast.error(`Card is ${card.status || "unavailable"}.`); return; }
+      if (Number(card.currentBalance || 0) <= 0) { toast.error("Card has no balance."); return; }
+      setGcCard(card);
+      toast.success(`Gift card balance ${moneyFmt(card.currentBalance)}`);
+    } catch (err) {
+      toast.error(err?.data?.message || err?.data?.error || "Gift card lookup failed.");
+    }
+  };
   const taxAmount = Number(booking?.taxAmount ?? booking?.tax ?? 0) || 0;
-  const subTotal = roundMoney(Math.max(0, Number(booking?.subTotal ?? booking?.subtotal ?? booking?.totalAmount ?? balanceDue) || 0));
+  // Pre-tax subtotal. Prefer the explicit subtotal field; never fall back to
+  // totalAmount (it already INCLUDES tax — doing so made the modal show the
+  // tax-inclusive total as the "Order Total" and then add Plus Tax again,
+  // double-counting tax). If only a total is known, back tax out of it.
+  const subTotal = roundMoney(
+    Math.max(
+      0,
+      Number(
+        booking?.subtotalAmount ??
+        booking?.subTotal ??
+        booking?.subtotal ??
+        (booking?.totalAmount != null ? Number(booking.totalAmount) - taxAmount : balanceDue)
+      ) || 0
+    )
+  );
   const existingDiscount = Number(booking?.discountAmount || 0) || 0;
   const promoCartLines = useMemo(() => buildBookingPromoCartLines(booking), [booking]);
   const methods = [
@@ -2110,7 +2470,8 @@ function CheckInPaymentModal({
   };
   const handleMethodChange = (nextMethod) => {
     onMethodChange(nextMethod);
-    onAmountChange(nextMethod === "cash" ? "" : payableBalance.toFixed(2));
+    onAmountChange(nextMethod === "cash" || nextMethod === "gift_card" ? "" : payableBalance.toFixed(2));
+    if (nextMethod !== "gift_card") setGcCard(null);
   };
   const appendDigit = (digit) => {
     const current = String(amount || "");
@@ -2177,7 +2538,7 @@ function CheckInPaymentModal({
         <div style={{ padding: "16px 18px", borderBottom: "1.5px solid var(--ink-200)", display: "flex", justifyContent: "space-between", gap: 12 }}>
           <div>
             <div style={{ fontSize: 11, color: "var(--aero-orange-600)", fontWeight: 800, fontFamily: "var(--font-mono)" }}>
-              {booking.bookingNumber}
+              {displayText(booking.bookingNumber, "Booking")}
             </div>
             <div style={{ fontSize: 20, fontWeight: 900, color: "var(--ink-900)", marginTop: 2 }}>
               {complete ? "Payment complete" : "Take payment"}
@@ -2224,12 +2585,30 @@ function CheckInPaymentModal({
             <div style={{ marginTop: 14, fontSize: 13, color: "var(--ink-600)", lineHeight: 1.5 }}>
               Booking is checked in and payment is recorded.
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 16 }}>
-              <button type="button" className="a-btn a-btn--secondary" onClick={onPrintReceipt} style={{ justifyContent: "center" }}>
+            {/* Email receipt — type any address (walk-ins have none on file). */}
+            <div style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--ink-500)", marginBottom: 6 }}>
+                Email receipt
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  type="email"
+                  inputMode="email"
+                  autoComplete="email"
+                  value={receiptEmail}
+                  onChange={(e) => setReceiptEmail(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") onEmailReceipt(receiptEmail); }}
+                  placeholder="customer@email.com"
+                  style={{ flex: 1, fontSize: 14, padding: "10px 12px", border: "1.5px solid var(--ink-300)", borderRadius: 8 }}
+                />
+                <button type="button" className="a-btn a-btn--secondary" onClick={() => onEmailReceipt(receiptEmail)} disabled={isSendingReceipt} style={{ justifyContent: "center" }}>
+                  <Icon name="mail" size={15} /> {isSendingReceipt ? "Sending..." : "Send"}
+                </button>
+              </div>
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <button type="button" className="a-btn a-btn--secondary" onClick={onPrintReceipt} style={{ width: "100%", justifyContent: "center" }}>
                 <Icon name="printer" size={15} /> Print
-              </button>
-              <button type="button" className="a-btn a-btn--secondary" onClick={onEmailReceipt} disabled={isSendingReceipt} style={{ justifyContent: "center" }}>
-                <Icon name="mail" size={15} /> {isSendingReceipt ? "Sending..." : "Email"}
               </button>
             </div>
             <button type="button" className="a-btn a-btn--primary" onClick={onClose} style={{ width: "100%", justifyContent: "center", marginTop: 18 }}>
@@ -2264,6 +2643,20 @@ function CheckInPaymentModal({
               <button type="button" onClick={() => {
                 const amt = roundMoney(Math.min(Number(manualDiscount), balanceDue));
                 if (amt <= 0) return toast.error("Enter discount amount.");
+                if (settings?.enableCustomDiscount === false) {
+                  return toast.error("Custom discounts are disabled for this terminal.");
+                }
+                // Above the cashier's allowance (and not explicitly waived),
+                // an employee discount needs manager approval — same gate as
+                // the Manager Discount button.
+                const limit = Number(settings?.cashierDiscountAmountLimit) || 0;
+                const needsManager =
+                  settings?.allowCustomDiscountWithoutPin !== true && limit > 0 && amt > limit;
+                if (needsManager) {
+                  toast.message(`Discounts over ${moneyFmt(limit)} need manager approval.`);
+                  setManagerOpen(true);
+                  return;
+                }
                 onDiscountChange({ amount: amt, label: "Employee discount", source: "employee" });
                 onAmountChange(method === "cash" ? "" : roundMoney(Math.max(0, balanceDue - amt)).toFixed(2));
               }} style={{ border: "1.5px solid var(--ink-500)", background: "#F8287D", color: "white", borderRadius: 6, padding: "13px 8px", fontWeight: 900, cursor: "pointer" }}>
@@ -2317,6 +2710,31 @@ function CheckInPaymentModal({
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+              {isGiftCard ? (
+                <div style={{ flex: 1, display: "grid", gap: 10, alignContent: "start" }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--ink-500)" }}>Gift card</div>
+                  {!gcCard ? (
+                    <>
+                      <input value={gcCode} onChange={(e) => setGcCode(e.target.value.toUpperCase())} onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }} placeholder="Card code" autoComplete="off" style={{ fontSize: 15, padding: "12px 14px", border: "1.5px solid var(--ink-300)", borderRadius: 8, fontFamily: "var(--font-mono)", fontWeight: 800 }} />
+                      <input value={gcPin} onChange={(e) => setGcPin(e.target.value.replace(/\D/g, ""))} onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }} placeholder="PIN" inputMode="numeric" maxLength={6} type="password" autoComplete="off" style={{ fontSize: 15, padding: "12px 14px", border: "1.5px solid var(--ink-300)", borderRadius: 8 }} />
+                      <button type="button" className="a-btn a-btn--secondary" onClick={handleGcLookup} disabled={gcLooking || !gcCode.trim() || !gcPin.trim()} style={{ justifyContent: "center", minHeight: 48 }}>
+                        <Icon name="search" size={16} /> {gcLooking ? "Looking…" : "Look up card"}
+                      </button>
+                    </>
+                  ) : (
+                    <div style={{ border: "1.5px solid var(--ink-300)", borderRadius: 10, padding: 12, background: "white", display: "grid", gap: 6 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontFamily: "var(--font-mono)", fontWeight: 900 }}>
+                        <span>{gcCard.code}</span>
+                        <button type="button" onClick={() => setGcCard(null)} title="Use a different card" style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)" }}><Icon name="x" size={14} /></button>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}><span>Card balance</span><span style={{ fontWeight: 800 }}>{moneyFmt(gcBalance)}</span></div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}><span>Applies to order</span><span style={{ fontWeight: 900, color: "#137A35" }}>{moneyFmt(gcApply)}</span></div>
+                      {remaining > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#B83210" }}><span>Balance remaining</span><span style={{ fontWeight: 800 }}>{moneyFmt(remaining)}</span></div>}
+                    </div>
+                  )}
+                </div>
+              ) : (
+              <>
               <div style={{ flex: 1, minHeight: 138, background: "#E9F3F6", border: "1.5px solid var(--ink-300)", marginBottom: 8, padding: 8, fontSize: 13, fontWeight: 800 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", color: "#0A75D9" }}>
                   <span>{method === "cash" ? "Cash" : methods.find((m) => m.value === method)?.label || method}</span>
@@ -2352,9 +2770,14 @@ function CheckInPaymentModal({
                   <Icon name="delete" size={18} />
                 </button>
               </div>
-              <button type="button" className="a-btn a-btn--primary" onClick={onSubmit} disabled={isSubmitting} style={{ width: "100%", justifyContent: "center", minHeight: 52, marginTop: 8, fontSize: 16 }}>
+              </>
+              )}
+              <button type="button" className="a-btn a-btn--primary"
+                onClick={isGiftCard ? () => onGiftCardSubmit?.({ code: gcCode, pin: gcPin, amount: gcApply }) : onSubmit}
+                disabled={isSubmitting || gcRedeeming || (isGiftCard && !gcCard)}
+                style={{ width: "100%", justifyContent: "center", minHeight: 52, marginTop: 8, fontSize: 16 }}>
                 <Icon name="check" size={16} />
-                {isSubmitting ? "Recording..." : "Complete The Order"}
+                {(isSubmitting || gcRedeeming) ? "Recording..." : isGiftCard ? `Pay ${moneyFmt(gcApply)} by gift card` : "Complete The Order"}
               </button>
             </div>
           </div>
@@ -2363,7 +2786,7 @@ function CheckInPaymentModal({
       <ManagerOverridePrompt
         open={managerOpen}
         title="Approve manager discount"
-        description={`Apply ${moneyFmt(Math.min(Number(manualDiscount), balanceDue))} discount to ${booking.bookingNumber}.`}
+        description={`Apply ${moneyFmt(Math.min(Number(manualDiscount), balanceDue))} discount to ${displayText(booking.bookingNumber, "booking")}.`}
         action="pos_manager_discount"
         targetType="booking"
         targetId={booking.bookingId}
@@ -2409,7 +2832,7 @@ function BoundHolderChip({ participant, onUnbind, busy }) {
         fontSize: 11, fontWeight: 700, color: "var(--aero-orange-700, #B8400A)",
       }}>
         {participant.isMinor && <span style={{ fontSize: 9, opacity: 0.7 }}>👶</span>}
-        {participant.displayName}
+        {displayText(participant.displayName, "Guest")}
         {onUnbind && (
           <button
             type="button"
@@ -2512,7 +2935,7 @@ function HolderPicker({ candidates, onPick, onSearch, busy }) {
           }}
         >
           {p.isMinor && <span style={{ fontSize: 9, opacity: 0.7 }}>👶</span>}
-          {p.displayName}
+          {displayText(p.displayName, "Guest")}
         </button>
       ))}
       {hiddenCount > 0 && (
@@ -2551,12 +2974,49 @@ function HolderPicker({ candidates, onPick, onSearch, busy }) {
 //    link the picked one as a participant on the current booking ──
 function WaiverLookupModal({ bookingId, onClose, onLinked }) {
   const [query, setQuery] = useState("");
+  // When a chosen waiver covers a signer + minors, we expand it into a
+  // person chooser so the cashier links only who's actually jumping.
+  const [chooser, setChooser] = useState(null); // { sig, names } | null
+  const [selectedPeople, setSelectedPeople] = useState(new Set());
   const [trigger, { data, isFetching }] = useLazySearchWaiversQuery();
   const [linkFromWaiver, { isLoading: linking }] = useLinkParticipantFromWaiverMutation();
 
   const closeModal = () => {
     setQuery("");
+    setChooser(null);
+    setSelectedPeople(new Set());
     onClose?.();
+  };
+
+  // People on a waiver: signer (key "signer") + each minor ("minor:N").
+  const peopleOf = (sig) => {
+    const signerName = sig.guest?.guestName || sig.name || sig.signedByName || sig.signedBy || "Signer";
+    const minors = Array.isArray(sig.minors) ? sig.minors : [];
+    return [
+      { key: "signer", label: signerName, kind: "Adult" },
+      ...minors.map((m, i) => ({ key: `minor:${i}`, label: m?.name || m?.firstName || `Minor ${i + 1}`, kind: "Minor" })),
+    ];
+  };
+
+  const linkPeople = async (sig, peopleKeys) => {
+    const waiverSignatureId = sig.signatureId ?? sig.id;
+    if (!peopleKeys || peopleKeys.length === 0) {
+      toast.error("Pick at least one person to add.");
+      return;
+    }
+    const toastId = toast.loading("Linking waiver...");
+    try {
+      const res = await linkFromWaiver({ bookingId, waiverSignatureId, people: peopleKeys }).unwrap();
+      await onLinked?.(res);
+      closeModal();
+      const n = res?.data?.created || 0;
+      const covered = res?.data?.covered || 0;
+      if (n > 0) toast.success(`Linked ${n} guest${n === 1 ? "" : "s"}`, { id: toastId });
+      else if (covered > 0) toast.success("Attached waiver coverage", { id: toastId });
+      else toast.success("Already linked", { id: toastId });
+    } catch (err) {
+      toast.error(err?.data?.error || "Could not link", { id: toastId });
+    }
   };
 
   React.useEffect(() => {
@@ -2581,25 +3041,26 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
     return Array.from(bySignature.values());
   }, [data, query]);
 
-  const handlePick = async (sig) => {
-    const waiverSignatureId = sig.signatureId ?? sig.id;
-    const toastId = toast.loading("Linking waiver...");
-    try {
-      const res = await linkFromWaiver({
-        bookingId,
-        waiverSignatureId,
-        includeMinors: true,
-      }).unwrap();
-      await onLinked?.(res);
-      closeModal();
-      const n = res?.data?.created || 0;
-      const covered = res?.data?.covered || 0;
-      if (n > 0) toast.success(`Linked ${n} guest${n === 1 ? "" : "s"}`, { id: toastId });
-      else if (covered > 0) toast.success("Attached waiver coverage", { id: toastId });
-      else toast.success("Already linked", { id: toastId });
-    } catch (err) {
-      toast.error(err?.data?.error || "Could not link", { id: toastId });
+  const handlePick = (sig) => {
+    const minorCount = Array.isArray(sig.minors) ? sig.minors.length : Number(sig.minorCount || 0);
+    // A waiver covering only the signer → link them directly (one tap).
+    // A waiver that also covers minors → let the cashier choose who's
+    // actually checking in, so we don't add the guardian AND every minor.
+    if (minorCount === 0) {
+      linkPeople(sig, ["signer"]);
+      return;
     }
+    setChooser({ sig });
+    setSelectedPeople(new Set()); // nothing pre-selected — cashier decides
+  };
+
+  const togglePerson = (key) => {
+    setSelectedPeople((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   };
 
   return (
@@ -2621,7 +3082,7 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
           <h2 style={{ margin: 0, fontFamily: "var(--font-display)", fontSize: 20, fontWeight: 800, color: "var(--ink-900)" }}>
-            Find a waiver
+            {chooser ? "Who's checking in?" : "Find a waiver"}
           </h2>
           <button
             type="button"
@@ -2633,6 +3094,60 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
           </button>
         </div>
 
+        {chooser && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 12, color: "var(--ink-600)" }}>
+              This waiver covers more than one person. Add only who's actually checking in.
+            </div>
+            <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: 8 }}>
+              {peopleOf(chooser.sig).map((person) => {
+                const checked = selectedPeople.has(person.key);
+                return (
+                  <li key={person.key}>
+                    <button
+                      type="button"
+                      onClick={() => togglePerson(person.key)}
+                      style={{
+                        all: "unset", cursor: "pointer", display: "flex", alignItems: "center", gap: 10,
+                        width: "100%", boxSizing: "border-box", padding: "12px 14px",
+                        border: `1.5px solid ${checked ? "var(--aero-orange-500)" : "var(--ink-200)"}`,
+                        borderRadius: 10, background: checked ? "var(--aero-orange-50)" : "white",
+                      }}
+                    >
+                      <span style={{
+                        width: 20, height: 20, borderRadius: 6,
+                        border: `1.5px solid ${checked ? "var(--aero-orange-500)" : "var(--ink-300)"}`,
+                        background: checked ? "var(--aero-orange-500)" : "white",
+                        display: "inline-flex", alignItems: "center", justifyContent: "center", color: "white",
+                      }}>
+                        {checked && <Icon name="check" size={13} stroke={3} />}
+                      </span>
+                      <span style={{ flex: 1, fontWeight: 700, color: "var(--ink-900)" }}>{person.label}</span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "var(--ink-500)" }}>{person.kind}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+              <button type="button" className="a-btn a-btn--ghost" onClick={() => { setChooser(null); setSelectedPeople(new Set()); }} style={{ justifyContent: "center" }}>
+                <Icon name="arrow-left" size={14} /> Back
+              </button>
+              <button
+                type="button"
+                className="a-btn a-btn--primary"
+                disabled={linking || selectedPeople.size === 0}
+                onClick={() => linkPeople(chooser.sig, [...selectedPeople])}
+                style={{ flex: 1, justifyContent: "center" }}
+              >
+                <Icon name="user-plus" size={14} /> {linking ? "Linking…" : `Link selected (${selectedPeople.size})`}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!chooser && (
+        <>
         <div style={{
           display: "flex", alignItems: "center", gap: 8,
           padding: "10px 12px", background: "var(--ink-25)",
@@ -2726,6 +3241,8 @@ function WaiverLookupModal({ bookingId, onClose, onLinked }) {
           tied to the booking auto-link at sign-time — use this only when a guest's
           waiver wasn't auto-attached.
         </div>
+        </>
+        )}
       </div>
     </div>
   );
@@ -2792,7 +3309,7 @@ function NameGuestsForm({ bookingId, totalGuests, existingParticipants = [], onS
       toast.error("Type at least one guest name");
       return;
     }
-    const existingNames = new Set(existingParticipants.map((participant) => normalizeGuestName(participant.displayName)));
+    const existingNames = new Set(existingParticipants.map((participant) => normalizeGuestName(displayText(participant.displayName, ""))));
     const seen = new Set();
     const duplicate = filled.find((row) => {
       const key = normalizeGuestName(row.displayName);

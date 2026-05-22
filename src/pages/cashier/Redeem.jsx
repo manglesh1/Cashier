@@ -34,6 +34,24 @@ export function Redeem() {
     inputRef.current?.focus();
   }, []);
 
+  // Global scanner pipe. attachScannerListener (set up once in CashierApp)
+  // dispatches `cashier:scan` when a USB-HID barcode reader emits a fast
+  // burst followed by Enter. We listen here so a scan submits even if the
+  // cashier tapped a button and lost focus on the input field — a common
+  // failure mode on tablets where touching anywhere blurs the input.
+  useEffect(() => {
+    const onScan = (e) => {
+      const scanned = e?.detail?.code;
+      if (!scanned) return;
+      submitCode(scanned);
+    };
+    window.addEventListener("cashier:scan", onScan);
+    return () => window.removeEventListener("cashier:scan", onScan);
+    // submitCode is stable (defined inline below; we ESLint-disable below
+    // for clarity — it has no closed-over reactive deps).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const focusInput = () => {
     setTimeout(() => inputRef.current?.focus(), 0);
   };

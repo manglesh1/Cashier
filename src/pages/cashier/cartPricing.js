@@ -8,8 +8,42 @@ export const isAddOnProduct = (item) => {
   return type.includes("add_on") || type.includes("addon") || type.includes("add-on");
 };
 
+const productTypeKey = (item) =>
+  String(item?.productType || item?.activityTypeKey || "").toLowerCase();
+
+export const requiresCustomerForCheckout = (item) => {
+  // POS quick checkout: a booking owner is OPTIONAL by default. Walk-ins
+  // should not be forced to enter a customer to pay — not for jump passes,
+  // and not for party packages. The only thing that forces a customer is an
+  // explicit per-product admin flag (requiresCustomer / customerRequired).
+  //
+  // Vouchers / memberships / gift cards are NOT listed here because they
+  // can still be sold customer-free; their *delivery email* is enforced
+  // separately at checkout (a voucher with no email can't be sent), which
+  // is a functional requirement rather than "you must attach a customer".
+  if (!item) return false;
+  return item.requiresCustomer === true || item.customerRequired === true;
+};
+
+export const requiresRecipientForCheckout = (item) => {
+  const type = productTypeKey(item);
+  return ["voucher_pack", "membership", "recurring_membership", "gift_card", "promo_card"].includes(type);
+};
+
+const getCustomerContact = (customer) =>
+  customer?.contactEmail ||
+  customer?.guestEmail ||
+  customer?.email ||
+  customer?.contactPhone ||
+  customer?.guestPhone ||
+  customer?.phone ||
+  "";
+
+const getCustomerName = (customer) =>
+  customer?.name || customer?.guestName || customer?.fullName || "";
+
 export const isNoScheduleProduct = (item) => {
-  const type = String(item?.productType || item?.activityTypeKey || "").toLowerCase();
+  const type = productTypeKey(item);
   return [
     "stock_item",
     "voucher_pack",
@@ -20,7 +54,7 @@ export const isNoScheduleProduct = (item) => {
 
 export const needsScheduleSelection = (item) => {
   if (!item || isNoScheduleProduct(item)) return false;
-  const type = String(item.productType || item.activityTypeKey || "").toLowerCase();
+  const type = productTypeKey(item);
   return (
     type === "session_pass" ||
     type === "party_package" ||
@@ -34,6 +68,82 @@ export const hasScheduleSelection = (item) => {
   const slotId = item?.slotId;
   if (Array.isArray(slotId)) return slotId.some((id) => Number(id) > 0);
   return Number(slotId) > 0;
+};
+
+const getCustomerChoiceItems = (item) => {
+  const sources = [
+    item?.itemsIncluded,
+    item?.bundleInclusions,
+    item?.raw?.itemsIncluded,
+    item?.raw?.bundleInclusions,
+  ];
+  return sources
+    .filter(Array.isArray)
+    .flat()
+    .filter((includedItem) => includedItem?.fulfillmentMode === "customer_choice");
+};
+
+export const requiresChoiceSelection = (item) =>
+  item?.requiresChoices === true ||
+  item?.choiceRequired === true ||
+  getCustomerChoiceItems(item).length > 0;
+
+export const hasRequiredChoicesSelected = (item) => {
+  if (!requiresChoiceSelection(item)) return true;
+  const selections = item?.choiceSelections || {};
+  return Object.values(selections).some((value) =>
+    Array.isArray(value) ? value.filter(Boolean).length > 0 : Boolean(value)
+  );
+};
+
+export const getCheckoutRequirements = (
+  cartItems = [],
+  { customer = null, waiverCoverage = 0, waiverPolicy = "beforePayment" } = {}
+) => {
+  const items = Array.isArray(cartItems) ? cartItems : [];
+  const missingScheduleItems = items.filter(
+    (item) => needsScheduleSelection(item) && !hasScheduleSelection(item)
+  );
+  const customerRequiredItems = items.filter(requiresCustomerForCheckout);
+  const choiceRequiredItems = items.filter(requiresChoiceSelection);
+  const missingChoiceItems = choiceRequiredItems.filter((item) => !hasRequiredChoicesSelected(item));
+  const waiverRequiredQuantity = items.reduce(
+    (count, item) => count + (item?.requiresWaiver ? Math.max(1, Number(item.qty) || 1) : 0),
+    0
+  );
+  const hasCustomer =
+    customerRequiredItems.length === 0 ||
+    (Boolean(getCustomerName(customer)) && Boolean(getCustomerContact(customer)));
+  const missingWaiver =
+    waiverPolicy === "beforePayment" &&
+    waiverRequiredQuantity > Math.max(0, Number(waiverCoverage) || 0);
+  const nextStep =
+    missingScheduleItems.length > 0
+      ? "schedule"
+      : !hasCustomer
+        ? "customer"
+        : missingChoiceItems.length > 0
+          ? "choices"
+          : missingWaiver
+            ? "waiver"
+            : "payment";
+
+  return {
+    requiresSchedule: items.some(needsScheduleSelection),
+    requiresCustomer: customerRequiredItems.length > 0,
+    requiresWaiver: waiverRequiredQuantity > 0,
+    requiresChoices: choiceRequiredItems.length > 0,
+    missingSchedule: missingScheduleItems.length > 0,
+    missingCustomer: !hasCustomer,
+    missingWaiver,
+    missingChoices: missingChoiceItems.length > 0,
+    canPayNow: nextStep === "payment",
+    nextStep,
+    missingScheduleItems,
+    customerRequiredItems,
+    missingChoiceItems,
+    waiverRequiredQuantity,
+  };
 };
 
 export const positiveNumber = (value, fallback = 0) => {
@@ -85,4 +195,24 @@ export const getCartLineSubtotal = (item) => {
   }
 
   return Number((price * qty).toFixed(2));
+};
+
+export const buildPaidCheckoutPricingSummary = (basePricingSummary, payment) => {
+  const extraDiscount = Number(payment?.discountAmount || 0);
+  if (!extraDiscount) return basePricingSummary;
+
+  const currentDiscount = Number(basePricingSummary?.discountAmount || 0);
+  const nextDiscount = Math.round((currentDiscount + extraDiscount) * 100) / 100;
+  const discount = payment?.discount || {};
+  return {
+    ...basePricingSummary,
+    discountCode: discount.code || basePricingSummary?.discountCode || null,
+    discountName: discount.label || discount.name || basePricingSummary?.discountName || "POS payment discount",
+    discountType: discount.source === "coupon"
+      ? basePricingSummary?.discountType || "code"
+      : basePricingSummary?.discountType || "manual",
+    discountValue: Number(basePricingSummary?.discountValue || 0),
+    discountMaxValue: Number(basePricingSummary?.discountMaxValue || 0),
+    discountAmount: nextDiscount,
+  };
 };

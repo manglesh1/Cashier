@@ -3,10 +3,16 @@ import assert from "node:assert/strict";
 
 import {
   buildAutoBindPlan,
+  buildCheckInAllPlan,
   buildGuestTotals,
   buildSelectedProgress,
+  getBookingBalanceDue,
   getTicketBlocker,
+  isPaidBooking,
   isTicketReadyForCheckIn,
+  normalizeBookingTicketsPayload,
+  normalizeCheckInParticipantsPayload,
+  normalizeTicketSummaryPayload,
   summarizeRedeemFailures,
 } from "./checkInGuards.js";
 
@@ -26,6 +32,44 @@ function ticket(overrides = {}) {
 
 test("unpaid booking blocks ticket check-in in the POS guard", () => {
   assert.equal(getTicketBlocker(ticket(), { balanceDue: 12.5, now }), "payment_required");
+});
+
+test("paid booking status wins over stale balance fields", () => {
+  const booking = { paymentStatus: "paid", balance: 120, totalAmount: 120, amountPaid: 120 };
+
+  assert.equal(isPaidBooking(booking), true);
+  assert.equal(getBookingBalanceDue(booking), 0);
+});
+
+test("unpaid booking keeps explicit balance due", () => {
+  const booking = { paymentStatus: "pending", balanceDue: 45 };
+
+  assert.equal(isPaidBooking(booking), false);
+  assert.equal(getBookingBalanceDue(booking), 45);
+});
+
+test("same-day early arrival is allowed to check in (good will)", () => {
+  const laterToday = (() => { const d = new Date(now); d.setHours(23, 0, 0, 0); return d.toISOString(); })();
+  assert.equal(
+    getTicketBlocker(ticket({ validFrom: laterToday }), { balanceDue: 0, now }),
+    null
+  );
+});
+
+test("future-day booking is still too early to check in", () => {
+  const tomorrow = (() => { const d = new Date(now); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); return d.toISOString(); })();
+  assert.equal(
+    getTicketBlocker(ticket({ validFrom: tomorrow }), { balanceDue: 0, now }),
+    "not_yet_valid"
+  );
+});
+
+test("expired slot still blocks check-in", () => {
+  const past = new Date(now.getTime() - 3600 * 1000).toISOString();
+  assert.equal(
+    getTicketBlocker(ticket({ validUntil: past }), { balanceDue: 0, now }),
+    "expired"
+  );
 });
 
 test("waiver-required ticket without participant cannot check in", () => {
@@ -92,6 +136,57 @@ test("select-all/check-in-all guard exposes only actionable issued tickets", () 
   assert.equal(summarizeRedeemFailures(blocked), "1 waiver required, 1 link waiver first");
 });
 
+test("check-in all plan skips transferables, blocks missing waivers, and keeps valid guests", () => {
+  const rows = [
+    ticket({ ticketCode: "TRANSFERABLE", participantId: null, requiresWaiver: false }),
+    ticket({ ticketCode: "NO-HOLDER", participantId: null, requiresWaiver: true }),
+    ticket({ ticketCode: "NO-WAIVER", participantId: 2, requiresWaiver: true }),
+    ticket({ ticketCode: "READY", participantId: 1, requiresWaiver: true }),
+    ticket({ ticketCode: "DONE", status: "redeemed", participantId: 3, requiresWaiver: true }),
+  ];
+  const participantsById = new Map([
+    [1, { bookingParticipantId: 1, hasValidWaiver: true }],
+    [2, { bookingParticipantId: 2, hasValidWaiver: false }],
+    [3, { bookingParticipantId: 3, hasValidWaiver: true }],
+  ]);
+  const blockers = new Map(
+    rows.map((row) => [row.ticketCode, getTicketBlocker(row, { participantsById, now })])
+  );
+
+  assert.deepEqual(buildCheckInAllPlan({ tickets: rows, ticketBlockers: blockers }), {
+    readyCodes: ["READY"],
+    readyCount: 1,
+    blocked: [
+      { ticketCode: "NO-HOLDER", reason: "requires_waiver_no_holder" },
+      { ticketCode: "NO-WAIVER", reason: "requires_waiver" },
+    ],
+    skipped: [{ ticketCode: "TRANSFERABLE", reason: "transferable_without_participant" }],
+  });
+});
+
+test("Select all includes transferable tickets (no participant, no waiver) that check-in-all skips", () => {
+  // Real case: a paid party booking whose tickets have no participant linked
+  // and don't require a waiver. Each row's own checkbox is enabled, so "Select
+  // all" (which uses isTicketReadyForCheckIn) must include them — even though
+  // the AUTO "check in all" plan deliberately skips them as transferable.
+  const rows = [
+    ticket({ ticketCode: "PARTY-1" }),
+    ticket({ ticketCode: "PARTY-2" }),
+    ticket({ ticketCode: "DONE", status: "redeemed" }),
+  ];
+  const blockers = new Map(
+    rows.map((row) => [row.ticketCode, getTicketBlocker(row, { balanceDue: 0, now })])
+  );
+
+  // Select-all gate: both issued party tickets are selectable; redeemed isn't.
+  assert.deepEqual(
+    rows.filter((row) => isTicketReadyForCheckIn(row, blockers)).map((row) => row.ticketCode),
+    ["PARTY-1", "PARTY-2"]
+  );
+  // Auto check-in-all still skips them (no participant to auto-assign).
+  assert.deepEqual(buildCheckInAllPlan({ tickets: rows, ticketBlockers: blockers }).readyCodes, []);
+});
+
 test("selected booking progress separates ready, blocked, pending, and complete tickets", () => {
   const rows = [
     ticket({ ticketCode: "READY", participantId: 1 }),
@@ -139,6 +234,30 @@ test("selected progress falls back to redeemed ticket rows when summary is missi
     buildSelectedProgress({ tickets: rows, ticketBlockers: blockers, redeemedCount: undefined, totalCount: undefined }),
     { checkedIn: 1, total: 2, ready: 1, blocked: 0, pending: 1, percent: 50 }
   );
+});
+
+test("check-in detail normalizes flat and nested ticket API payloads", () => {
+  const rows = [
+    ticket({ ticketCode: "A" }),
+    ticket({ ticketCode: "B", status: "redeemed" }),
+  ];
+
+  assert.deepEqual(normalizeBookingTicketsPayload({ data: rows }), rows);
+  assert.deepEqual(normalizeBookingTicketsPayload({ data: { tickets: rows } }), rows);
+  assert.deepEqual(
+    normalizeTicketSummaryPayload({ data: { tickets: rows, summary: { total: 2, redeemed: 1 } } }, rows),
+    { total: 2, redeemed: 1, issued: 1, voided: 0, expired: 0 }
+  );
+});
+
+test("check-in detail normalizes participant payloads before rendering", () => {
+  const participants = [
+    { bookingParticipantId: 1, displayName: "Bimal Gayali" },
+  ];
+
+  assert.deepEqual(normalizeCheckInParticipantsPayload({ data: { participants } }), participants);
+  assert.deepEqual(normalizeCheckInParticipantsPayload({ participants }), participants);
+  assert.deepEqual(normalizeCheckInParticipantsPayload({ data: null }), []);
 });
 
 test("auto-bind plan prefers newly linked waiver holders and target ticket", () => {

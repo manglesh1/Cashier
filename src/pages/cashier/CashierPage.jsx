@@ -1,36 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import { CashierApp } from "./CashierApp";
 
 // Cashier shell. Fill the real viewport so catalog and cart panels can
 // handle their own scrolling on every POS screen size.
+//
+// Lucide is now bundled (see main.jsx) — no more CDN gate / Loading… state.
 export default function CashierPage() {
-  const [isLucideReady, setIsLucideReady] = useState(false);
-
-  // Load Lucide once. CashierApp's <Icon> component looks for window.lucide.
-  useEffect(() => {
-    if (window.lucide) {
-      setIsLucideReady(true);
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = "https://unpkg.com/lucide@latest";
-    script.async = true;
-    script.onload = () => {
-      setIsLucideReady(true);
-      if (window.lucide && window.lucide.createIcons) window.lucide.createIcons();
-    };
-    document.body.appendChild(script);
-    return () => {
-      document.body.removeChild(script);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (isLucideReady && window.lucide && window.lucide.createIcons) {
-      window.lucide.createIcons();
-    }
-  }, [isLucideReady]);
-
   return (
     <div
       data-pos="cashier"
@@ -55,13 +30,7 @@ export default function CashierPage() {
           flexDirection: "column",
         }}
       >
-        {isLucideReady ? (
-          <CashierApp />
-        ) : (
-          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            Loading...
-          </div>
-        )}
+        <CashierApp />
       </div>
     </div>
   );

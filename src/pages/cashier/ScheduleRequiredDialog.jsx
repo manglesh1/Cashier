@@ -5,321 +5,35 @@ import {
   clampCartQuantity,
   getCartLineSubtotal,
   getDefaultCartQuantity,
-  positiveInt,
 } from "./cartPricing";
-
-const formatDateValue = (date) => {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-};
-
-const addDays = (date, days) => {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-};
-
-const formatShortDate = (dateValue) =>
-  new Date(`${dateValue}T00:00:00`).toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
-
-const timeRangeFromSession = (session) =>
-  session?.displayName || session?.name || [session?.fromTime, session?.toTime].filter(Boolean).join(" - ");
-
-const getStartTime = (session) => String(timeRangeFromSession(session) || "").split(" - ")[0] || "";
-
-const getEndTime = (session) => String(timeRangeFromSession(session) || "").split(" - ")[1] || "";
-
-const getInclusionRoundingMode = (item) => {
-  const raw = String(item?.roundingMode || item?.rounding || "").toLowerCase();
-  return raw === "down" || raw === "round_down" || raw === "floor" ? "down" : "up";
-};
-
-const calculateEffectiveQty = (item, guestCount = 1) => {
-  const baseQty = Math.max(0, Number(item?.qty ?? item?.quantity ?? 0) || 0);
-  const guests = Math.max(1, Number(guestCount) || 1);
-  const perUnit = String(item?.perUnit || "per_booking");
-  if (perUnit === "per_guest") return baseQty * guests;
-  if (perUnit === "per_n_guests") {
-    const n = Math.max(1, Number(item?.perUnitN) || 1);
-    const groups = getInclusionRoundingMode(item) === "down"
-      ? (guests > 0 ? Math.max(1, Math.floor(guests / n)) : 0)
-      : Math.ceil(guests / n);
-    return baseQty * Math.max(0, groups);
-  }
-  return baseQty;
-};
-
-const getInclusionLabel = (item) =>
-  [item?.activityName, item?.variationName || item?.name]
-    .filter(Boolean)
-    .filter((value, index, arr) => arr.indexOf(value) === index)
-    .join(" - ") || "Included item";
-
-const getAutoIncludedItems = (variation) =>
-  (Array.isArray(variation?.itemsIncluded) ? variation.itemsIncluded : [])
-    .filter((includedItem) => includedItem?.fulfillmentMode !== "customer_choice");
-
-const getIncludedItemSummary = (variation, guestCount) =>
-  getAutoIncludedItems(variation)
-    .map((includedItem) => ({
-      key: `${includedItem.activityId || "item"}:${includedItem.variationId || includedItem.name || getInclusionLabel(includedItem)}`,
-      label: getInclusionLabel(includedItem),
-      quantity: calculateEffectiveQty(includedItem, guestCount),
-    }))
-    .filter((includedItem) => includedItem.quantity > 0);
-
-const expandChoiceItems = (includedItem) => {
-  const options = Array.isArray(includedItem?.variationOptions) ? includedItem.variationOptions : [];
-  if (!options.length) return [includedItem];
-
-  return options
-    .map((option) => ({
-      ...includedItem,
-      variationId: Number(option.variationId || option.id) || null,
-      variationName: option.variationName || option.name || option.label || "",
-      name: option.name || option.variationName || option.label || includedItem.activityName,
-      price: 0,
-      listedPrice: 0,
-      variationOptions: [],
-    }))
-    .filter((option) => option.variationId);
-};
-
-const getChoiceItemKey = (includedItem) =>
-  `${includedItem.choiceGroup || includedItem.activityName || "choice"}:${includedItem.activityId}:${includedItem.variationId || "base"}`;
-
-const getChoiceGroups = (variation = {}, guestCount = 1) => {
-  const items = Array.isArray(variation.itemsIncluded) ? variation.itemsIncluded : [];
-  const groups = new Map();
-
-  items
-    .filter((includedItem) => includedItem?.fulfillmentMode === "customer_choice")
-    .forEach((includedItem) => {
-      const groupName = includedItem.choiceGroup || `${includedItem.activityName || "Guest"} choice`;
-      const effectiveQty = calculateEffectiveQty(includedItem, guestCount);
-      if (effectiveQty <= 0) return;
-      if (!groups.has(groupName)) {
-        groups.set(groupName, {
-          key: groupName,
-          label: groupName.replace(/\s+choice$/i, ""),
-          choiceQuantity: effectiveQty,
-          items: [],
-        });
-      } else {
-        const group = groups.get(groupName);
-        group.choiceQuantity = Math.max(group.choiceQuantity, effectiveQty);
-      }
-      groups.get(groupName).items.push(...expandChoiceItems(includedItem));
-    });
-
-  return [...groups.values()].filter((group) => group.items.length > 0);
-};
-
-const buildResolvedInclusions = (variation, selections) => {
-  const items = Array.isArray(variation?.itemsIncluded) ? variation.itemsIncluded : [];
-  const selectedCounts = Object.values(selections || {})
-    .flat()
-    .reduce((acc, key) => {
-      acc[key] = (acc[key] || 0) + 1;
-      return acc;
-    }, {});
-
-  const includedItems = items
-    .filter((includedItem) => includedItem.fulfillmentMode !== "customer_choice")
-    .map((includedItem) => ({ ...includedItem, fulfillmentMode: "included" }));
-
-  const selectedChoiceItems = items
-    .filter((includedItem) => includedItem.fulfillmentMode === "customer_choice")
-    .flatMap(expandChoiceItems)
-    .filter((includedItem) => selectedCounts[getChoiceItemKey(includedItem)] > 0)
-    .map((includedItem) => ({
-      ...includedItem,
-      qty: selectedCounts[getChoiceItemKey(includedItem)],
-      quantity: selectedCounts[getChoiceItemKey(includedItem)],
-      perUnit: "per_booking",
-      perUnitN: null,
-      fulfillmentMode: "included",
-      selectedFromChoice: true,
-    }));
-
-  return [...includedItems, ...selectedChoiceItems];
-};
-
-const normalizeVariationId = (value) => String(value || "");
-
-const normalizeSlotIds = (value) => {
-  const values = Array.isArray(value) ? value : [value];
-  return values
-    .map((slotId) => Number(slotId))
-    .filter((slotId) => Number.isFinite(slotId) && slotId > 0)
-    .map(String);
-};
-
-const isVariationUnavailable = (variation) =>
-  variation?.isAvailable === false ||
-  (Array.isArray(variation?.resourceGroups) &&
-    variation.resourceGroups.some((group) => group?.isAvailable === false));
-
-const getDefaultGuestCount = (variation, item) =>
-  positiveInt(
-    variation?.includedGuests ||
-      variation?.minGuests ||
-      item?.includedGuests ||
-      item?.minGuests ||
-      getDefaultCartQuantity(item),
-    1
-  );
-
-const getMaxGuestCount = (variation) => {
-  const raw =
-    variation?.maxGuests ||
-    variation?.purchaseLimits?.max ||
-    variation?.maxPurchase ||
-    variation?.capacityRemaining ||
-    0;
-  const max = Math.floor(Number(raw) || 0);
-  return max > 0 ? max : null;
-};
-
-const getResourceGroupRoomLimit = (group) =>
-  Math.max(1, Number(group?.maxResourcesPerBooking || group?.requiredCount || 1) || 1);
-
-const getAvailableResourceOptions = (group) =>
-  (group?.options || []).filter((option) => option?.isAvailable && option?.slotId);
-
-const getVariationAvailabilitySummary = (variation, session) => {
-  if (isVariationUnavailable(variation)) return variation?.unavailableReason || "Unavailable";
-
-  const remaining = Math.max(
-    0,
-    Number(session?.capacityRemaining ?? variation?.capacityRemaining ?? 0) || 0
-  );
-  const label =
-    variation?.availabilityLabel ||
-    session?.availabilityLabel ||
-    (remaining === 1 ? "spot" : "spots");
-  return `${remaining} ${label.replace(/\s+left$/i, "")} left`;
-};
-
-const chooseResourceSlots = (group, guestCount = 1) => {
-  const explicit = (group?.selectedSlotIds || group?.candidateSlotIds || [])
-    .map(String)
-    .filter(Boolean);
-  if (explicit.length) return explicit;
-
-  const roomLimit = getResourceGroupRoomLimit(group);
-  const available = getAvailableResourceOptions(group)
-    .sort((left, right) => {
-      const leftCap = Number(left.availableCapacity) || 0;
-      const rightCap = Number(right.availableCapacity) || 0;
-      if (leftCap !== rightCap) return leftCap - rightCap;
-      return String(left.resourceName || "").localeCompare(String(right.resourceName || ""));
-    });
-
-  const singleFit = available.find((option) => Number(option.availableCapacity || 0) >= guestCount);
-  if (singleFit) return [String(singleFit.slotId)];
-
-  return [...available]
-    .sort((left, right) => (Number(right.availableCapacity) || 0) - (Number(left.availableCapacity) || 0))
-    .slice(0, roomLimit)
-    .map((option) => String(option.slotId));
-};
-
-const getResourceGroupKey = (variation, group) =>
-  `${variation?.variationId || "variation"}:${group?.groupKey || `${group?.fromTime || ""}:${group?.toTime || ""}`}`;
-
-const getVariationSlotIds = (variation) => {
-  const resourceIds = (variation?.resources || [])
-    .map((resource) => resource?.slotId)
-    .filter(Boolean);
-  const groupIds = (variation?.resourceGroups || [])
-    .flatMap((group) => group?.options || [])
-    .map((option) => option?.slotId)
-    .filter(Boolean);
-  return [...resourceIds, ...groupIds].map(String);
-};
-
-const sessionMatchesCartLine = (session, variationId, slotIds, timeRange) => {
-  const variations = session?.variations || [];
-  const matchingVariation = variations.find((variation) =>
-    normalizeVariationId(variation.variationId) === normalizeVariationId(variationId)
-  );
-  const candidates = matchingVariation ? [matchingVariation] : variations;
-  const slotMatch =
-    slotIds.length > 0 &&
-    candidates.some((variation) => {
-      const variationSlotIds = new Set(getVariationSlotIds(variation));
-      return slotIds.some((slotId) => variationSlotIds.has(String(slotId)));
-    });
-  if (slotMatch) return true;
-  return Boolean(timeRange && timeRangeFromSession(session) === timeRange);
-};
-
-const buildResourceSelectionsFromSlotIds = (variation, slotIds, guestCount) => {
-  if (!slotIds.length) return buildDefaultResourceSelections(variation, guestCount);
-  const selected = new Set(slotIds.map(String));
-  const selections = {};
-  for (const group of variation?.resourceGroups || []) {
-    const key = getResourceGroupKey(variation, group);
-    const ids = (group.options || [])
-      .map((option) => option?.slotId)
-      .filter((slotId) => selected.has(String(slotId)))
-      .map(String);
-    selections[key] = ids.length ? ids : chooseResourceSlots(group, guestCount);
-  }
-  return selections;
-};
-
-const buildChoiceDraftsFromItem = (variation, guestCount, item) => {
-  const groups = getChoiceGroups(variation, guestCount);
-  const savedSelections = item?.choiceSelections || {};
-  return groups.reduce((acc, group) => {
-    const saved =
-      savedSelections[group.key] ||
-      savedSelections[`${variation.variationId}:${group.key}`] ||
-      null;
-    if (Array.isArray(saved)) {
-      acc[`${variation.variationId}:${group.key}`] = saved;
-    }
-    return acc;
-  }, {});
-};
-
-const getSelectedResourceSlots = (variation, resourceSelections, guestCount) => {
-  const groups = variation?.resourceGroups || [];
-  if (groups.length) {
-    return groups.flatMap((group) => {
-      const key = getResourceGroupKey(variation, group);
-      const availableIds = new Set(
-        (group.options || [])
-          .filter((option) => option?.isAvailable)
-          .map((option) => String(option.slotId))
-      );
-      return (resourceSelections[key] || chooseResourceSlots(group, guestCount))
-        .map(String)
-        .filter((slotId) => availableIds.has(slotId));
-    });
-  }
-
-  return (variation?.resources || [])
-    .map((resource) => resource.slotId)
-    .filter(Boolean)
-    .map(String);
-};
-
-const buildDefaultResourceSelections = (variation, guestCount) => {
-  const selections = {};
-  for (const group of variation?.resourceGroups || []) {
-    selections[getResourceGroupKey(variation, group)] = chooseResourceSlots(group, guestCount);
-  }
-  return selections;
-};
+import {
+  addDays,
+  buildChoiceDraftsFromItem,
+  buildDefaultResourceSelections,
+  buildResourceSelectionsFromSlotIds,
+  buildScheduledLine,
+  chooseResourceSlots,
+  formatDateValue,
+  formatShortDate,
+  getChoiceGroups,
+  getChoiceItemKey,
+  getDefaultGuestCount,
+  getIncludedItemSummary,
+  getInclusionLabel,
+  getMaxGuestCount,
+  getResourceGroupKey,
+  getResourceGroupRoomLimit,
+  getSelectedResourceSlots,
+  getStartTime,
+  getVariationAvailabilitySummary,
+  getVariationSlotIds,
+  isSessionNotEnded,
+  isVariationUnavailable,
+  normalizeSlotIds,
+  normalizeVariationId,
+  sessionMatchesCartLine,
+  timeRangeFromSession,
+} from "./scheduleHelpers";
 
 export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
   const initialDate = item?.selectedDate || item?.date || formatDateValue(new Date());
@@ -340,6 +54,18 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
 
   const sessionsData = data?.data || data || {};
   const sessions = Array.isArray(sessionsData.sessions) ? sessionsData.sessions : [];
+
+  // For TODAY, offer every slot that hasn't ENDED yet — future slots AND
+  // currently-running ones — so a cashier can manually put a walk-in into an
+  // ongoing slot at their discretion. The join-grace / min-remaining settings
+  // intentionally do NOT apply here; they gate only the auto-assign flow
+  // (CashierApp.autoAssignAndAdd). Other dates show every slot. Grid uses
+  // `visibleSessions`; matching/hydration keeps the full `sessions` list.
+  const isToday = selectedDate === formatDateValue(new Date());
+  const nowMinutes = (() => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); })();
+  const visibleSessions = isToday
+    ? sessions.filter((s) => isSessionNotEnded(s, nowMinutes))
+    : sessions;
 
   useEffect(() => {
     const slotIds = normalizeSlotIds(item?.slotId);
@@ -507,34 +233,22 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
 
   const handleAdd = () => {
     if (!readyToAdd || !selectedVariation) return;
-    const timeRange = timeRangeFromSession(selectedSession);
     const resolvedChoiceSelections = choiceGroups.reduce((acc, group) => {
       acc[group.key] = choiceSelections[`${selectedVariation.variationId}:${group.key}`] || [];
       return acc;
     }, {});
-    const nextItem = {
-      ...item,
-      variationId: selectedVariation.variationId,
-      variationName: selectedVariation.name,
-      price: Number(selectedVariation.cost ?? selectedVariation.price ?? item.price ?? 0),
-      pricingMode: selectedVariation.pricingMode || item.pricingMode || null,
-      includedGuests: selectedVariation.includedGuests ?? item.includedGuests ?? null,
-      additionalPersonPrice: selectedVariation.additionalPersonPrice ?? item.additionalPersonPrice ?? null,
-      minGuests: selectedVariation.minGuests ?? item.minGuests ?? null,
-      maxGuests: selectedVariation.maxGuests ?? item.maxGuests ?? null,
-      slotId: slotIds.length > 1 ? slotIds.map(Number) : Number(slotIds[0]),
+    const nextItem = buildScheduledLine({
+      item,
+      section,
       selectedDate,
-      timeRange,
-      bundleInclusions: choiceGroups.length
-        ? buildResolvedInclusions(selectedVariation, resolvedChoiceSelections)
-        : selectedVariation.itemsIncluded || [],
-      choiceSelections: resolvedChoiceSelections,
+      session: selectedSession,
+      variation: selectedVariation,
+      guestCount,
+      slotIds,
       resourceSelections,
-      qty: guestCount,
-      meta: [section?.title || item.sub, formatShortDate(selectedDate), timeRange]
-        .filter(Boolean)
-        .join(" - "),
-    };
+      resolvedChoiceSelections,
+      hasChoiceGroups: choiceGroups.length > 0,
+    });
     onAdd?.(nextItem, section);
     onClose?.();
   };
@@ -655,11 +369,17 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
               <EmptyState icon="loader" title="Checking availability" text="Loading live slots for this date..." />
             ) : error ? (
               <EmptyState icon="triangle-alert" title="Availability unavailable" text="Try another date or refresh the POS." />
-            ) : sessions.length === 0 ? (
-              <EmptyState icon="calendar-x" title="No slots found" text="This product has no active slots on this date." />
+            ) : visibleSessions.length === 0 ? (
+              <EmptyState
+                icon="calendar-x"
+                title={isToday && sessions.length > 0 ? "No more slots today" : "No slots found"}
+                text={isToday && sessions.length > 0
+                  ? "Today's remaining slots have passed. Pick another day."
+                  : "This product has no active slots on this date."}
+              />
             ) : (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(132px, 1fr))", gap: 10 }}>
-                {sessions.map((session) => {
+                {visibleSessions.map((session) => {
                   const active = selectedSession === session;
                   const hasVariation = (session.variations || []).some((variation) => !isVariationUnavailable(variation));
                   const available = !session.isBooked && Number(session.capacityRemaining || 0) > 0 && hasVariation;

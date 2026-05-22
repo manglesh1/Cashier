@@ -13,6 +13,93 @@ export const redeemReasonLabel = (reason) => {
   return labels[reason] || reason || "failed";
 };
 
+const normalizedStatus = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+
+export const isPaidBooking = (booking = {}) => {
+  const status = normalizedStatus(booking.paymentStatus ?? booking.payment_status);
+  if (["paid", "fully_paid", "settled", "completed"].includes(status)) return true;
+  if (["unpaid", "pending", "partial", "partially_paid", "failed"].includes(status)) return false;
+
+  const explicitBalance = Number(
+    booking.balance ?? booking.balanceDue ?? booking.remainingBalance ?? booking.amountDue
+  );
+  if (Number.isFinite(explicitBalance)) return explicitBalance <= 0;
+
+  const total = Number(booking.totalAmount ?? booking.total);
+  const paid = Number(booking.amountPaid ?? booking.paidAmount ?? booking.totalPaid);
+  return Number.isFinite(total) && Number.isFinite(paid) && paid >= total;
+};
+
+export const getBookingBalanceDue = (booking = {}) => {
+  if (isPaidBooking(booking)) return 0;
+  return Math.max(
+    0,
+    Number(booking.balance ?? booking.balanceDue ?? booking.remainingBalance ?? booking.amountDue ?? 0)
+  );
+};
+
+const firstArray = (...values) => {
+  for (const value of values) {
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+};
+
+const safeCount = (...values) => {
+  for (const value of values) {
+    const count = Number(value);
+    if (Number.isFinite(count)) return Math.max(0, count);
+  }
+  return null;
+};
+
+export const normalizeBookingTicketsPayload = (payload = {}) => {
+  const data = payload?.data;
+  return firstArray(
+    data,
+    data?.tickets,
+    data?.rows,
+    data?.items,
+    payload?.tickets,
+    payload?.rows,
+    payload?.items
+  ).filter((row) => row && typeof row === "object");
+};
+
+export const normalizeCheckInParticipantsPayload = (payload = {}) => {
+  const data = payload?.data;
+  return firstArray(
+    data?.participants,
+    data?.rows,
+    data?.items,
+    payload?.participants,
+    payload?.rows,
+    payload?.items,
+    data
+  ).filter((row) => row && typeof row === "object");
+};
+
+export const normalizeTicketSummaryPayload = (payload = {}, tickets = []) => {
+  const data = payload?.data;
+  const raw = payload?.summary || data?.summary || data?.ticketSummary || data?.ticketsSummary || {};
+  const total = safeCount(raw.total, raw.totalTickets, raw.count, tickets.length) ?? 0;
+  const redeemedFallback = tickets.filter(isRedeemedTicket).length;
+  const redeemed = safeCount(raw.redeemed, raw.redeemedCount, raw.checkedIn, redeemedFallback) ?? 0;
+
+  return {
+    ...raw,
+    total,
+    redeemed,
+    issued: safeCount(raw.issued, raw.issuedCount) ?? Math.max(0, total - redeemed),
+    voided: safeCount(raw.voided, raw.refunded, raw.voidedCount) ?? 0,
+    expired: safeCount(raw.expired, raw.expiredCount) ?? 0,
+  };
+};
+
 export const redeemReasonMessage = (reason, ticket) => {
   const start = ticket?.validFrom
     ? new Date(ticket.validFrom).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
@@ -44,7 +131,15 @@ export const getTicketBlocker = (
   if (balanceDue > 0) return "payment_required";
 
   if (ticket.validUntil && new Date(ticket.validUntil) < now) return "expired";
-  if (ticket.validFrom && new Date(ticket.validFrom) > now) return "not_yet_valid";
+  // Early arrival: a slot starting later TODAY can be checked in by the
+  // cashier (good will — paid/waiver-ready guests aren't turned away). Only
+  // a FUTURE-DAY slot is still "too early".
+  if (ticket.validFrom) {
+    const validFrom = new Date(ticket.validFrom);
+    if (validFrom > now && validFrom.toDateString() !== now.toDateString()) {
+      return "not_yet_valid";
+    }
+  }
 
   if (ticket.requiresWaiver) {
     if (!ticket.participantId) return "requires_waiver_no_holder";
@@ -57,6 +152,36 @@ export const getTicketBlocker = (
 
 export const isTicketReadyForCheckIn = (ticket, ticketBlockers) =>
   ticket?.status === "issued" && !ticketBlockers.get(ticket.ticketCode);
+
+const ticketRequiresWaiver = (ticket) =>
+  Boolean(ticket?.requiresWaiver || ticket?.activity?.activityDetails?.requiresWaiver);
+
+export const buildCheckInAllPlan = ({ tickets = [], ticketBlockers = new Map() } = {}) => {
+  const readyCodes = [];
+  const blocked = [];
+  const skipped = [];
+
+  tickets.forEach((ticket) => {
+    const reason = ticketBlockers.get(ticket.ticketCode);
+    if (reason) {
+      if (reason !== "already_redeemed") blocked.push({ ticketCode: ticket.ticketCode, reason });
+      return;
+    }
+    if (!isTicketReadyForCheckIn(ticket, ticketBlockers)) return;
+    if (!ticket.participantId && !ticketRequiresWaiver(ticket)) {
+      skipped.push({ ticketCode: ticket.ticketCode, reason: "transferable_without_participant" });
+      return;
+    }
+    readyCodes.push(ticket.ticketCode);
+  });
+
+  return {
+    readyCodes,
+    readyCount: readyCodes.length,
+    blocked,
+    skipped,
+  };
+};
 
 export const summarizeRedeemFailures = (failures = []) => {
   const counts = failures.reduce((acc, failure) => {
