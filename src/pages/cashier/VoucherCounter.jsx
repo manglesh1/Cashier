@@ -1,11 +1,5 @@
-// VoucherCounter — cashier screen for scanning a voucher pack token
-// (printed receipt, customer-portal QR, email link) and either
-// redeeming it as a stock-item credit (pizza, swag, etc.) or showing
-// the cashier where to scan it next (slot-bound voucher → regular
-// ticket scanner once it's been scheduled).
-//
-// Designed scanner-first like the existing Redeem screen: input
-// auto-focuses on mount and after every action.
+// VoucherCounter - scanner-first cashier screen for voucher packs,
+// memberships, and gift cards.
 
 import React, { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -17,73 +11,161 @@ import {
   useLazyLookupGiftCardQuery,
   useRedeemGiftCardMutation,
 } from "../../features/vouchers/voucherApi";
+import { useRedeemTicketMutation } from "../../features/tickets/ticketApi";
+import { getTerminal } from "../../lib/terminal";
+import { usePersistentState } from "../../lib/usePersistentState";
 
 function formatExpiry(ts) {
-  if (!ts) return "no expiry";
+  if (!ts) return "No expiry";
   const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "no expiry";
-  const now = Date.now();
-  const ms = d.getTime() - now;
-  const days = Math.round(ms / 86400000);
-  if (days < 0) return `expired ${-days}d ago`;
-  if (days === 0) return "expires today";
-  if (days === 1) return "expires tomorrow";
-  return `expires in ${days}d (${d.toLocaleDateString()})`;
+  if (Number.isNaN(d.getTime())) return "No expiry";
+  const days = Math.round((d.getTime() - Date.now()) / 86400000);
+  if (days < 0) return `Expired ${Math.abs(days)}d ago`;
+  if (days === 0) return "Expires today";
+  if (days === 1) return "Expires tomorrow";
+  return `Expires in ${days}d`;
 }
+
+function formatTime(ts) {
+  return new Date(ts).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function titleForRecord(record) {
+  if (!record) return "Ready for scan";
+  if (record.kind === "entitlement") return "Stock-item credit";
+  if (record.kind === "ticket") return "Stock-item credit";
+  if (record.kind === "membership") return "Membership pass";
+  if (record.kind === "voucher") return "Slot-bound voucher";
+  if (record.kind === "gift_card") return "Gift card";
+  return "Voucher";
+}
+
+function toneForStatus(status) {
+  const s = String(status || "").toLowerCase();
+  if (["active", "paid", "open"].includes(s)) return "success";
+  if (["exhausted", "redeemed"].includes(s)) return "neutral";
+  if (["expired", "cancelled", "voided"].includes(s)) return "danger";
+  return "warning";
+}
+
+const toneStyles = {
+  success: {
+    bg: "#EAF8EF",
+    border: "#1F9D55",
+    fg: "#137A35",
+    soft: "#DDF3E3",
+  },
+  warning: {
+    bg: "#FFF8E1",
+    border: "#E9A100",
+    fg: "#7A5400",
+    soft: "#FFF1CC",
+  },
+  danger: {
+    bg: "#FCE2DA",
+    border: "#D6361A",
+    fg: "#8C2410",
+    soft: "#FCE2DA",
+  },
+  neutral: {
+    bg: "var(--ink-50)",
+    border: "var(--ink-300)",
+    fg: "var(--ink-700)",
+    soft: "var(--ink-100)",
+  },
+  info: {
+    bg: "#D2F1F4",
+    border: "#18B8C9",
+    fg: "#08555E",
+    soft: "#D2F1F4",
+  },
+};
 
 export function VoucherCounter() {
   const inputRef = useRef(null);
   const [token, setToken] = useState("");
-  const [active, setActive] = useState(null); // resolved record from lookup
+  const [active, setActive] = useState(null);
   const [error, setError] = useState(null);
-  const [recent, setRecent] = useState([]); // [{ at, ok, kind, label, qty }]
-  const [lookup, { isFetching }] = useLazyLookupVoucherByTokenQuery();
-  const [redeem, { isLoading: redeeming }] = useRedeemEntitlementMutation();
-  const [redeemMembership, { isLoading: redeemingMembership }] =
-    useRedeemMembershipMutation();
-  const [gcLookup, { isFetching: gcLooking }] = useLazyLookupGiftCardQuery();
-  const [gcRedeem, { isLoading: gcRedeeming }] = useRedeemGiftCardMutation();
-
-  // Gift card sub-flow state — separate from the scanner since cards
-  // are looked up by code+PIN, not by QR token.
-  const [tab, setTab] = useState("scan"); // "scan" | "giftcard"
+  // Persisted so "Recent scans" survives a hard refresh / kiosk reload.
+  const [recent, setRecent] = usePersistentState("cashier:recent:vouchers", []);
+  const [tab, setTab] = useState("scan");
   const [gcCode, setGcCode] = useState("");
   const [gcPin, setGcPin] = useState("");
   const [gcCard, setGcCard] = useState(null);
   const [gcAmount, setGcAmount] = useState("");
 
+  const [lookup, { isFetching }] = useLazyLookupVoucherByTokenQuery();
+  const [redeem, { isLoading: redeeming }] = useRedeemEntitlementMutation();
+  const [redeemTicket, { isLoading: redeemingTicket }] = useRedeemTicketMutation();
+  const [redeemMembership, { isLoading: redeemingMembership }] =
+    useRedeemMembershipMutation();
+  const [gcLookup, { isFetching: gcLooking }] = useLazyLookupGiftCardQuery();
+  const [gcRedeem, { isLoading: gcRedeeming }] = useRedeemGiftCardMutation();
+
   useEffect(() => {
     inputRef.current?.focus();
-  }, []);
+  }, [tab]);
 
-  const focusInput = () => setTimeout(() => inputRef.current?.focus(), 0);
+  const focusInput = () => {
+    setTimeout(() => inputRef.current?.focus(), 0);
+  };
+
+  const pushRecent = (entry) => {
+    setRecent((prev) =>
+      [
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          at: Date.now(),
+          ...entry,
+        },
+        ...prev,
+      ].slice(0, 12)
+    );
+  };
 
   const submit = async (raw) => {
-    const t = String(raw || token).trim();
-    if (!t) return;
+    const scanned = String(raw || token).trim();
+    if (!scanned) return;
     setToken("");
     setError(null);
     setActive(null);
     try {
-      const res = await lookup(t).unwrap();
+      const res = await lookup(scanned).unwrap();
       const data = res?.data;
-      if (!data?.kind) {
-        throw new Error("Unrecognized voucher.");
-      }
+      if (!data?.kind) throw new Error("Unrecognized voucher.");
       setActive(data);
+      pushRecent({
+        ok: true,
+        tone: toneForStatus(data.status),
+        action: "Scanned",
+        title: titleForRecord(data),
+        detail: data.kind === "membership"
+          ? `Member #${data.membershipId}`
+          : data.kind === "entitlement"
+            ? `Entitlement #${data.entitlementId}`
+            : data.kind === "ticket"
+              ? `Ticket ${data.ticketCode}`
+              : `Voucher #${data.bookingItemId}`,
+        meta: data.status || "active",
+      });
     } catch (err) {
       const msg = err?.data?.message || err?.message || "Voucher not found.";
       setError(msg);
+      pushRecent({
+        ok: false,
+        tone: "danger",
+        action: "Rejected",
+        title: "Scan failed",
+        detail: scanned,
+        meta: msg,
+      });
       toast.error(msg, { duration: 3500 });
     } finally {
       focusInput();
-    }
-  };
-
-  const handleKey = (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      submit(e.target.value);
     }
   };
 
@@ -94,44 +176,71 @@ export function VoucherCounter() {
         entitlementId: active.entitlementId,
         quantity: 1,
       }).unwrap();
-      const remainingQty = res?.data?.remainingQty ?? "?";
-      const status = res?.data?.status;
-      toast.success(
-        `Redeemed · ${remainingQty} left${
-          status === "exhausted" ? " (now exhausted)" : ""
-        }`
-      );
-      setRecent((prev) =>
-        [
-          {
-            at: Date.now(),
-            ok: true,
-            kind: "entitlement",
-            label: `Entitlement #${active.entitlementId}`,
-            qty: remainingQty,
-          },
-          ...prev,
-        ].slice(0, 8)
-      );
-      setActive({ ...active, remainingQty, status });
-      if (status === "exhausted") {
-        setActive(null);
-      }
+      const remainingQty = res?.data?.remainingQty ?? 0;
+      const status = res?.data?.status || active.status;
+      toast.success(`Redeemed 1 - ${remainingQty} left`);
+      pushRecent({
+        ok: true,
+        tone: remainingQty > 0 ? "success" : "neutral",
+        action: "Redeemed",
+        title: "Stock-item credit",
+        detail: `Entitlement #${active.entitlementId}`,
+        meta: `${remainingQty} left`,
+      });
+      const next = { ...active, remainingQty, status };
+      setActive(status === "exhausted" ? null : next);
     } catch (err) {
       const msg = err?.data?.message || "Redemption failed.";
+      pushRecent({
+        ok: false,
+        tone: "danger",
+        action: "Failed",
+        title: "Stock-item credit",
+        detail: `Entitlement #${active.entitlementId}`,
+        meta: msg,
+      });
       toast.error(msg);
-      setRecent((prev) =>
-        [
-          {
-            at: Date.now(),
-            ok: false,
-            kind: "entitlement",
-            label: `Entitlement #${active.entitlementId}`,
-            qty: msg,
-          },
-          ...prev,
-        ].slice(0, 8)
+    } finally {
+      focusInput();
+    }
+  };
+
+  const handleRedeemTicket = async () => {
+    if (active?.kind !== "ticket") return;
+    const terminal = getTerminal();
+    try {
+      await redeemTicket({
+        ticketCode: active.ticketCode,
+        terminalDeviceId: terminal?.deviceId || null,
+        gateOrZone: terminal?.deviceName || "Voucher counter",
+        allowEarlyCheckIn: true,
+      }).unwrap();
+      const remainingQty = Math.max(0, (active.remainingQty ?? 1) - 1);
+      toast.success(remainingQty > 0 ? `Redeemed 1 - ${remainingQty} left` : "Redeemed");
+      pushRecent({
+        ok: true,
+        tone: remainingQty > 0 ? "success" : "neutral",
+        action: "Redeemed",
+        title: "Stock-item credit",
+        detail: `Ticket ${active.ticketCode}`,
+        meta: `${remainingQty} left`,
+      });
+      setActive(
+        remainingQty > 0
+          ? { ...active, remainingQty, redemptionCount: (active.redemptionCount || 0) + 1 }
+          : null
       );
+    } catch (err) {
+      const msg = err?.data?.error || err?.data?.message || "Redemption failed.";
+      pushRecent({
+        ok: false,
+        tone: "danger",
+        action: "Failed",
+        title: "Stock-item credit",
+        detail: `Ticket ${active.ticketCode}`,
+        meta: msg,
+      });
+      toast.error(msg);
     } finally {
       focusInput();
     }
@@ -144,40 +253,28 @@ export function VoucherCounter() {
         membershipId: active.membershipId,
         activityId: null,
       }).unwrap();
-      const data = res?.data;
-      toast.success(
-        `Member checked in · ${data.redemptionsToday} use${
-          data.redemptionsToday === 1 ? "" : "s"
-        } today`
-      );
-      setRecent((prev) =>
-        [
-          {
-            at: Date.now(),
-            ok: true,
-            kind: "membership",
-            label: `Member #${active.membershipId}`,
-            qty: `${data.redemptionsToday} today`,
-          },
-          ...prev,
-        ].slice(0, 8)
-      );
-      setActive({ ...active, redemptionsToday: data.redemptionsToday });
+      const data = res?.data || {};
+      toast.success(`Member checked in - ${data.redemptionsToday || 0} today`);
+      pushRecent({
+        ok: true,
+        tone: "success",
+        action: "Checked in",
+        title: "Membership pass",
+        detail: `Member #${active.membershipId}`,
+        meta: `${data.redemptionsToday || 0} today`,
+      });
+      setActive({ ...active, redemptionsToday: data.redemptionsToday || 0 });
     } catch (err) {
       const msg = err?.data?.message || "Member redemption failed.";
+      pushRecent({
+        ok: false,
+        tone: "danger",
+        action: "Failed",
+        title: "Membership pass",
+        detail: `Member #${active.membershipId}`,
+        meta: msg,
+      });
       toast.error(msg);
-      setRecent((prev) =>
-        [
-          {
-            at: Date.now(),
-            ok: false,
-            kind: "membership",
-            label: `Member #${active.membershipId}`,
-            qty: msg,
-          },
-          ...prev,
-        ].slice(0, 8)
-      );
     } finally {
       focusInput();
     }
@@ -199,20 +296,38 @@ export function VoucherCounter() {
         return;
       }
       setGcCard(card);
-      setGcAmount(Number(card.currentBalance).toFixed(2));
+      setActive({ ...card, kind: "gift_card" });
+      setGcAmount(Number(card.currentBalance || 0).toFixed(2));
+      pushRecent({
+        ok: true,
+        tone: toneForStatus(card.status),
+        action: "Looked up",
+        title: "Gift card",
+        detail: card.code,
+        meta: `$${Number(card.currentBalance || 0).toFixed(2)}`,
+      });
     } catch (err) {
-      toast.error(err?.data?.message || "Lookup failed");
+      const msg = err?.data?.message || "Lookup failed";
+      pushRecent({
+        ok: false,
+        tone: "danger",
+        action: "Rejected",
+        title: "Gift card lookup",
+        detail: gcCode.trim().toUpperCase() || "No code",
+        meta: msg,
+      });
+      toast.error(msg);
     }
   };
 
   const handleGcRedeem = async () => {
     if (!gcCard) return;
-    const amt = Number(gcAmount);
-    if (!Number.isFinite(amt) || amt <= 0) {
+    const amount = Number(gcAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
       toast.error("Enter a positive amount");
       return;
     }
-    if (amt > Number(gcCard.currentBalance)) {
+    if (amount > Number(gcCard.currentBalance)) {
       toast.error(`Card has only $${Number(gcCard.currentBalance).toFixed(2)}`);
       return;
     }
@@ -220,479 +335,829 @@ export function VoucherCounter() {
       const res = await gcRedeem({
         code: gcCard.code,
         pin: gcPin.trim(),
-        amount: amt,
+        amount,
       }).unwrap();
-      const data = res?.data;
-      toast.success(
-        `Redeemed $${amt.toFixed(2)} · $${Number(data.balanceAfter).toFixed(2)} remaining`
-      );
-      setRecent((prev) =>
-        [
-          {
-            at: Date.now(),
-            ok: true,
-            kind: "gift_card",
-            label: `Card ${gcCard.code}`,
-            qty: `$${Number(data.balanceAfter).toFixed(2)} left`,
-          },
-          ...prev,
-        ].slice(0, 8)
-      );
-      setGcCard({ ...gcCard, currentBalance: data.balanceAfter, status: data.status });
+      const data = res?.data || {};
+      const balanceAfter = Number(data.balanceAfter || 0);
+      toast.success(`Redeemed $${amount.toFixed(2)} - $${balanceAfter.toFixed(2)} left`);
+      pushRecent({
+        ok: true,
+        tone: balanceAfter > 0 ? "success" : "neutral",
+        action: "Redeemed",
+        title: "Gift card",
+        detail: gcCard.code,
+        meta: `$${balanceAfter.toFixed(2)} left`,
+      });
+      const nextCard = { ...gcCard, currentBalance: balanceAfter, status: data.status };
+      setGcCard(data.status === "exhausted" ? null : nextCard);
+      setActive(data.status === "exhausted" ? null : { ...nextCard, kind: "gift_card" });
       setGcAmount("");
       if (data.status === "exhausted") {
-        setGcCard(null);
         setGcCode("");
         setGcPin("");
       }
     } catch (err) {
-      toast.error(err?.data?.message || "Redeem failed");
+      const msg = err?.data?.message || "Redeem failed";
+      pushRecent({
+        ok: false,
+        tone: "danger",
+        action: "Failed",
+        title: "Gift card",
+        detail: gcCard.code,
+        meta: msg,
+      });
+      toast.error(msg);
     }
   };
 
+  const busy = isFetching || redeeming || redeemingTicket || redeemingMembership || gcLooking || gcRedeeming;
+
   return (
-    <div className="cashier-page">
-      <header className="cashier-page__header">
-        <h1>Voucher Counter</h1>
-        <p style={{ color: "var(--text-muted)" }}>
-          Scan a voucher pack QR / digital pass, or look up a gift card by
-          code + PIN. Jump-pass vouchers schedule via the portal and re-scan
-          at the gate.
-        </p>
-      </header>
-
-      <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-        <button
-          type="button"
-          className={`cashier-button ${tab === "scan" ? "cashier-button--primary" : ""}`}
-          onClick={() => setTab("scan")}
-        >
-          Scan token
-        </button>
-        <button
-          type="button"
-          className={`cashier-button ${tab === "giftcard" ? "cashier-button--primary" : ""}`}
-          onClick={() => setTab("giftcard")}
-        >
-          Gift card lookup
-        </button>
-      </div>
-
-      {tab === "scan" && (
-      <div
+    <div
+      style={{
+        flex: 1,
+        minWidth: 0,
+        minHeight: 0,
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr) clamp(320px, 28vw, 420px)",
+        background: "var(--ink-25)",
+        overflow: "hidden",
+      }}
+    >
+      <main
         style={{
+          minWidth: 0,
+          minHeight: 0,
           display: "flex",
-          gap: 8,
-          marginBottom: 16,
-          alignItems: "center",
+          flexDirection: "column",
+          overflow: "hidden",
         }}
       >
-        <input
-          ref={inputRef}
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          onKeyDown={handleKey}
-          placeholder="Scan QR or paste token…"
-          className="cashier-input"
-          style={{ flex: 1, fontSize: 16, padding: 12 }}
-          autoComplete="off"
-        />
-        <button
-          type="button"
-          className="cashier-button cashier-button--primary"
-          onClick={() => submit(token)}
-          disabled={isFetching || !token.trim()}
+        <div
+          style={{
+            padding: "24px 28px 20px",
+            background: "var(--ink-25)",
+            borderBottom: "1px solid var(--ink-100)",
+            flexShrink: 0,
+          }}
         >
-          Look up
-        </button>
-      </div>
-      )}
-
-      {tab === "giftcard" && (
-        <div style={{ marginBottom: 16 }}>
-          {!gcCard ? (
-            <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr auto", gap: 8 }}>
-              <input
-                value={gcCode}
-                onChange={(e) => setGcCode(e.target.value.toUpperCase())}
-                placeholder="XXXX-XXXX-XXXX"
-                className="cashier-input"
-                style={{ fontSize: 16, padding: 12, fontFamily: "monospace" }}
-                autoComplete="off"
-              />
-              <input
-                value={gcPin}
-                onChange={(e) => setGcPin(e.target.value.replace(/\D/g, ""))}
-                placeholder="PIN"
-                inputMode="numeric"
-                maxLength={4}
-                className="cashier-input"
-                style={{ fontSize: 16, padding: 12 }}
-                autoComplete="off"
-                type="password"
-              />
-              <button
-                type="button"
-                className="cashier-button cashier-button--primary"
-                onClick={handleGcLookup}
-                disabled={gcLooking || !gcCode.trim() || !gcPin.trim()}
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "center" }}>
+            <div>
+              <div className="eyebrow">Voucher roller</div>
+              <h2
+                style={{
+                  margin: "4px 0 4px",
+                  fontFamily: "var(--font-display)",
+                  fontSize: 30,
+                  lineHeight: 1.05,
+                  fontWeight: 800,
+                }}
               >
-                {gcLooking ? "Looking up…" : "Look up"}
-              </button>
+                Scan, redeem, keep moving
+              </h2>
+              <div style={{ color: "var(--ink-500)", fontSize: 14 }}>
+                Voucher packs, membership passes, and gift cards in one counter flow.
+              </div>
             </div>
-          ) : (
             <div
               style={{
-                padding: 16,
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                background: "rgba(236,72,153,0.05)",
+                display: "inline-flex",
+                background: "var(--ink-50)",
+                border: "1px solid var(--ink-100)",
+                borderRadius: 12,
+                padding: 4,
+                flexShrink: 0,
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                <h3 style={{ margin: 0, fontFamily: "monospace" }}>{gcCard.code}</h3>
-                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{gcCard.status}</span>
-              </div>
-              <div style={{ marginTop: 8, fontSize: 22, fontWeight: 600 }}>
-                ${Number(gcCard.currentBalance).toFixed(2)}{" "}
-                <span style={{ fontSize: 14, color: "var(--text-muted)", fontWeight: 400 }}>
-                  of ${Number(gcCard.initialBalance).toFixed(2)}
-                </span>
-              </div>
-              <div style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 12 }}>
-                {formatExpiry(gcCard.expiresAt)}
-              </div>
-              <div style={{ marginTop: 16, display: "flex", gap: 8, alignItems: "center" }}>
-                <input
-                  type="number"
-                  step="0.01"
-                  min={0}
-                  max={Number(gcCard.currentBalance)}
-                  value={gcAmount}
-                  onChange={(e) => setGcAmount(e.target.value)}
-                  className="cashier-input"
-                  style={{ fontSize: 16, padding: 12, width: 140 }}
-                  placeholder="Amount"
-                />
-                <button
-                  type="button"
-                  className="cashier-button cashier-button--primary"
-                  onClick={handleGcRedeem}
-                  disabled={gcRedeeming}
-                >
-                  {gcRedeeming ? "Redeeming…" : "Redeem"}
-                </button>
-                <button
-                  type="button"
-                  className="cashier-button"
-                  onClick={() => {
-                    setGcCard(null);
-                    setGcCode("");
-                    setGcPin("");
-                    setGcAmount("");
-                  }}
-                >
-                  Clear
-                </button>
-              </div>
+              <SegmentButton active={tab === "scan"} onClick={() => setTab("scan")} icon="scan-line">
+                Scan token
+              </SegmentButton>
+              <SegmentButton active={tab === "giftcard"} onClick={() => setTab("giftcard")} icon="credit-card">
+                Gift card
+              </SegmentButton>
             </div>
+          </div>
+
+          {tab === "scan" ? (
+            <ScannerInput
+              inputRef={inputRef}
+              token={token}
+              setToken={setToken}
+              submit={submit}
+              busy={busy}
+              isFetching={isFetching}
+            />
+          ) : (
+            <GiftCardLookup
+              gcCode={gcCode}
+              setGcCode={setGcCode}
+              gcPin={gcPin}
+              setGcPin={setGcPin}
+              gcCard={gcCard}
+              gcAmount={gcAmount}
+              setGcAmount={setGcAmount}
+              handleGcLookup={handleGcLookup}
+              handleGcRedeem={handleGcRedeem}
+              gcLooking={gcLooking}
+              gcRedeeming={gcRedeeming}
+              clear={() => {
+                setGcCard(null);
+                setGcCode("");
+                setGcPin("");
+                setGcAmount("");
+                setActive(null);
+              }}
+            />
           )}
         </div>
-      )}
 
-      {error && (
-        <div
-          style={{
-            padding: 12,
-            background: "var(--surface-error, #fee)",
-            color: "var(--text-error, #a00)",
-            borderRadius: 6,
-            marginBottom: 12,
-          }}
-        >
-          {error}
-        </div>
-      )}
-
-      {active && active.kind === "entitlement" && (
-        <div
-          style={{
-            padding: 16,
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            marginBottom: 12,
-          }}
-        >
-          <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-            <h3 style={{ margin: 0 }}>Stock-item credit</h3>
-            <span
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "24px 28px" }}>
+          {error && (
+            <div
               style={{
-                padding: "2px 8px",
-                background: "var(--accent-bg, #efe)",
-                color: "var(--accent-text, #060)",
-                borderRadius: 4,
-                fontSize: 12,
-              }}
-            >
-              {active.status}
-            </span>
-          </div>
-          <div style={{ marginTop: 8, color: "var(--text-muted)", fontSize: 14 }}>
-            Activity #{active.activityId} · variation {active.variationId || "any"}
-          </div>
-          <div style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 12 }}>
-            {formatExpiry(active.expiresAt)}
-          </div>
-
-          <div style={{ marginTop: 16, display: "flex", gap: 12, alignItems: "center" }}>
-            <div>
-              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Remaining</div>
-              <div style={{ fontSize: 28, fontWeight: 600 }}>
-                {active.remainingQty} <span style={{ fontSize: 14, color: "var(--text-muted)" }}>of {active.originalQty}</span>
-              </div>
-            </div>
-            <button
-              type="button"
-              className="cashier-button cashier-button--primary"
-              style={{ padding: "12px 24px", fontSize: 16 }}
-              onClick={handleRedeem}
-              disabled={redeeming || active.remainingQty < 1 || active.status !== "active"}
-            >
-              {redeeming ? "Redeeming…" : "Redeem 1"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {active && active.kind === "membership" && (
-        <div
-          style={{
-            padding: 16,
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            marginBottom: 12,
-            background: "rgba(99,102,241,0.05)",
-          }}
-        >
-          <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-            <h3 style={{ margin: 0 }}>Membership pass</h3>
-            <span
-              style={{
-                padding: "2px 8px",
-                background: "rgba(99,102,241,0.15)",
-                color: "#4F46E5",
-                borderRadius: 4,
-                fontSize: 12,
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "12px 14px",
+                marginBottom: 16,
+                borderRadius: 12,
+                background: "var(--color-danger-soft)",
+                color: "var(--color-danger)",
+                border: "1.5px solid var(--color-danger)",
                 fontWeight: 700,
-                textTransform: "uppercase",
               }}
             >
-              {active.status}
-            </span>
-            {active.autoRenew && (
-              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                · auto-renew
-              </span>
-            )}
-          </div>
-          <div style={{ marginTop: 8, color: "var(--text-muted)", fontSize: 14 }}>
-            {active.guestName || `Guest #${active.guestId}`}
-            {active.guestEmail ? ` · ${active.guestEmail}` : ""}
-          </div>
-          <div style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 12 }}>
-            {active.activityName || `Membership #${active.activityId}`} ·{" "}
-            {formatExpiry(active.expiresAt)}
-          </div>
-          <div style={{ marginTop: 16, display: "flex", gap: 12, alignItems: "center" }}>
-            <div>
-              <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Used today</div>
-              <div style={{ fontSize: 28, fontWeight: 600 }}>
-                {active.redemptionsToday || 0}
-                {active.maxRedemptionsPerDay ? (
-                  <span style={{ fontSize: 14, color: "var(--text-muted)" }}>
-                    {" "}
-                    of {active.maxRedemptionsPerDay}
-                  </span>
-                ) : (
-                  <span style={{ fontSize: 14, color: "var(--text-muted)" }}>
-                    {" "}
-                    today
-                  </span>
-                )}
-              </div>
+              <Icon name="alert-triangle" size={18} />
+              {error}
             </div>
-            <button
-              type="button"
-              className="cashier-button cashier-button--primary"
-              style={{ padding: "12px 24px", fontSize: 16 }}
-              onClick={handleRedeemMembership}
-              disabled={redeemingMembership || active.status !== "active"}
-            >
-              {redeemingMembership ? "Checking in…" : "Check in"}
-            </button>
-          </div>
-
-          {Array.isArray(active.todaysBenefits) &&
-            active.todaysBenefits.length > 0 && (
-              <div
-                style={{
-                  marginTop: 16,
-                  paddingTop: 12,
-                  borderTop: "1px dashed rgba(99,102,241,0.3)",
-                }}
-              >
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 800,
-                    letterSpacing: "0.08em",
-                    textTransform: "uppercase",
-                    color: "var(--text-muted)",
-                    marginBottom: 8,
-                  }}
-                >
-                  Today's benefits
-                </div>
-                <div style={{ display: "grid", gap: 6 }}>
-                  {active.todaysBenefits.map((b, i) => {
-                    const exhausted =
-                      b.qtyPerDay && b.remainingToday === 0;
-                    return (
-                      <div
-                        key={i}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          padding: "8px 12px",
-                          borderRadius: 8,
-                          background: exhausted
-                            ? "rgba(0,0,0,0.04)"
-                            : "rgba(99,102,241,0.08)",
-                          border: `1.5px solid ${
-                            exhausted
-                              ? "rgba(0,0,0,0.08)"
-                              : "rgba(99,102,241,0.2)"
-                          }`,
-                          opacity: exhausted ? 0.5 : 1,
-                        }}
-                      >
-                        <div style={{ fontSize: 13 }}>
-                          <div style={{ fontWeight: 600 }}>{b.label}</div>
-                          <div
-                            style={{
-                              fontSize: 11,
-                              color: "var(--text-muted)",
-                              marginTop: 2,
-                            }}
-                          >
-                            {b.discountPct === 100
-                              ? "Free"
-                              : `${b.discountPct}% off`}
-                            {b.validFrom || b.validUntil
-                              ? ` · ${b.validFrom || "—"}–${b.validUntil || "—"}`
-                              : ""}
-                          </div>
-                        </div>
-                        <div
-                          style={{
-                            fontSize: 12,
-                            color: exhausted
-                              ? "var(--color-danger, #c00)"
-                              : "var(--text-muted)",
-                            fontWeight: 600,
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {b.qtyPerDay
-                            ? `${b.remainingToday} of ${b.qtyPerDay} left`
-                            : "Unlimited"}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
+          )}
+          {active ? (
+            <CurrentResult
+              active={active}
+              redeeming={redeeming}
+              redeemingTicket={redeemingTicket}
+              redeemingMembership={redeemingMembership}
+              gcRedeeming={gcRedeeming}
+              gcAmount={gcAmount}
+              setGcAmount={setGcAmount}
+              onRedeem={handleRedeem}
+              onRedeemTicket={handleRedeemTicket}
+              onRedeemMembership={handleRedeemMembership}
+              onRedeemGiftCard={handleGcRedeem}
+              onClear={() => {
+                setActive(null);
+                setError(null);
+              }}
+            />
+          ) : (
+            <EmptyState tab={tab} />
+          )}
         </div>
-      )}
+      </main>
 
-      {active && active.kind === "voucher" && (
+      <aside
+        style={{
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+          background: "var(--ink-0)",
+          borderLeft: "1px solid var(--ink-100)",
+          overflow: "hidden",
+        }}
+      >
         <div
           style={{
-            padding: 16,
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            marginBottom: 12,
+            padding: "20px 22px 14px",
+            borderBottom: "1px solid var(--ink-100)",
+            flexShrink: 0,
           }}
         >
-          <h3 style={{ margin: 0 }}>Slot-bound voucher</h3>
-          <div style={{ marginTop: 8, color: "var(--text-muted)", fontSize: 14 }}>
-            Voucher #{active.bookingItemId} · status {active.status} ·{" "}
-            {formatExpiry(active.expiresAt)}
-          </div>
-          <div style={{ marginTop: 12 }}>
-            {active.slotId ? (
-              <div
-                style={{
-                  padding: 10,
-                  background: "var(--accent-bg, #efe)",
-                  borderRadius: 6,
-                  fontSize: 14,
-                }}
-              >
-                Already scheduled to slot #{active.slotId}. Scan the regular
-                ticket QR at the gate to redeem entry.
-              </div>
-            ) : (
-              <div
-                style={{
-                  padding: 10,
-                  background: "var(--surface-warn, #ffe)",
-                  color: "var(--text-warn, #850)",
-                  borderRadius: 6,
-                  fontSize: 14,
-                }}
-              >
-                Not scheduled yet. Direct the customer to the portal "My
-                Vouchers" page to pick a date and time, or schedule on their
-                behalf in the booking screen.
-              </div>
-            )}
-          </div>
+          <div className="eyebrow">Rolling feed</div>
+          <h3
+            style={{
+              margin: "4px 0 0",
+              fontFamily: "var(--font-display)",
+              fontSize: 24,
+              fontWeight: 800,
+            }}
+          >
+            Recent scans
+          </h3>
         </div>
-      )}
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 16 }}>
+          {recent.length === 0 ? (
+            <div
+              style={{
+                height: "100%",
+                minHeight: 260,
+                border: "1.5px dashed var(--ink-200)",
+                borderRadius: 16,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                textAlign: "center",
+                color: "var(--ink-500)",
+                padding: 24,
+                fontSize: 13,
+                lineHeight: 1.4,
+              }}
+            >
+              Scan activity rolls in here, newest first.
+            </div>
+          ) : (
+            <ol style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: 10 }}>
+              {recent.map((entry, index) => (
+                <RollerRow key={entry.id} entry={entry} index={index} />
+              ))}
+            </ol>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}
 
-      {recent.length > 0 && (
-        <div style={{ marginTop: 24 }}>
-          <h4 style={{ margin: "0 0 8px 0", color: "var(--text-muted)", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5 }}>
-            Recent
-          </h4>
-          <div style={{ fontSize: 13 }}>
-            {recent.map((r, i) => (
-              <div
-                key={i}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  padding: "6px 0",
-                  borderBottom: "1px solid var(--border-subtle, #eee)",
-                  color: r.ok ? "var(--text-default)" : "var(--text-error, #a00)",
-                }}
-              >
-                <span>
-                  {r.ok ? "✓" : "✗"} {r.label}
-                </span>
-                <span style={{ color: "var(--text-muted)" }}>
-                  {r.ok ? `${r.qty} left` : r.qty}
-                </span>
-              </div>
-            ))}
+function SegmentButton({ active, onClick, icon, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        all: "unset",
+        cursor: "pointer",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "8px 12px",
+        borderRadius: 9,
+        fontSize: 13,
+        fontWeight: 800,
+        color: active ? "var(--ink-900)" : "var(--ink-500)",
+        background: active ? "var(--ink-0)" : "transparent",
+        boxShadow: active ? "var(--shadow-1)" : "none",
+      }}
+    >
+      <Icon name={icon} size={15} />
+      {children}
+    </button>
+  );
+}
+
+function ScannerInput({ inputRef, token, setToken, submit, busy, isFetching }) {
+  return (
+    <div
+      style={{
+        marginTop: 20,
+        background: "var(--ink-0)",
+        border: "2px solid var(--ink-800)",
+        borderRadius: 18,
+        boxShadow: "0 6px 0 var(--ink-800)",
+        padding: 16,
+        display: "grid",
+        gridTemplateColumns: "auto minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 14,
+      }}
+    >
+      <div
+        style={{
+          width: 48,
+          height: 48,
+          borderRadius: 14,
+          background: "var(--aero-orange-50)",
+          color: "var(--aero-orange-600)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <Icon name="scan-line" size={26} />
+      </div>
+      <input
+        ref={inputRef}
+        value={token}
+        onChange={(event) => setToken(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            submit(event.target.value);
+          }
+        }}
+        placeholder="Scan QR or paste token"
+        disabled={busy}
+        autoComplete="off"
+        style={{
+          all: "unset",
+          minWidth: 0,
+          fontFamily: "var(--font-mono)",
+          fontWeight: 800,
+          fontSize: 22,
+          color: "var(--ink-900)",
+          letterSpacing: "0.02em",
+        }}
+      />
+      <button
+        type="button"
+        className="a-btn a-btn--primary"
+        onClick={() => submit(token)}
+        disabled={busy || !token.trim()}
+        style={{ minWidth: 118, justifyContent: "center" }}
+      >
+        <Icon name="search" size={18} />
+        {isFetching ? "Looking" : "Look up"}
+      </button>
+    </div>
+  );
+}
+
+function GiftCardLookup({
+  gcCode,
+  setGcCode,
+  gcPin,
+  setGcPin,
+  gcCard,
+  gcAmount,
+  setGcAmount,
+  handleGcLookup,
+  handleGcRedeem,
+  gcLooking,
+  gcRedeeming,
+  clear,
+}) {
+  return (
+    <div
+      style={{
+        marginTop: 20,
+        background: "var(--ink-0)",
+        border: "2px solid var(--ink-800)",
+        borderRadius: 18,
+        boxShadow: "0 6px 0 var(--ink-800)",
+        padding: 16,
+      }}
+    >
+      {!gcCard ? (
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 120px auto", gap: 10 }}>
+          <input
+            value={gcCode}
+            onChange={(event) => setGcCode(event.target.value.toUpperCase())}
+            placeholder="CARD CODE"
+            autoComplete="off"
+            style={fieldStyle("var(--font-mono)")}
+          />
+          <input
+            value={gcPin}
+            onChange={(event) => setGcPin(event.target.value.replace(/\D/g, ""))}
+            placeholder="PIN"
+            inputMode="numeric"
+            maxLength={4}
+            autoComplete="off"
+            type="password"
+            style={fieldStyle()}
+          />
+          <button
+            type="button"
+            className="a-btn a-btn--primary"
+            onClick={handleGcLookup}
+            disabled={gcLooking || !gcCode.trim() || !gcPin.trim()}
+          >
+            <Icon name="search" size={18} />
+            {gcLooking ? "Looking" : "Look up"}
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 160px auto auto", gap: 10, alignItems: "center" }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontFamily: "var(--font-mono)", fontWeight: 800, fontSize: 16 }}>{gcCard.code}</div>
+            <div style={{ color: "var(--ink-500)", fontSize: 12 }}>
+              Balance ${Number(gcCard.currentBalance || 0).toFixed(2)}
+            </div>
           </div>
+          <input
+            type="number"
+            step="0.01"
+            min={0}
+            max={Number(gcCard.currentBalance)}
+            value={gcAmount}
+            onChange={(event) => setGcAmount(event.target.value)}
+            placeholder="Amount"
+            style={fieldStyle()}
+          />
+          <button
+            type="button"
+            className="a-btn a-btn--primary"
+            onClick={handleGcRedeem}
+            disabled={gcRedeeming}
+          >
+            <Icon name="credit-card" size={18} />
+            {gcRedeeming ? "Redeeming" : "Redeem"}
+          </button>
+          <button type="button" className="a-btn a-btn--ghost" onClick={clear}>
+            Clear
+          </button>
         </div>
       )}
     </div>
   );
+}
+
+function CurrentResult({
+  active,
+  redeeming,
+  redeemingTicket,
+  redeemingMembership,
+  gcRedeeming,
+  gcAmount,
+  setGcAmount,
+  onRedeem,
+  onRedeemTicket,
+  onRedeemMembership,
+  onRedeemGiftCard,
+  onClear,
+}) {
+  const tone = toneForStatus(active.status);
+  const colors = toneStyles[tone] || toneStyles.neutral;
+
+  return (
+    <section
+      style={{
+        background: "var(--ink-0)",
+        border: "2px solid var(--ink-800)",
+        borderRadius: 18,
+        boxShadow: "0 6px 0 var(--ink-800)",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          padding: "18px 20px",
+          background: colors.bg,
+          borderBottom: "1.5px solid var(--ink-100)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 16,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
+          <div
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: 14,
+              background: colors.soft,
+              color: colors.fg,
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <Icon name={active.kind === "gift_card" ? "credit-card" : active.kind === "membership" ? "badge-check" : "ticket"} size={24} />
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div className="eyebrow">Current result</div>
+            <h3
+              style={{
+                margin: "2px 0 0",
+                fontFamily: "var(--font-display)",
+                fontSize: 28,
+                lineHeight: 1.05,
+                fontWeight: 800,
+              }}
+            >
+              {titleForRecord(active)}
+            </h3>
+          </div>
+        </div>
+        <StatusBadge tone={tone}>{active.status || "active"}</StatusBadge>
+      </div>
+
+      <div style={{ padding: 20 }}>
+        {active.kind === "entitlement" && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+              <Stat label="Entitlement" value={`#${active.entitlementId}`} />
+              <Stat label="Remaining" value={`${active.remainingQty} of ${active.originalQty}`} />
+              <Stat label="Expiry" value={formatExpiry(active.expiresAt)} />
+            </div>
+            <ActionBar>
+              <button
+                type="button"
+                className="a-btn a-btn--primary"
+                onClick={onRedeem}
+                disabled={redeeming || active.remainingQty < 1 || active.status !== "active"}
+              >
+                <Icon name="check-circle-2" size={18} />
+                {redeeming ? "Redeeming" : "Redeem 1"}
+              </button>
+              <button type="button" className="a-btn a-btn--ghost" onClick={onClear}>
+                Clear
+              </button>
+            </ActionBar>
+          </>
+        )}
+
+        {active.kind === "ticket" && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+              <Stat label="Ticket" value={active.ticketCode} mono />
+              <Stat label="Remaining" value={`${active.remainingQty} of ${active.originalQty}`} />
+              <Stat label="Expiry" value={formatExpiry(active.expiresAt)} />
+            </div>
+            <ActionBar>
+              <button
+                type="button"
+                className="a-btn a-btn--primary"
+                onClick={onRedeemTicket}
+                disabled={redeemingTicket || active.remainingQty < 1 || ["redeemed", "voided", "refunded", "expired"].includes(String(active.status || "").toLowerCase())}
+              >
+                <Icon name="check-circle-2" size={18} />
+                {redeemingTicket ? "Redeeming" : "Redeem 1"}
+              </button>
+              <button type="button" className="a-btn a-btn--ghost" onClick={onClear}>
+                Clear
+              </button>
+            </ActionBar>
+          </>
+        )}
+
+        {active.kind === "membership" && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+              <Stat label="Member" value={`#${active.membershipId}`} />
+              <Stat label="Used today" value={active.redemptionsToday || 0} />
+              <Stat label="Expiry" value={formatExpiry(active.expiresAt)} />
+            </div>
+            {Array.isArray(active.todaysBenefits) && active.todaysBenefits.length > 0 && (
+              <div style={{ marginTop: 16, display: "grid", gap: 8 }}>
+                {active.todaysBenefits.slice(0, 4).map((benefit, index) => (
+                  <div
+                    key={index}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 12,
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      background: "var(--ink-50)",
+                      border: "1px solid var(--ink-100)",
+                      fontSize: 13,
+                    }}
+                  >
+                    <span style={{ fontWeight: 800 }}>{benefit.label}</span>
+                    <span style={{ color: "var(--ink-500)" }}>
+                      {benefit.qtyPerDay ? `${benefit.remainingToday} left` : "Unlimited"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <ActionBar>
+              <button
+                type="button"
+                className="a-btn a-btn--primary"
+                onClick={onRedeemMembership}
+                disabled={redeemingMembership || active.status !== "active"}
+              >
+                <Icon name="badge-check" size={18} />
+                {redeemingMembership ? "Checking in" : "Check in"}
+              </button>
+              <button type="button" className="a-btn a-btn--ghost" onClick={onClear}>
+                Clear
+              </button>
+            </ActionBar>
+          </>
+        )}
+
+        {active.kind === "voucher" && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+              <Stat label="Voucher" value={`#${active.bookingItemId}`} />
+              <Stat label="Slot" value={active.slotId ? `#${active.slotId}` : "Not scheduled"} />
+              <Stat label="Expiry" value={formatExpiry(active.expiresAt)} />
+            </div>
+            <div
+              style={{
+                marginTop: 16,
+                padding: "14px 16px",
+                borderRadius: 12,
+                background: active.slotId ? "var(--color-success-soft)" : "var(--color-warning-soft)",
+                color: active.slotId ? "#137A35" : "#7A5400",
+                fontWeight: 700,
+                fontSize: 14,
+              }}
+            >
+              {active.slotId
+                ? "Already scheduled. Scan the regular ticket QR at the gate."
+                : "Not scheduled yet. Send customer to My Vouchers or schedule it from booking detail."}
+            </div>
+            <ActionBar>
+              <button type="button" className="a-btn a-btn--ghost" onClick={onClear}>
+                Clear
+              </button>
+            </ActionBar>
+          </>
+        )}
+
+        {active.kind === "gift_card" && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
+              <Stat label="Card" value={active.code} mono />
+              <Stat label="Balance" value={`$${Number(active.currentBalance || 0).toFixed(2)}`} />
+              <Stat label="Expiry" value={formatExpiry(active.expiresAt)} />
+            </div>
+            <ActionBar>
+              <input
+                type="number"
+                step="0.01"
+                min={0}
+                max={Number(active.currentBalance)}
+                value={gcAmount}
+                onChange={(event) => setGcAmount(event.target.value)}
+                placeholder="Amount"
+                style={{ ...fieldStyle(), width: 150 }}
+              />
+              <button
+                type="button"
+                className="a-btn a-btn--primary"
+                onClick={onRedeemGiftCard}
+                disabled={gcRedeeming}
+              >
+                <Icon name="credit-card" size={18} />
+                {gcRedeeming ? "Redeeming" : "Redeem"}
+              </button>
+              <button type="button" className="a-btn a-btn--ghost" onClick={onClear}>
+                Clear
+              </button>
+            </ActionBar>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function EmptyState({ tab }) {
+  return (
+    <div
+      style={{
+        minHeight: 340,
+        background: "var(--ink-0)",
+        border: "1.5px dashed var(--ink-200)",
+        borderRadius: 18,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        textAlign: "center",
+        color: "var(--ink-500)",
+        padding: 32,
+      }}
+    >
+      <Icon name={tab === "giftcard" ? "credit-card" : "scan-line"} size={42} stroke={1.5} />
+      <div style={{ marginTop: 14, fontFamily: "var(--font-display)", fontSize: 24, fontWeight: 800, color: "var(--ink-800)" }}>
+        {tab === "giftcard" ? "Look up a card" : "Scanner ready"}
+      </div>
+      <div style={{ marginTop: 4, fontSize: 14 }}>
+        {tab === "giftcard"
+          ? "Enter code and PIN to show balance and redeem."
+          : "Scan a token and the current result will appear here."}
+      </div>
+    </div>
+  );
+}
+
+function StatusBadge({ tone = "neutral", children }) {
+  const colors = toneStyles[tone] || toneStyles.neutral;
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "5px 10px",
+        borderRadius: 999,
+        background: colors.soft,
+        color: colors.fg,
+        border: `1px solid ${colors.border}`,
+        fontSize: 11,
+        fontWeight: 800,
+        letterSpacing: "0.06em",
+        textTransform: "uppercase",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+function Stat({ label, value, mono = false }) {
+  return (
+    <div
+      style={{
+        background: "var(--ink-25)",
+        border: "1px solid var(--ink-100)",
+        borderRadius: 12,
+        padding: "12px 14px",
+        minWidth: 0,
+      }}
+    >
+      <div className="eyebrow">{label}</div>
+      <div
+        style={{
+          marginTop: 6,
+          fontFamily: mono ? "var(--font-mono)" : "var(--font-display)",
+          fontWeight: 800,
+          fontSize: mono ? 14 : 22,
+          color: "var(--ink-900)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function ActionBar({ children }) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginTop: 18 }}>
+      {children}
+    </div>
+  );
+}
+
+function RollerRow({ entry, index }) {
+  const colors = toneStyles[entry.tone] || toneStyles.neutral;
+  return (
+    <li
+      style={{
+        position: "relative",
+        display: "grid",
+        gridTemplateColumns: "34px minmax(0, 1fr)",
+        gap: 10,
+        padding: "12px 12px",
+        borderRadius: 14,
+        background: index === 0 ? colors.bg : "var(--ink-25)",
+        border: `1.5px solid ${index === 0 ? colors.border : "var(--ink-100)"}`,
+        boxShadow: index === 0 ? `0 4px 0 ${colors.border}` : "none",
+        animation: index === 0 ? "ap-pop-in 160ms ease-out" : "none",
+      }}
+    >
+      <div
+        style={{
+          width: 34,
+          height: 34,
+          borderRadius: 10,
+          background: colors.soft,
+          color: colors.fg,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <Icon name={entry.ok ? "check" : "x"} size={18} stroke={3} />
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" }}>
+          <span style={{ fontSize: 11, fontWeight: 800, color: colors.fg, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+            {entry.action}
+          </span>
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--ink-400)", whiteSpace: "nowrap" }}>
+            {formatTime(entry.at)}
+          </span>
+        </div>
+        <div style={{ marginTop: 3, fontWeight: 800, color: "var(--ink-900)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {entry.title}
+        </div>
+        <div style={{ marginTop: 2, color: "var(--ink-500)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {entry.detail}
+        </div>
+        <div style={{ marginTop: 6 }}>
+          <StatusBadge tone={entry.tone}>{entry.meta}</StatusBadge>
+        </div>
+      </div>
+    </li>
+  );
+}
+
+function fieldStyle(fontFamily = "var(--font-sans)") {
+  return {
+    minWidth: 0,
+    width: "100%",
+    boxSizing: "border-box",
+    border: "1.5px solid var(--ink-200)",
+    borderRadius: 12,
+    background: "var(--ink-0)",
+    padding: "12px 14px",
+    fontFamily,
+    fontSize: 15,
+    fontWeight: 800,
+    color: "var(--ink-900)",
+    outline: "none",
+  };
 }
 
 export default VoucherCounter;

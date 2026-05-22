@@ -9,7 +9,14 @@ export function Icon({ name, size = 20, stroke = 1.75, ...rest }) {
       const i = document.createElement("i");
       i.setAttribute("data-lucide", name);
       ref.current.appendChild(i);
-      window.lucide.createIcons({ attrs: { width: size, height: size, "stroke-width": stroke } });
+      try {
+        window.lucide.createIcons({
+          attrs: { width: size, height: size, "stroke-width": stroke },
+        });
+      } catch (error) {
+        ref.current.innerHTML = "";
+        console.warn(`Unable to render icon "${name}"`, error);
+      }
     }
   }, [name, size, stroke]);
 

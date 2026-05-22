@@ -26,8 +26,40 @@ export const bookingApi = baseApi.injectEndpoints({
       query: (query) => `/bookings/search-guest?query=${encodeURIComponent(query)}`,
     }),
     createBooking: builder.mutation({
-      query: (body) => ({ url: "/bookings", method: "POST", body }),
+      // Idempotency-Key: a client-generated UUID passed by the cashier flow
+      // (see CashierApp.handleCheckout). Retrying the same checkout after a
+      // network hiccup carries the same key so the backend can dedupe and
+      // return the original booking instead of creating a second one. The
+      // key is stripped from the body before sending.
+      query: ({ idempotencyKey, ...body } = {}) => ({
+        url: "/bookings",
+        method: "POST",
+        body,
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+      }),
       invalidatesTags: ["Bookings"],
+    }),
+    // Same-day re-slot of a late arrival's session tickets.
+    reslotBooking: builder.mutation({
+      query: ({ bookingId, slotId }) => ({
+        url: `/bookings/${bookingId}/reslot`,
+        method: "POST",
+        body: { slotId },
+      }),
+      invalidatesTags: (result, error, { bookingId }) => [
+        { type: "Booking", id: bookingId },
+        { type: "CheckIn", id: bookingId },
+        { type: "Tickets", id: bookingId },
+        "Bookings",
+        "Availability",
+      ],
+    }),
+    getAvailability: builder.query({
+      query: ({ date, activityId }) => ({
+        url: "/bookings/availability/sessions",
+        params: { date, activityId },
+      }),
+      providesTags: ["Availability"],
     }),
     validateCart: builder.mutation({
       query: (body) => ({ url: "/bookings/validate-cart", method: "POST", body }),
@@ -39,10 +71,14 @@ export const bookingApi = baseApi.injectEndpoints({
       query: (body) => ({ url: "/payment/send-payment-link", method: "POST", body }),
     }),
     recordPayment: builder.mutation({
-      query: ({ bookingId, ...body }) => ({
+      // See createBooking for the Idempotency-Key contract. For payment
+      // record the key is even more important: a duplicate POST would
+      // double-charge the booking's balance.
+      query: ({ bookingId, idempotencyKey, ...body }) => ({
         url: `/payment/manual-payment/${bookingId}`,
         method: "POST",
         body,
+        headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
       }),
       invalidatesTags: (result, error, { bookingId }) => [
         { type: "Booking", id: bookingId },
@@ -104,16 +140,32 @@ export const bookingApi = baseApi.injectEndpoints({
     }),
     // Lookup signed waivers in this location (cashier search modal)
     searchWaivers: builder.query({
-      query: ({ search = "", limit = 12, contactOnly = false } = {}) => ({
+      query: ({ search = "", limit = 12, page = 1, status = "active", contactOnly = false, sortBy, sortDir } = {}) => ({
         url: "/waivers/holders",
-        params: { search, limit, status: "active", contactOnly: contactOnly ? 1 : undefined },
+        params: {
+          search,
+          limit,
+          page,
+          status,
+          contactOnly: contactOnly ? 1 : undefined,
+          sortBy,
+          sortDir,
+        },
       }),
     }),
+    getSignedWaiver: builder.query({
+      query: (signatureId) => `/waivers/signed/${signatureId}`,
+    }),
+    getWaiverDefinition: builder.query({
+      query: (waiverId) => `/waivers/${waiverId}`,
+    }),
     linkParticipantFromWaiver: builder.mutation({
-      query: ({ bookingId, waiverSignatureId, includeMinors = true }) => ({
+      // people (optional): ["signer", "minor:0", ...] — link only those.
+      // Omit to keep legacy behaviour (signer + includeMinors).
+      query: ({ bookingId, waiverSignatureId, includeMinors = true, people }) => ({
         url: `/bookings/${bookingId}/participants/from-waiver`,
         method: "POST",
-        body: { waiverSignatureId, includeMinors },
+        body: { waiverSignatureId, includeMinors, ...(people ? { people } : {}) },
       }),
       invalidatesTags: (result, error, { bookingId }) => [
         { type: "CheckIn", id: bookingId },
@@ -160,6 +212,9 @@ export const {
   useSearchGuestsQuery,
   useLazySearchGuestsQuery,
   useCreateBookingMutation,
+  useReslotBookingMutation,
+  useGetAvailabilityQuery,
+  useLazyGetAvailabilityQuery,
   useValidateCartMutation,
   useSendBookingConfirmationMutation,
   usePaymentSendPaymentLinkMutation,
@@ -171,6 +226,8 @@ export const {
   useUpsertParticipantsMutation,
   useSearchWaiversQuery,
   useLazySearchWaiversQuery,
+  useGetSignedWaiverQuery,
+  useGetWaiverDefinitionQuery,
   useLinkParticipantFromWaiverMutation,
   useRemoveParticipantMutation,
   useGetOrderAdjustmentCatalogQuery,

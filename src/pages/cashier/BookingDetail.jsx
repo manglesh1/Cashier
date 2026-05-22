@@ -18,9 +18,9 @@ import {
   useGetAllBookingQuery,
 } from "../../features/bookings/bookingApi";
 import { useGetBookingTicketsQuery } from "../../features/tickets/ticketApi";
+import { moneyFmt } from "../../lib/money";
 
 // ── Status helpers ────────────────────────────────────────────────
-const moneyFmt = (n) => `$${Number(n || 0).toFixed(2)}`;
 const sinceLabel = (iso) => {
   if (!iso) return "—";
   const d = new Date(iso);

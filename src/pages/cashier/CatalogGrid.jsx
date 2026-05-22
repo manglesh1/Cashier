@@ -1,10 +1,11 @@
 import React, { useState } from "react";
 import { Icon } from "./Icon";
+import { needsScheduleSelection } from "./cartPricing";
 
 // Sections come from props (loaded from the device's terminal template).
 // Falls back to a single "Quick" section using whatever items the parent
 // supplied if no sections array is given.
-export function CatalogGrid({ sections = [], loading, error, onAdd }) {
+export function CatalogGrid({ sections = [], loading, error, onAdd, busyItemId = null }) {
   const [activeChip, setActiveChip] = useState("all");
   const [search, setSearch] = useState("");
   const [variantPicker, setVariantPicker] = useState(null);
@@ -16,6 +17,11 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
           variationId: option.variationId,
           variationName: option.name,
           price: Number(option.price ?? item.price ?? 0),
+          pricingMode: option.pricingMode || option.pricingType || item.pricingMode || item.pricingType || null,
+          includedGuests: option.includedGuests ?? item.includedGuests ?? null,
+          additionalPersonPrice: option.additionalPersonPrice ?? item.additionalPersonPrice ?? null,
+          minGuests: option.minGuests ?? option.minimumGuests ?? item.minGuests ?? item.minimumGuests ?? null,
+          maxGuests: option.maxGuests ?? option.maximumGuests ?? item.maxGuests ?? item.maximumGuests ?? null,
         }
       : item;
     onAdd?.(chosen, section);
@@ -48,10 +54,10 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
     .filter((s) => s.items.length > 0);
 
   return (
-    <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-      <div style={{ padding: "16px 28px", display: "flex", gap: 10, alignItems: "center", borderBottom: "1px solid var(--ink-100)" }}>
+    <div style={{ flex: "1 1 auto", minWidth: 0, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+      <div style={{ padding: "16px 28px", display: "flex", gap: 10, alignItems: "center", borderBottom: "1px solid var(--ink-100)", flexShrink: 0 }}>
         <SearchBar value={search} onChange={setSearch} />
-        <div style={{ display: "flex", gap: 8, marginLeft: "auto", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 8, marginLeft: "auto", flexWrap: "wrap", justifyContent: "flex-end", minWidth: 0 }}>
           <button
             type="button"
             className={`chip ${activeChip === "all" ? "is-active" : ""}`}
@@ -73,7 +79,7 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
         </div>
       </div>
 
-      <div style={{ flex: 1, overflowY: "auto", padding: "20px 28px 28px", display: "flex", flexDirection: "column", gap: 24 }}>
+      <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", padding: "20px 28px 32px", display: "flex", flexDirection: "column", gap: 24 }}>
         {loading ? (
           <div style={{ padding: 60, textAlign: "center", color: "var(--ink-500)", fontWeight: 600 }}>
             Loading terminal template...
@@ -94,9 +100,15 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
                 <h2 style={{ margin: 0, fontFamily: "var(--font-display)", fontWeight: 800, fontSize: 22, letterSpacing: "-.01em" }}>{sec.title}</h2>
                 <span className="eyebrow">{sec.items.length} item{sec.items.length === 1 ? "" : "s"}</span>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 14 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 14 }}>
                 {sec.items.map((it) => (
-                  <ProductCard key={it.id} item={it} tone={sec.tone} onClick={() => handleProductClick(it, sec)} />
+                  <ProductCard
+                    key={it.id}
+                    item={it}
+                    tone={sec.tone}
+                    busy={busyItemId != null && String(busyItemId) === String(it.id)}
+                    onClick={() => handleProductClick(it, sec)}
+                  />
                 ))}
               </div>
             </section>
@@ -116,17 +128,19 @@ export function CatalogGrid({ sections = [], loading, error, onAdd }) {
   );
 }
 
-function ProductCard({ item, tone = "orange", onClick }) {
+function ProductCard({ item, tone = "orange", onClick, busy = false }) {
   const accent = {
     orange: { bg: "var(--aero-orange-50)", fg: "var(--aero-orange-600)" },
     yellow: { bg: "var(--aero-yellow-50)", fg: "var(--aero-yellow-500)" },
     neutral: { bg: "var(--ink-50)", fg: "var(--ink-700)" },
   }[tone];
   const hasChoices = (item.variationOptions || []).length > 1;
+  const requiresSchedule = needsScheduleSelection(item);
 
   return (
     <button
-      onClick={onClick}
+      onClick={busy ? undefined : onClick}
+      disabled={busy}
       style={{
         all: "unset", cursor: "pointer",
         background: "var(--ink-0)",
@@ -160,9 +174,13 @@ function ProductCard({ item, tone = "orange", onClick }) {
       <div style={{ minHeight: 44 }}>
         <div style={{ fontWeight: 700, fontSize: 16, lineHeight: 1.2 }}>{item.name}</div>
         {item.sub && <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 2 }}>{item.sub}</div>}
-        {hasChoices && (
+        {(hasChoices || requiresSchedule) && (
           <div style={{ fontSize: 11, color: "var(--aero-orange-700)", fontWeight: 800, marginTop: 4 }}>
-            Choose option
+            {busy
+              ? "Finding nearest slot…"
+              : requiresSchedule
+                ? "Nearest slot"
+                : "Choose option"}
           </div>
         )}
       </div>
@@ -245,7 +263,7 @@ function SearchBar({ value, onChange }) {
       display: "inline-flex", alignItems: "center", gap: 10,
       padding: "10px 14px", background: "#fff",
       border: "1.5px solid var(--ink-200)", borderRadius: 14,
-      width: 320, flexShrink: 0,
+      width: "clamp(240px, 30vw, 320px)", flexShrink: 0,
     }}>
       <Icon name="search" size={18} stroke={2} style={{ color: "var(--ink-500)" }} />
       <input

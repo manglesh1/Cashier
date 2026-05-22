@@ -27,7 +27,16 @@ export default function App() {
   // Toggle between ClockIn (default) and email fallback
   const [authMode, setAuthMode] = useState("pin"); // "pin" | "email"
   const terminal = getTerminal();
+  // Tracks whether the "session expired" toast has fired for the CURRENT
+  // session. Reset on logout (effect below) and on a new login — the
+  // login reset uses session.loggedInAt so a token-refresh that issues a
+  // new session id still re-arms the toast.
   const expiredToastShown = useRef(false);
+  useEffect(() => {
+    if (token && session?.loggedInAt) {
+      expiredToastShown.current = false;
+    }
+  }, [token, session?.loggedInAt]);
   const isSessionExpired = useMemo(() => {
     if (!token) return false;
     if (!session?.expiresAt) return true;
