@@ -6,13 +6,19 @@ import { toast } from "sonner";
 import { Icon } from "./Icon";
 import {
   useLazyLookupVoucherByTokenQuery,
+  useScheduleVoucherMutation,
   useRedeemEntitlementMutation,
   useRedeemMembershipMutation,
   useLazyLookupGiftCardQuery,
   useRedeemGiftCardMutation,
 } from "../../features/vouchers/voucherApi";
 import { useRedeemTicketMutation } from "../../features/tickets/ticketApi";
+import { useLazyGetAvailabilityQuery } from "../../features/bookings/bookingApi";
+import { useLazyResolveCodeQuery } from "../../features/redeemables/redeemablesApi";
+import { RedeemableList } from "./RedeemableList";
+import { actRedeemable } from "./actRedeemable";
 import { getTerminal } from "../../lib/terminal";
+import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 import { usePersistentState } from "../../lib/usePersistentState";
 
 function formatExpiry(ts) {
@@ -41,6 +47,7 @@ function titleForRecord(record) {
   if (record.kind === "membership") return "Membership pass";
   if (record.kind === "voucher") return "Slot-bound voucher";
   if (record.kind === "gift_card") return "Gift card";
+  if (record.kind === "pack") return "Voucher pack";
   return "Voucher";
 }
 
@@ -98,7 +105,14 @@ export function VoucherCounter() {
   const [gcCard, setGcCard] = useState(null);
   const [gcAmount, setGcAmount] = useState("");
 
+  const [packToken, setPackToken] = useState(null); // token used to refetch the pack
+  const [busyId, setBusyId] = useState(null); // inclusion currently being processed
+
+  const posSettings = useEffectiveSettings();
   const [lookup, { isFetching }] = useLazyLookupVoucherByTokenQuery();
+  const [resolveCode, { isFetching: resolving }] = useLazyResolveCodeQuery();
+  const [scheduleVoucher] = useScheduleVoucherMutation();
+  const [fetchAvailability] = useLazyGetAvailabilityQuery();
   const [redeem, { isLoading: redeeming }] = useRedeemEntitlementMutation();
   const [redeemTicket, { isLoading: redeemingTicket }] = useRedeemTicketMutation();
   const [redeemMembership, { isLoading: redeemingMembership }] =
@@ -133,7 +147,31 @@ export function VoucherCounter() {
     setToken("");
     setError(null);
     setActive(null);
+    setPackToken(null);
     try {
+      // UNIFIED RESOLVER: any code (gate ticket, voucher, pack constituent,
+      // stock entitlement) → { context, redeemables[] } with declared actions.
+      // Membership / gift-card scans 404 here and fall back to the single lookup.
+      let resolved = null;
+      try {
+        resolved = await resolveCode(scanned).unwrap();
+      } catch (e) {
+        if (e?.status && e.status !== 404) throw e;
+      }
+      if (resolved?.redeemables) {
+        setPackToken(scanned);
+        setActive({ kind: "resolved", ...resolved });
+        pushRecent({
+          ok: true,
+          tone: "info",
+          action: "Scanned",
+          title: resolved.context?.title || "Redeemable",
+          detail: resolved.context?.bookingNumber || `#${resolved.context?.bookingId || ""}`,
+          meta: `${resolved.redeemables.length} item${resolved.redeemables.length === 1 ? "" : "s"}`,
+        });
+        return;
+      }
+
       const res = await lookup(scanned).unwrap();
       const data = res?.data;
       if (!data?.kind) throw new Error("Unrecognized voucher.");
@@ -143,13 +181,7 @@ export function VoucherCounter() {
         tone: toneForStatus(data.status),
         action: "Scanned",
         title: titleForRecord(data),
-        detail: data.kind === "membership"
-          ? `Member #${data.membershipId}`
-          : data.kind === "entitlement"
-            ? `Entitlement #${data.entitlementId}`
-            : data.kind === "ticket"
-              ? `Ticket ${data.ticketCode}`
-              : `Voucher #${data.bookingItemId}`,
+        detail: data.kind === "membership" ? `Member #${data.membershipId}` : `#${data.bookingItemId || data.entitlementId || ""}`,
         meta: data.status || "active",
       });
     } catch (err) {
@@ -165,6 +197,52 @@ export function VoucherCounter() {
       });
       toast.error(msg, { duration: 3500 });
     } finally {
+      focusInput();
+    }
+  };
+
+  // Re-resolve the scanned code so per-item state refreshes after each action.
+  const refreshResolved = async () => {
+    if (!packToken) return;
+    try {
+      const r = await resolveCode(packToken).unwrap();
+      if (r?.redeemables) setActive({ kind: "resolved", ...r });
+    } catch { /* keep last good view */ }
+  };
+
+  // ONE dispatcher for every redeemable — fires the action the backend declared.
+  const handleAct = async (redeemable) => {
+    setBusyId(redeemable.id);
+    try {
+      const result = await actRedeemable(redeemable, {
+        context: active?.context,
+        deps: {
+          redeemTicket,
+          scheduleVoucher,
+          redeemEntitlement: redeem,
+          fetchAvailability,
+          posSettings,
+          terminal: getTerminal(),
+        },
+      });
+      if (result.ok) {
+        toast.success(result.message);
+        pushRecent({
+          ok: true,
+          tone: "success",
+          action: "Redeemed",
+          title: redeemable.label,
+          detail: result.message,
+          meta: result.slot || "",
+        });
+        await refreshResolved();
+      } else {
+        toast.error(result.message);
+      }
+    } catch (err) {
+      toast.error(err?.data?.message || err?.data?.error || "Action failed.");
+    } finally {
+      setBusyId(null);
       focusInput();
     }
   };
@@ -491,7 +569,18 @@ export function VoucherCounter() {
               {error}
             </div>
           )}
-          {active ? (
+          {active?.kind === "resolved" ? (
+            <ResolvedResult
+              data={active}
+              busyId={busyId}
+              onAct={handleAct}
+              onClear={() => {
+                setActive(null);
+                setError(null);
+                setPackToken(null);
+              }}
+            />
+          ) : active ? (
             <CurrentResult
               active={active}
               redeeming={redeeming}
@@ -507,6 +596,7 @@ export function VoucherCounter() {
               onClear={() => {
                 setActive(null);
                 setError(null);
+                setPackToken(null);
               }}
             />
           ) : (
@@ -760,6 +850,50 @@ function GiftCardLookup({
   );
 }
 
+// Unified result card — renders the resolver output (pack / ticket / any
+// redeemables) via the shared RedeemableList + one dispatcher (onAct).
+function ResolvedResult({ data, busyId, onAct, onClear }) {
+  const ctx = data.context || {};
+  const redeemables = data.redeemables || [];
+  const scheduled = redeemables.filter((r) => r.state === "scheduled").length;
+  const schedulable = redeemables.filter((r) => r.group === "schedulable").length;
+  const stockTotal = redeemables.filter((r) => r.group === "stock").length;
+  const stockRedeemed = redeemables.filter((r) => r.group === "stock" && r.state === "redeemed").length;
+  const colors = toneStyles.info;
+  return (
+    <section style={{ background: "var(--ink-0)", border: "2px solid var(--ink-800)", borderRadius: 18, boxShadow: "0 6px 0 var(--ink-800)", overflow: "hidden" }}>
+      <div style={{ padding: "18px 20px", background: colors.bg, borderBottom: "1.5px solid var(--ink-100)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
+          <div style={{ width: 48, height: 48, borderRadius: 14, background: colors.soft, color: colors.fg, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <Icon name="ticket" size={24} />
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div className="eyebrow">Current result</div>
+            <h3 style={{ margin: "2px 0 0", fontFamily: "var(--font-display)", fontSize: 28, lineHeight: 1.05, fontWeight: 800 }}>{ctx.title || "Redeemable"}</h3>
+          </div>
+        </div>
+        <StatusBadge tone={ctx.paid ? "success" : "warning"}>{ctx.paid ? "paid" : "unpaid"}</StatusBadge>
+      </div>
+      <div style={{ padding: 20 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, marginBottom: 16 }}>
+          <Stat label="Booking" value={ctx.bookingNumber || `#${ctx.bookingId || ""}`} mono />
+          {schedulable > 0 && <Stat label="Passes scheduled" value={`${scheduled}/${schedulable}`} />}
+          {stockTotal > 0 && <Stat label="Items redeemed" value={`${stockRedeemed}/${stockTotal}`} />}
+        </div>
+        {!ctx.paid && (
+          <div style={{ marginBottom: 14, padding: "12px 14px", borderRadius: 12, background: "var(--color-warning-soft, #FFF1CC)", color: "#7A5400", fontWeight: 700, fontSize: 13 }}>
+            Not fully paid — collect payment before redeeming.
+          </div>
+        )}
+        <RedeemableList data={data} paid={ctx.paid} busyId={busyId} onAct={onAct} />
+        <ActionBar>
+          <button type="button" className="a-btn a-btn--ghost" onClick={onClear}>Clear</button>
+        </ActionBar>
+      </div>
+    </section>
+  );
+}
+
 function CurrentResult({
   active,
   redeeming,
@@ -833,6 +967,7 @@ function CurrentResult({
       </div>
 
       <div style={{ padding: 20 }}>
+
         {active.kind === "entitlement" && (
           <>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12 }}>
