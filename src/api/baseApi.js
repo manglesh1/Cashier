@@ -10,6 +10,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 const rawBaseQuery = fetchBaseQuery({
   baseUrl: API_BASE_URL,
   prepareHeaders: (headers, { getState }) => {
+    headers.set("X-Client-App", "cashier");
     const token = getState()?.auth?.token;
     if (token) headers.set("Authorization", `Bearer ${token}`);
     return headers;
@@ -27,6 +28,7 @@ const rawBaseQuery = fetchBaseQuery({
 // Source of truth: the paired terminal in localStorage. Falls back to the
 // cookie (set during login) if the tablet isn't paired yet.
 const baseQueryWithLocation = async (args, api, extraOptions) => {
+  const requestUrl = typeof args === "string" ? args : args?.url || "";
   let locationId = null;
   try {
     const t = JSON.parse(localStorage.getItem("cashier:terminal") || "null");
@@ -34,7 +36,7 @@ const baseQueryWithLocation = async (args, api, extraOptions) => {
   } catch { /* noop */ }
   if (!locationId) locationId = Cookies.get("locationId") || null;
 
-  if (locationId) {
+  if (locationId && requestUrl !== "/pos/pair") {
     if (typeof args === "string") {
       const sep = args.includes("?") ? "&" : "?";
       args = `${args}${sep}locationId=${encodeURIComponent(locationId)}`;
@@ -51,7 +53,7 @@ const baseQueryWithLocation = async (args, api, extraOptions) => {
 export const baseApi = createApi({
   reducerPath: "api",
   baseQuery: baseQueryWithLocation,
-  tagTypes: ["Booking", "Bookings", "Tickets", "CheckIn", "PresetBuilder", "PosDevice", "PosSettings"],
+  tagTypes: ["Booking", "Bookings", "Tickets", "CheckIn", "Availability", "PresetBuilder", "PosDevice", "PosSettings", "Redemption"],
   endpoints: () => ({}),
   refetchOnReconnect: true,
 });

@@ -2,8 +2,14 @@ import React, { useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discountApi";
-import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
+import {
+  getCartLineSubtotal,
+  getCheckoutRequirements,
+  hasScheduleSelection,
+  needsScheduleSelection,
+  requiresRecipientForCheckout,
+} from "./cartPricing";
 
 // Compute a discount amount from the validated discount + subtotal.
 // Mirrors what the admin's createBooking pricing logic does:
@@ -12,6 +18,9 @@ import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 // maxValue caps a percentage so e.g. "10% off, max $20" works.
 function computeDiscountAmount(discount, subtotal) {
   if (!discount) return 0;
+  if (discount.amount !== undefined && discount.amount !== null) {
+    return Math.min(Number(discount.amount) || 0, subtotal);
+  }
   const value = Number(discount.value || 0);
   const max = Number(discount.maxValue || 0);
   if (Number(discount.discountType) === 1) {
@@ -22,7 +31,31 @@ function computeDiscountAmount(discount, subtotal) {
   return Math.min(value, subtotal);
 }
 
-const TAX_RATE = 0.05; // TODO: read from location tax config when wired
+// Fallback only — used when neither the paired-terminal settings nor the
+// location config provide a tax rate. Multi-state operators MUST configure
+// the rate per location server-side; this constant only exists so the
+// cashier doesn't show $0 tax for a misconfigured environment.
+const FALLBACK_TAX_RATE = 0.05;
+
+// Resolve the effective tax rate. Backend field names vary across
+// deployments (salesTaxRate / taxRate / locationTaxRate) so we probe a
+// few common spellings before falling back. Accepts either a decimal
+// (0.0725) or a percent (7.25) — anything > 1 is treated as percent.
+function resolveTaxRate(settings) {
+  const candidates = [
+    settings?.salesTaxRate,
+    settings?.taxRate,
+    settings?.locationTaxRate,
+    settings?.tax?.rate,
+  ];
+  for (const v of candidates) {
+    const num = Number(v);
+    if (Number.isFinite(num) && num >= 0) {
+      return num > 1 ? num / 100 : num;
+    }
+  }
+  return FALLBACK_TAX_RATE;
+}
 
 export function CartPanel({
   items = [],
@@ -36,35 +69,26 @@ export function CartPanel({
   waiversAttached = [],    // [{ signatureId, name, coverage, minors: [{name}], ... }]
   cartCustomer = null,
   onCollectWaivers,        // (mode) => void — opens customer or waiver modal
+  onClearCustomer,         // () => void — remove the booking customer
   onChangeWaivers,         // (next) => void — full replacement of waiver list
   waiverPool = [],         // [{ key, name, kind, signatureId, primaryName }]
   ticketAssignments = {},  // { [ticketIndex]: poolKey }
   onAssignTicket,          // (ticketIndex, poolKey) => void
   onDetachTicket,          // (ticketIndex) => void
+  onEditItem,
   recipientAssignments = {},
   onAssignRecipient,
   onClearRecipient,
+  checkoutBlocker = null,
 }) {
-  // Discount can be one of three modes — same as PaymentTab on All Bookings.
-  // Code: typed string → validated against /promos/validate → server-defined value
-  // Percentage: cashier types %, applied directly (subject to manager override above 20%)
-  // Amount: cashier types $, applied directly (subject to manager override above $20)
   const [promo, setPromo] = useState(null);                // applied discount object
   const [promoOpen, setPromoOpen] = useState(false);       // input expanded?
-  const [promoMode, setPromoMode] = useState("code");      // "code" | "percentage" | "amount"
   const [promoInput, setPromoInput] = useState("");
   const [validate, { isFetching: isValidating }] = useLazyValidateDiscountCodeQuery();
 
-  // Manager-override modal state — opened when validate returns a
-  // blockable error (expired / usage limit reached) so a manager can
-  // type their PIN and authorize the apply.
-  const [overrideContext, setOverrideContext] = useState(null);
 
   // Layered POS settings — location defaults + per-device overrides, set at pair time.
   const settings = useEffectiveSettings();
-  const pctLimit = Number(settings.cashierDiscountPercentLimit ?? 20);
-  const amtLimit = Number(settings.cashierDiscountAmountLimit ?? 20);
-  const skipPin = !!settings.allowCustomDiscountWithoutPin;
 
   // Waiver gating — sum quantities of every cart item whose product
   // requires a waiver, then compare against total spots covered by the
@@ -110,14 +134,18 @@ export function CartPanel({
   const waiversMissing = Math.max(0, waiversNeeded - waiversCount);
 
   const primaryCustomer = cartCustomer || waiversAttached[0] || null;
-  const customerRequiredTypes = ["voucher_pack", "membership", "gift_card"];
-  const needsCustomer = items.some((item) =>
-    customerRequiredTypes.includes(
-      String(item?.productType || "").toLowerCase()
-    )
+  const checkoutRequirements = React.useMemo(
+    () =>
+      getCheckoutRequirements(items, {
+        customer: primaryCustomer,
+        waiverCoverage: waiversCount,
+        waiverPolicy: "beforePayment",
+      }),
+    [items, primaryCustomer, waiversCount]
   );
+  const needsCustomer = checkoutRequirements.requiresCustomer;
   const missingRecipients = items.reduce((count, item, itemIndex) => {
-    if (!customerRequiredTypes.includes(String(item?.productType || "").toLowerCase())) {
+    if (!requiresRecipientForCheckout(item)) {
       return count;
     }
     const qty = Math.max(1, Number(item.qty) || 1);
@@ -135,12 +163,32 @@ export function CartPanel({
     );
   };
 
-  const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
+  const subtotal = items.reduce((s, it) => s + getCartLineSubtotal(it), 0);
+  const promoCartLines = React.useMemo(
+    () =>
+      items
+        .map((item) => ({
+          activityId: Number(item.activityId || 0) || null,
+          variationId: Number(item.variationId || 0) || null,
+          activityType: item.activityTypeKey || item.typeKey || item.productType || null,
+          quantity: Math.max(1, Number(item.qty || 1) || 1),
+          subtotal: getCartLineSubtotal(item),
+        }))
+        .filter((line) => line.subtotal > 0 && (line.activityId || line.variationId || line.activityType)),
+    [items]
+  );
   const discountAmount = computeDiscountAmount(promo, subtotal);
   const memberDiscount = member ? subtotal * 0.1 : 0;
   const afterDiscount = Math.max(0, subtotal - discountAmount - memberDiscount);
-  const tax = afterDiscount * TAX_RATE;
-  const total = afterDiscount + tax;
+  const taxRate = resolveTaxRate(settings);
+  // Match the backend's calculateTaxSummary (utils/shared.js):
+  //   add_to_price     → tax is added on top of the price (exclusive)
+  //   include_in_price → tax is the portion already inside the price (inclusive)
+  const taxInclusive = String(settings?.taxCalculation || "add_to_price") === "include_in_price";
+  const tax = taxInclusive
+    ? afterDiscount - afterDiscount / (1 + taxRate)
+    : afterDiscount * taxRate;
+  const total = taxInclusive ? afterDiscount : afterDiscount + tax;
 
   // Push current pricing up so CashierApp can include it in createBooking
   React.useEffect(() => {
@@ -168,9 +216,13 @@ export function CartPanel({
     if (!raw) return;
 
     // Code path — validates against the server, gets discount details
-    if (promoMode === "code") {
-      try {
-        const res = await validate(raw).unwrap();
+    try {
+        const res = await validate({
+          code: raw,
+          subtotalAmount: subtotal,
+          cartLines: promoCartLines,
+          guestId: primaryCustomer?.guestId || primaryCustomer?.id || null,
+        }).unwrap();
         if (res?.success && res.data) {
           setPromo(res.data);
           setPromoOpen(false);
@@ -180,146 +232,9 @@ export function CartPanel({
           toast.error("Invalid promo code");
         }
       } catch (err) {
-        const status = err?.status;
         const msg = err?.data?.message || err?.data?.error || "Invalid promo code";
-        const isOverridable = status === 400 && /expired|usage limit/i.test(msg);
-        if (isOverridable) {
-          setOverrideContext({
-            code: raw,
-            reason: msg,
-            action: /expired/i.test(msg) ? "apply_expired_promo" : "apply_over_limit_promo",
-          });
-          return;
-        }
         toast.error(msg);
       }
-      return;
-    }
-
-    // Manual percentage / amount — no server validation, just bounds checks
-    const value = Number(raw);
-    if (!Number.isFinite(value) || value <= 0) {
-      toast.error("Enter a positive number");
-      return;
-    }
-    if (promoMode === "percentage") {
-      if (value > 100) {
-        toast.error("Percentage can't exceed 100");
-        return;
-      }
-      // Threshold gate — over the location's % limit needs manager override (unless skipPin)
-      if (!skipPin && value > pctLimit) {
-        setOverrideContext({
-          code: `${value}%`,
-          reason: `${value}% manual discount exceeds the ${pctLimit}% cashier limit`,
-          action: "apply_manual_percentage_override",
-          payload: { mode: "percentage", value },
-        });
-        return;
-      }
-      setPromo({
-        discountId: null,
-        name: `Manual ${value}% off`,
-        code: null,
-        discountType: 1,
-        value,
-        maxValue: 0,
-        _manual: true,
-      });
-      setPromoOpen(false);
-      setPromoInput("");
-      toast.success(`${value}% discount applied`);
-      return;
-    }
-    if (promoMode === "amount") {
-      if (value > subtotal) {
-        toast.error("Discount can't exceed the subtotal");
-        return;
-      }
-      // Threshold gate — over the location's $ limit needs manager override (unless skipPin)
-      if (!skipPin && value > amtLimit) {
-        setOverrideContext({
-          code: `$${value}`,
-          reason: `$${value.toFixed(2)} manual discount exceeds the $${amtLimit.toFixed(2)} cashier limit`,
-          action: "apply_manual_amount_override",
-          payload: { mode: "amount", value },
-        });
-        return;
-      }
-      setPromo({
-        discountId: null,
-        name: `Manual $${value.toFixed(2)} off`,
-        code: null,
-        discountType: 2,
-        value,
-        maxValue: 0,
-        _manual: true,
-      });
-      setPromoOpen(false);
-      setPromoInput("");
-      toast.success(`$${value.toFixed(2)} discount applied`);
-    }
-  };
-
-  // After a manager authorises, fetch the promo's data ignoring the
-  // expiry / usage check, then apply it. We do this client-side: the
-  // validate endpoint won't tell us the value when it 400s, so we
-  // pull it via a separate "force" call. For now we re-call validate
-  // and surface whatever it returns; backend can add a force=true
-  // query param later for cleaner data.
-  const onOverrideApproved = async (audit) => {
-    if (!overrideContext) return;
-    const { code, action, payload } = overrideContext;
-    try {
-      // Manual % / $ override → apply directly, the audit row carries the
-      // approval. No server lookup needed.
-      if (payload?.mode === "percentage") {
-        setPromo({
-          discountId: null,
-          name: `Manual ${payload.value}% off (manager approved)`,
-          code: null,
-          discountType: 1,
-          value: payload.value,
-          maxValue: 0,
-          _manual: true,
-          _overrideAuditId: audit.auditId,
-        });
-        toast.success(`Override applied — ${payload.value}% off`);
-      } else if (payload?.mode === "amount") {
-        setPromo({
-          discountId: null,
-          name: `Manual $${payload.value.toFixed(2)} off (manager approved)`,
-          code: null,
-          discountType: 2,
-          value: payload.value,
-          maxValue: 0,
-          _manual: true,
-          _overrideAuditId: audit.auditId,
-        });
-        toast.success(`Override applied — $${payload.value.toFixed(2)} off`);
-      } else {
-        // Code override — re-fetch to get the discount details
-        const apiBase = import.meta.env.VITE_API_BASE_URL || "/api";
-        const r = await fetch(`${apiBase}/promos/validate/${encodeURIComponent(code)}?override=1`);
-        const body = await r.json();
-        const discount = body?.data || {
-          discountId: null,
-          name: `Override · ${code}`,
-          code,
-          discountType: 1,
-          value: 0,
-          maxValue: 0,
-        };
-        setPromo({ ...discount, _overrideAuditId: audit.auditId });
-        toast.success(`Override applied — code "${code}"`);
-      }
-      setPromoOpen(false);
-      setPromoInput("");
-    } catch (err) {
-      toast.error("Override approved but apply failed: " + (err?.message || ""));
-    } finally {
-      setOverrideContext(null);
-    }
   };
 
   const clearPromo = () => {
@@ -329,7 +244,7 @@ export function CartPanel({
 
   const isBold = variant === "bold";
   const panelStyle = {
-    width: 460, flexShrink: 0,
+    width: "clamp(360px, 30vw, 460px)", flexShrink: 0,
     minHeight: 0,
     alignSelf: "stretch",
     background: "var(--ink-0)",
@@ -369,7 +284,7 @@ export function CartPanel({
           ticket rows below. Each leaf shows whether it is already
           assigned to a ticket. Cashier can detach the whole waiver
           (× on the header) or add another guest at any time. */}
-      {(needsCustomer || waiversNeeded > 0 || waiversAttached.length > 0 || primaryCustomer) && (
+      {(items.length > 0 || needsCustomer || waiversNeeded > 0 || waiversAttached.length > 0 || primaryCustomer) && (
         <div style={{
           padding: "12px 18px",
           background: primaryCustomer ? "#EAF8EF" : "var(--ink-25)",
@@ -403,18 +318,31 @@ export function CartPanel({
             <div style={{ fontSize: 13, color: "var(--ink-600)" }}>
               {waiversNeeded > 0
                 ? "Add the booking customer with a signed waiver to start covering tickets."
-                : "Add the booking customer before taking payment."}
+                : needsCustomer
+                  ? "Add the booking owner before taking payment."
+                  : "Optional: add a customer for receipt, lookup, or loyalty."}
             </div>
           ) : !primaryCustomer.signatureId ? (
-            <div style={{
-              background: "white",
-              borderRadius: 10,
-              padding: "8px 10px",
-              border: "1.5px solid var(--ink-200)",
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-            }}>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => onCollectWaivers?.("customer")}
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onCollectWaivers?.("customer"); }
+              }}
+              title="Edit customer"
+              style={{
+                background: "white",
+                borderRadius: 10,
+                padding: "8px 10px",
+                border: "1.5px solid var(--ink-200)",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                cursor: "pointer",
+              }}
+            >
               <Icon name="user-round" size={14} style={{ color: "var(--ink-700)" }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink-900)" }}>
@@ -427,6 +355,15 @@ export function CartPanel({
                   {primaryCustomer.contact || primaryCustomer.contactEmail || primaryCustomer.contactPhone || "contact not on file"}
                 </div>
               </div>
+              <Icon name="pencil" size={13} style={{ color: "var(--ink-400)", flexShrink: 0 }} />
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onClearCustomer?.(); }}
+                title="Remove customer"
+                style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)", padding: 4, flexShrink: 0 }}
+              >
+                <Icon name="x" size={14} />
+              </button>
             </div>
           ) : (
             <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
@@ -514,12 +451,13 @@ export function CartPanel({
             item={it}
             itemIndex={idx}
             primaryCustomer={primaryCustomer}
-            requiresRecipient={customerRequiredTypes.includes(String(it?.productType || "").toLowerCase())}
+            requiresRecipient={requiresRecipientForCheckout(it)}
             recipientAssignments={recipientAssignments}
             onAssignRecipient={onAssignRecipient}
             onClearRecipient={onClearRecipient}
             onRemove={() => onRemove?.(idx)}
             onQty={(d) => onQty?.(idx, d)}
+            onEdit={() => onEditItem?.(idx)}
           />
         ))}
 
@@ -678,68 +616,26 @@ export function CartPanel({
             border: "1.5px solid var(--ink-200)", borderRadius: 14,
             display: "flex", flexDirection: "column", gap: 8,
           }}>
-            {/* Mode tabs */}
-            <div style={{ display: "inline-flex", background: "white", border: "1.5px solid var(--ink-200)", borderRadius: 10, padding: 3, alignSelf: "flex-start" }}>
-              {[
-                { key: "code", label: "Code" },
-                ...(settings.enableCustomDiscount ? [
-                  { key: "percentage", label: "%" },
-                  { key: "amount", label: "$" },
-                ] : []),
-              ].map((m) => (
-                <button
-                  key={m.key}
-                  type="button"
-                  onClick={() => { setPromoMode(m.key); setPromoInput(""); }}
-                  style={{
-                    all: "unset",
-                    cursor: "pointer",
-                    padding: "5px 14px",
-                    borderRadius: 7,
-                    fontWeight: 700,
-                    fontSize: 12,
-                    background: promoMode === m.key ? "var(--ink-800)" : "transparent",
-                    color: promoMode === m.key ? "white" : "var(--ink-700)",
-                  }}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
-
             <div style={{ display: "flex", gap: 8 }}>
-              {promoMode === "amount" && (
-                <span style={{ fontWeight: 800, fontSize: 18, color: "var(--ink-700)", alignSelf: "center", paddingLeft: 4 }}>$</span>
-              )}
               <input
                 autoFocus
                 value={promoInput}
                 onChange={(e) => {
-                  const v = promoMode === "code"
-                    ? e.target.value.toUpperCase()
-                    : e.target.value.replace(/[^0-9.]/g, "");
-                  setPromoInput(v);
+                  setPromoInput(e.target.value.toUpperCase());
                 }}
                 onKeyDown={(e) => { if (e.key === "Enter") applyPromo(); }}
-                placeholder={
-                  promoMode === "code" ? "Enter code"
-                  : promoMode === "percentage" ? "10"
-                  : "5.00"
-                }
-                inputMode={promoMode === "code" ? "text" : "decimal"}
+                placeholder="Enter promo code"
+                inputMode="text"
                 style={{
                   all: "unset",
                   flex: 1,
-                  fontFamily: promoMode === "code" ? "var(--font-mono)" : "var(--font-sans)",
+                  fontFamily: "var(--font-mono)",
                   fontWeight: 700,
                   fontSize: 15,
                   color: "var(--ink-900)",
-                  letterSpacing: promoMode === "code" ? "0.06em" : "0",
+                  letterSpacing: "0.06em",
                 }}
               />
-              {promoMode === "percentage" && (
-                <span style={{ fontWeight: 800, fontSize: 18, color: "var(--ink-700)", alignSelf: "center", paddingRight: 4 }}>%</span>
-              )}
               <button
                 type="button"
                 onClick={applyPromo}
@@ -756,11 +652,6 @@ export function CartPanel({
                 Cancel
               </button>
             </div>
-            {promoMode !== "code" && !skipPin && (
-              <div style={{ fontSize: 11, color: "var(--ink-500)", fontWeight: 600 }}>
-                Manual {promoMode === "percentage" ? "percent" : "dollar"} discounts above {promoMode === "percentage" ? `${pctLimit}%` : `$${amtLimit.toFixed(2)}`} need a manager.
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -792,14 +683,37 @@ export function CartPanel({
             </button>
           )}
         </div>
+        {checkoutBlocker?.message && (
+          <div
+            role="status"
+            style={{
+              marginTop: 10,
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: "1.5px solid #FFB199",
+              background: "#FFF0EA",
+              color: "#B83210",
+              fontSize: 12,
+              fontWeight: 800,
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
+            }}
+          >
+            <Icon name="alert-triangle" size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span>{checkoutBlocker.message}</span>
+          </div>
+        )}
         <button
           type="button"
           className="a-btn a-btn--primary"
           style={{ marginTop: 10, width: "100%", justifyContent: "center", padding: "14px 18px", fontSize: 16 }}
           onClick={onCheckout}
-          disabled={items.length === 0 || isSubmitting || waiversMissing > 0 || missingRecipients > 0}
+          disabled={items.length === 0 || isSubmitting}
           title={
-            waiversMissing > 0
+            checkoutRequirements.missingCustomer
+              ? "Add the booking owner before taking payment"
+              : waiversMissing > 0
               ? `Add ${waiversMissing} more guest${waiversMissing === 1 ? "" : "s"} with signed waivers before taking payment`
               : missingRecipients > 0
                 ? `Assign ${missingRecipients} recipient${missingRecipients === 1 ? "" : "s"} before taking payment`
@@ -809,23 +723,14 @@ export function CartPanel({
           <Icon name="credit-card" size={20} />
           {isSubmitting
             ? "Creating…"
+            : checkoutRequirements.missingCustomer
+              ? "Add owner"
             : waiversMissing > 0
               ? `Add ${waiversMissing} more guest${waiversMissing === 1 ? "" : "s"}`
               : `Take payment · $${total.toFixed(2)}`}
         </button>
       </div>
 
-      <ManagerOverridePrompt
-        open={!!overrideContext}
-        title="Promo blocked — manager approval needed"
-        description={overrideContext?.reason}
-        action={overrideContext?.action || "apply_promo_override"}
-        targetType="promo_code"
-        targetId={overrideContext?.code}
-        defaultReason="Customer brought a promotional offer"
-        onApprove={onOverrideApproved}
-        onCancel={() => setOverrideContext(null)}
-      />
     </section>
   );
 }
@@ -840,8 +745,10 @@ function CartRow({
   onClearRecipient,
   onRemove,
   onQty,
+  onEdit,
 }) {
   const qty = Math.max(1, Number(item.qty) || 1);
+  const editableSchedule = needsScheduleSelection(item);
   const recipientRows = requiresRecipient
     ? Array.from({ length: qty }, (_, unitIndex) => {
         const key = `${itemIndex}:${unitIndex}`;
@@ -852,13 +759,16 @@ function CartRow({
     : [];
 
   return (
-    <div style={{
-      display: "grid", gridTemplateColumns: "40px minmax(0, 1fr) auto auto auto", alignItems: "center", gap: 12,
-      padding: "12px 14px",
-      background: item.featured ? "var(--aero-orange-50)" : "#fff",
-      border: item.featured ? "2px solid var(--ink-800)" : "1.5px solid var(--ink-100)",
-      borderRadius: 14,
-    }}>
+    <div
+      style={{
+        display: "grid", gridTemplateColumns: "40px minmax(0, 1fr) auto auto auto", alignItems: "center", gap: 12,
+        padding: "12px 14px",
+        background: item.featured ? "var(--aero-orange-50)" : "#fff",
+        border: item.featured ? "2px solid var(--ink-800)" : "1.5px solid var(--ink-100)",
+        borderRadius: 14,
+        cursor: "default",
+      }}
+    >
       <div style={{
         width: 40, height: 40, borderRadius: 10,
         background: item.featured ? "var(--aero-orange-500)" : "var(--ink-50)",
@@ -870,6 +780,34 @@ function CartRow({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 700, fontSize: 15, color: "var(--ink-800)" }}>{item.name}</div>
         <div style={{ fontSize: 12, color: "var(--ink-500)" }}>{item.meta}</div>
+        {editableSchedule && (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onEdit?.();
+            }}
+            title="Pick a different date, time, variation or guests"
+            style={{
+              all: "unset",
+              cursor: "pointer",
+              marginTop: 6,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "5px 10px",
+              borderRadius: 999,
+              border: "1.5px solid var(--ink-200)",
+              background: "var(--ink-50)",
+              color: "var(--ink-700)",
+              fontSize: 12,
+              fontWeight: 800,
+            }}
+          >
+            <Icon name="calendar-clock" size={14} />
+            {hasScheduleSelection(item) ? "Change time" : "Select time"}
+          </button>
+        )}
         {recipientRows.length > 0 && (
           <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
             {recipientRows.map(({ key, unitIndex, assigned, recipient }) => (
@@ -892,11 +830,25 @@ function CartRow({
                   {recipient?.name || recipient?.guestName || "Assign recipient"}
                 </span>
                 {assigned && (
-                  <button type="button" className="a-btn a-btn--ghost a-btn--xs" onClick={() => onClearRecipient?.(itemIndex, unitIndex)}>
+                  <button
+                    type="button"
+                    className="a-btn a-btn--ghost a-btn--xs"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onClearRecipient?.(itemIndex, unitIndex);
+                    }}
+                  >
                     Clear
                   </button>
                 )}
-                <button type="button" className="a-btn a-btn--ghost a-btn--xs" onClick={() => onAssignRecipient?.(itemIndex, unitIndex)}>
+                <button
+                  type="button"
+                  className="a-btn a-btn--ghost a-btn--xs"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onAssignRecipient?.(itemIndex, unitIndex);
+                  }}
+                >
                   {recipient ? "Change" : "Assign"}
                 </button>
               </div>
@@ -905,16 +857,19 @@ function CartRow({
         )}
       </div>
       <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 6px", background: "var(--ink-50)", borderRadius: 999 }}>
-        <button onClick={() => onQty(-1)} style={{ all: "unset", cursor: "pointer", width: 24, height: 24, borderRadius: "50%", background: "#fff", boxShadow: "var(--shadow-1)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>−</button>
+        <button onClick={(event) => { event.stopPropagation(); onQty(-1); }} style={{ all: "unset", cursor: "pointer", width: 24, height: 24, borderRadius: "50%", background: "#fff", boxShadow: "var(--shadow-1)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>−</button>
         <span style={{ minWidth: 16, textAlign: "center", fontWeight: 700, fontSize: 14 }}>{item.qty}</span>
-        <button onClick={() => onQty(1)} style={{ all: "unset", cursor: "pointer", width: 24, height: 24, borderRadius: "50%", background: "#fff", boxShadow: "var(--shadow-1)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>+</button>
+        <button onClick={(event) => { event.stopPropagation(); onQty(1); }} style={{ all: "unset", cursor: "pointer", width: 24, height: 24, borderRadius: "50%", background: "#fff", boxShadow: "var(--shadow-1)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>+</button>
       </div>
       <div className="display-num" style={{ fontSize: 18, minWidth: 64, textAlign: "right" }}>
-        ${(item.price * item.qty).toFixed(2)}
+        ${getCartLineSubtotal(item).toFixed(2)}
       </div>
       <button
         type="button"
-        onClick={onRemove}
+        onClick={(event) => {
+          event.stopPropagation();
+          onRemove?.();
+        }}
         title="Remove from cart"
         style={{
           all: "unset",

@@ -139,7 +139,7 @@ export default function Login({ onUsePinLogin }) {
               Cashier
             </div>
             <div style={{ fontSize: 12, color: "var(--ink-500)", fontWeight: 600, marginTop: 2 }}>
-              Aerosports terminal
+              Movira terminal
             </div>
           </div>
         </div>

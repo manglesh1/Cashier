@@ -14,16 +14,20 @@ import storage from "redux-persist/lib/storage";
 
 import { baseApi } from "../api/baseApi";
 import authReducer from "../features/auth/authSlice";
+import cartReducer from "../features/cart/cartSlice";
 
 const rootReducer = combineReducers({
   [baseApi.reducerPath]: baseApi.reducer,
   auth: authReducer,
+  cart: cartReducer,
 });
 
 const persistConfig = {
   key: "cashier:root",
   storage,
-  whitelist: ["auth"],
+  // cart is persisted so a refresh / pull-to-refresh / kiosk reboot
+  // does not silently destroy an in-progress order.
+  whitelist: ["auth", "cart"],
   version: 1,
 };
 

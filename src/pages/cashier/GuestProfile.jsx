@@ -3,7 +3,7 @@
 // see the guest's recent bookings. From here the cashier can jump into
 // the admin booking detail to take payment, send a waiver, etc.
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
 import { useSearchGuestsQuery, useGetAllBookingQuery } from "../../features/bookings/bookingApi";
@@ -18,7 +18,32 @@ export function GuestProfile() {
   const { data: searchResults, isFetching } = useSearchGuestsQuery(query, {
     skip: query.length < 4,
   });
-  const guests = searchResults?.data || [];
+  // Email is the identity key: collapse duplicate guest rows that share an
+  // email into one card (POS walk-ins + admin/online all roll up). Prefer a
+  // real name over a "Walk-in …" placeholder. Rows with no email stay
+  // separate (no key to merge on). Selecting a card loads ALL bookings for
+  // that email (the detail searches by email), so every booking shows.
+  const guests = useMemo(() => {
+    const raw = searchResults?.data || [];
+    const isPlaceholder = (n) => /^walk[\s-]?in/i.test(String(n || "").trim());
+    const byEmail = new Map();
+    const noEmail = [];
+    for (const g of raw) {
+      const email = String(g.guestEmail || "").trim().toLowerCase();
+      if (!email) { noEmail.push(g); continue; }
+      const existing = byEmail.get(email);
+      if (!existing) {
+        byEmail.set(email, { ...g, _profileCount: 1 });
+        continue;
+      }
+      existing._profileCount += 1;
+      // Upgrade the displayed record to a real (non-placeholder) name.
+      if (isPlaceholder(existing.guestName) && !isPlaceholder(g.guestName)) {
+        byEmail.set(email, { ...g, _profileCount: existing._profileCount });
+      }
+    }
+    return [...byEmail.values(), ...noEmail];
+  }, [searchResults]);
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -125,8 +150,13 @@ function GuestRow({ g, isSelected, onClick }) {
         {initials(g.guestName)}
       </div>
       <div style={{ flex: 1, lineHeight: 1.3, minWidth: 0 }}>
-        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--ink-900)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {g.guestName || "—"}
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--ink-900)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.guestName || "—"}</span>
+          {g._profileCount > 1 && (
+            <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, color: "var(--ink-600)", background: "var(--ink-100)", borderRadius: 999, padding: "2px 7px" }}>
+              {g._profileCount} profiles
+            </span>
+          )}
         </div>
         <div style={{ fontSize: 11.5, color: "var(--ink-500)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {g.guestEmail || g.guestPhone || `Guest #${g.guestId}`}
