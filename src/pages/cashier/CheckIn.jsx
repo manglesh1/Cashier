@@ -123,7 +123,55 @@ function buildBookingPromoCartLines(booking) {
   ].filter((line) => line.subtotal > 0 && (line.activityId || line.variationId || line.activityType));
 }
 
-const fmtTime = (range) => (range || "").split(/[–-]/)[0].trim() || "—";
+const fmtTime = (range) => formatClockLabel((range || "").split(/[–-]/)[0].trim()) || "—";
+
+const formatClockLabel = (value) => {
+  if (!value) return "";
+  const raw = String(value).trim();
+  const timeMatch = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (timeMatch) {
+    const hour24 = Number(timeMatch[1]);
+    const hour = hour24 % 12 || 12;
+    const suffix = hour24 >= 12 ? "PM" : "AM";
+    return `${hour}:${timeMatch[2]} ${suffix}`;
+  }
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+  return raw;
+};
+
+const formatTimeRange = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "—") return "";
+  const parts = raw.split(/\s*(?:–|-|to)\s*/i).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${formatClockLabel(parts[0])} - ${formatClockLabel(parts[1])}`;
+  }
+  return formatClockLabel(raw);
+};
+
+const formatScheduledTicketTime = (ticket, bookingTimeRange = "") => {
+  const slotStart = ticket?.slot?.fromTime;
+  const slotEnd = ticket?.slot?.toTime;
+  if (slotStart && slotEnd) {
+    return `${formatClockLabel(slotStart)} - ${formatClockLabel(slotEnd)}`;
+  }
+
+  if (bookingTimeRange && bookingTimeRange !== "—") return formatTimeRange(bookingTimeRange);
+
+  if (ticket?.validFrom && ticket?.validUntil) {
+    const start = new Date(ticket.validFrom);
+    const end = new Date(ticket.validUntil);
+    const durationHours = (end - start) / (1000 * 60 * 60);
+    const startsAtDayOpen = start.getHours() === 0 && start.getMinutes() === 0;
+    if (startsAtDayOpen && durationHours > 6) return `until ${formatClockLabel(ticket.validUntil)}`;
+    return `${formatClockLabel(ticket.validFrom)} - ${formatClockLabel(ticket.validUntil)}`;
+  }
+
+  return ticket?.validFrom ? formatClockLabel(ticket.validFrom) : "";
+};
 
 
 
@@ -535,7 +583,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const bookingNumber = displayText(booking.bookingNumber, "Booking");
   const bookingName = displayText(booking.bookingName, "Walk-in");
   const bookingActivityName = displayText(booking.activityName, "Activity");
-  const bookingTimeRange = displayText(booking.timeRange, "—");
+  const bookingTimeRange = formatTimeRange(displayText(booking.timeRange, "")) || "—";
 
   // Tickets are the source of truth — one row per redeemable line.
   const { data: ticketsData, isLoading: ticketsLoading, refetch: refetchTickets } =
@@ -1427,12 +1475,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
             const productName = firstText(t.product?.name, t.activity?.name, activityNameFromBooking(booking), "Item");
             const variationName = displayText(t.variation?.name, "");
             const ticketCode = displayText(t.ticketCode, "");
-            const time = t.validFrom
-              ? new Date(t.validFrom).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
-              : null;
-            const dur = (t.validFrom && t.validUntil)
-              ? Math.round((new Date(t.validUntil) - new Date(t.validFrom)) / (1000 * 60 * 60))
-              : null;
+            const time = formatScheduledTicketTime(t, bookingTimeRange);
             return (
               <li
                 key={t.ticketId}
@@ -1475,7 +1518,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                     <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, color: "var(--aero-orange-600)" }}>
                       {ticketCode}
                     </span>
-                    {time && <span>· {time}{dur ? ` (${dur}h)` : ""}</span>}
+                    {time && <span>· {time}</span>}
                     {isBlocked && (
                       <span style={{
                         display: "inline-flex", alignItems: "center", gap: 4,
