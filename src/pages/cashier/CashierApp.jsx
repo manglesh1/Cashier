@@ -813,7 +813,7 @@ export function CashierApp() {
       blockCheckout("schedule", "Please check out one booking date at a time.");
       return;
     }
-    const bookingDate = scheduledDates[0] || new Date().toISOString().slice(0, 10);
+    const bookingDate = scheduledDates[0] || formatDateValue(new Date());
 
     const sessions = regularItems
       .filter((it) => it.activityId)

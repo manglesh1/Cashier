@@ -96,6 +96,36 @@ Waiver / Refund. Backend is the Express + Sequelize app at
   with these so cart total == booking total (was a 5%-vs-10% mismatch bug).
 - `hasCashDrawer`, `openDrawerForCashOnly`, discount limits, etc.
 
+## Unified scan pipeline (the one logical model)
+Any scanned code flows through **one** pipeline: `scan → resolve → [redeemables] → act`.
+- **Backend resolver:** `GET /api/redeemables/resolve/:code`
+  (`redeemableController.resolveCode`, route `routes/redeemableRoutes.js`). Resolves
+  ANY code — AS-T- gate ticket, AS-V- voucher, voucher-pack constituent token, or
+  stock-entitlement token — to a uniform `{ code, context, redeemables[] }`. Each
+  redeemable carries a DECLARED action: `schedule_nearest` | `redeem_qty` |
+  `admit` | `none`, plus the ids the dispatcher needs. (Gift cards + memberships
+  keep their own dedicated flows — stored-value/PIN, benefit selection — out of
+  this resolver.)
+- **Frontend:** `features/redeemables/redeemablesApi.js` (`useLazyResolveCodeQuery`)
+  → `RedeemableList.jsx` (renders redeemables grouped, one action button each,
+  driven purely by `action.type`+`state`) → `actRedeemable.js` (the single
+  dispatcher: admit→redeemTicket, schedule_nearest→availability+pickNearestSession+
+  scheduleVoucher, redeem_qty→redeemEntitlement). No per-kind branching in the UI.
+- **Adopted in `VoucherCounter`** (`ResolvedResult` + `RedeemableList` + `handleAct`).
+  Same pattern can repoint Redeem (gate mode = auto-fire the single `admit`
+  redeemable) and Check-in (scan booking → its tickets) onto the same component.
+- **ONE redeemable per stock item (no shadow tickets).** A stock credit (grip
+  socks, food, merch) is a COUNTER hand-over tracked by `Entitlement.remainingQty`
+  — never a gate admit. `buildNoScheduleArtifactLines` no longer mints a shadow
+  `entitlement` Ticket (it created a 2nd, unlinked redeem path: scan `AS-T-` →
+  admit vs entitlement → redeem_qty → double-redeem). The Entitlement is the
+  single source of truth: it shows in the admin Tickets tab (surfaced from the
+  Entitlement table by `getTicketsForBooking`, `isEntitlement` rows) and the POS
+  pack view, and redeems via its `AS-V-` token → `redeem_qty`. Existing shadow
+  `entitlement` tickets were deleted. Standalone stock SALES (popcorn bought on
+  its own) still mint a normal stock_item Ticket (no entitlement) and the
+  resolver groups those as `stock` (counter "Redeem", not gate "Admit").
+
 ## Key flows & decisions
 - **Sell — nearest-slot auto-assign:** tapping a slot product fetches today's
   availability and auto-picks the nearest sellable slot (`scheduleHelpers
@@ -177,6 +207,28 @@ Waiver / Refund. Backend is the Express + Sequelize app at
 - **Voucher counter:** `/vouchers/by-token/:token` now falls back to a
   **Ticket by ticketCode** (`kind:"ticket"`) so stock-item/add-on tickets
   (AS-T-…) resolve and redeem there.
+- **Voucher PACK redemption (one-screen pack view):** a pack's inclusions are
+  stored as separate rows under one booking — schedulable inclusions (jump pass)
+  are **BookingItems with a `redemptionToken`** (unbound, `slotId=null`), stock
+  inclusions are **Entitlements** (`originalQty`/`remainingQty`). Backend
+  `GET /vouchers/pack/by-token/:token` (`voucherController.getVoucherPackByToken`)
+  resolves ANY constituent token → the whole pack: `{ pack, vouchers[], entitlements[] }`
+  (vouchers carry `activityId`/`activityName`/`variation` + scheduled status).
+  POS `VoucherCounter` scans once → renders the pack: each **session pass** has a
+  "Redeem to nearest slot" button that fetches today's availability
+  (`getAvailability`), picks the nearest sellable slot (`pickNearestSession`,
+  same logic as Sell), resolves the slot via `getVariationSlotIds`, and calls
+  `scheduleVoucher({bookingItemId, slotId})` — the existing endpoint that **binds
+  the slot and reduces its capacity** (so capacity/attendance stay correct). Each
+  **stock item** has a "Redeem 1" button → `redeemEntitlement` (decrements
+  `remainingQty`). The view refetches after each action to show progress
+  (N/N scheduled, N/N redeemed). Gated on the pack being paid.
+  - **Admin booking-detail Tickets tab** (`getTicketsForBooking` +
+    `TicketsTab.jsx`) also lists the pack's UNBOUND jump-pass vouchers as
+    "Awaiting schedule" rows (`isUnscheduledVoucher`, productType session_pass,
+    code = the voucher's AS-V- token, `summary.awaitingScheduling`). Without this
+    only the stock entitlement tickets showed and the jump passes looked
+    missing. They become real slot-bound `Ticket` rows once scheduled.
 - **Gift card payment (checkout + check-in):** the `gift_card` method is a
   REAL tender now. Cashier enters card code+PIN → `gift-cards/lookup` shows
   balance → on Complete, `gift-cards/redeem {code,pin,amount,bookingId}`
@@ -221,8 +273,13 @@ Waiver / Refund. Backend is the Express + Sequelize app at
   `BookingItem` rows + bundle-inclusion snapshots (`isBundleInclusion`) +
   no-schedule artifacts (voucher/membership/gift card/entitlement) — so a
   standalone stock/add-on got NO ticket. Added `buildStandalonePurchasedItemLines`:
-  any non-bundle `purchasedItems` entry with activityId+variationId becomes a
-  ticket line. COUNT = quantity purchased (one AS-T- ticket per unit, resolved
+  a non-bundle `purchasedItems` entry becomes a ticket line ONLY when its type is
+  a counter-redeemable **stock_item / add_on** (allowlist
+  `COUNTER_REDEEMABLE_PURCHASED`) — NOT voucher_pack / membership / gift_card. (A
+  voucher pack's own `purchasedItems` row is the container; without the allowlist
+  it minted a bogus `voucher_pack` AS-T- ticket with a wrong same-day expiry. The
+  pack's jump-pass vouchers schedule via scheduleVoucher; its stock via
+  entitlements.) COUNT = quantity purchased (one AS-T- ticket per unit, resolved
   by the voucher counter). Mints on PAID bookings (unpaid waits for payment,
   then post-payment finalize syncs). Two rules that matter:
   - **Validity = end of the PURCHASE DAY.** validFrom null (usable now),
@@ -260,6 +317,13 @@ Waiver / Refund. Backend is the Express + Sequelize app at
   displayNames. `GuestWaiverSignature.signedByName` was already clean.
 
 ## Gotchas / conventions
+- **"Today" for scheduling/availability MUST be the LOCAL date, never
+  `new Date().toISOString().slice(0,10)` (that's UTC).** In IST (UTC+5:30) early
+  morning, UTC is still the previous day, so a UTC "today" schedules walk-ins /
+  voucher passes into YESTERDAY's slots (e.g. at 02:35 IST May 24 it picked
+  May 23 08:00 slots). Use `formatDateValue(new Date())` (local Y-M-D) — the Sell
+  auto-assign, voucher-pack `actRedeemable` schedule_nearest, and the checkout
+  bookingDate fallback all use it. CheckIn uses its own `localIsoDate` helper.
 - **Rules of Hooks:** all hooks BEFORE any early return. A `useMemo`/`useRef`
   after `if (!open) return null` crashes ("rendered more hooks…"). esbuild does
   NOT catch an undefined LOCAL reference — it surfaces at runtime, so the
