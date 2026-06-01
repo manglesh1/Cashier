@@ -98,6 +98,28 @@ export const bookingApi = baseApi.injectEndpoints({
       ],
     }),
 
+    // ── Card-on-terminal flow (Phase 4b) ─────────────────────────────
+    // recordPayment with paymentMethod='card' returns
+    //   { status: 'pending', transactionId, terminalSessionId }.
+    // The cashier UI then polls getTerminalPaymentStatus every 1s until
+    // it lands in a final state (captured | failed | cancelled), or
+    // calls cancelTerminalPayment if the customer walks away.
+    getTerminalPaymentStatus: builder.query({
+      query: (transactionId) => `/payments/terminal/${transactionId}/status`,
+      // Polling interval is set by the consumer via the hook options.
+    }),
+    cancelTerminalPayment: builder.mutation({
+      query: ({ transactionId, reason }) => ({
+        url: `/payments/terminal/${transactionId}/cancel`,
+        method: "POST",
+        body: { reason: reason || "cashier_cancel" },
+      }),
+      invalidatesTags: (result, error, { bookingId }) =>
+        bookingId
+          ? [{ type: "Booking", id: bookingId }, "Bookings"]
+          : ["Bookings"],
+    }),
+
     // Per-participant check-in roster + actions.
     getCheckInStatus: builder.query({
       query: (bookingId) => `/bookings/${bookingId}/check-in-status`,
@@ -197,9 +219,9 @@ export const bookingApi = baseApi.injectEndpoints({
         body,
       }),
       invalidatesTags: (result, error, { bookingId }) => [
-        { type: "Booking", id: bookingId },
-        { type: "Tickets", id: bookingId },
         { type: "CheckIn", id: bookingId },
+        { type: "Tickets", id: bookingId },
+        { type: "Booking", id: bookingId },
         "Bookings",
       ],
     }),
@@ -220,6 +242,8 @@ export const {
   usePaymentSendPaymentLinkMutation,
   useRecordPaymentMutation,
   useRefundPaymentMutation,
+  useGetTerminalPaymentStatusQuery,
+  useCancelTerminalPaymentMutation,
   useGetCheckInStatusQuery,
   useCheckInParticipantsMutation,
   useUndoParticipantCheckInMutation,

@@ -25,6 +25,7 @@ import { Icon } from "./Icon";
 import { CartPanel } from "./CartPanel";
 import { CartWaiverModal } from "./CartWaiverModal";
 import CashierPaymentDialog from "./CashierPaymentDialog";
+import SellPaymentOverlay from "./SellPaymentOverlay";
 import { CashierScreenBoundary } from "./CashierScreenBoundary";
 import { CatalogGrid } from "./CatalogGrid";
 import { ScheduleRequiredDialog } from "./ScheduleRequiredDialog";
@@ -56,6 +57,7 @@ import {
   useCreateBookingMutation,
   useValidateCartMutation,
   useLazyGetAvailabilityQuery,
+  useLazySearchWaiversQuery,
 } from "../../features/bookings/bookingApi";
 import { autoScheduleLine, formatDateValue } from "./scheduleHelpers";
 import {
@@ -415,6 +417,90 @@ export function CashierApp() {
       return next;
     });
   }, [waiverPool, waiverSpotCount]);
+
+  // Auto-attach the customer's existing waiver when:
+  //   • a customer is on the cart (cartCustomer)
+  //   • the cart has at least one waiver-required spot
+  //   • no waivers have been attached yet (waiversAttached is empty)
+  //
+  // Without this, simple adult-only sales force the cashier through
+  // the "Find waiver" search even though the customer already has a
+  // completed waiver on file. We do a quick searchWaivers by the
+  // customer's email/phone, take the first completed signature, and
+  // append it to waiversAttached — the auto-fill effect above then
+  // binds it to the spot, flipping the cart from "0 of 1 covered"
+  // to "1 of 1 covered" without any cashier action.
+  const [triggerWaiverSearch] = useLazySearchWaiversQuery();
+  const autoWaiverLookupRef = React.useRef({ guestId: null, inFlight: false });
+  React.useEffect(() => {
+    const guestId = Number(cartCustomer?.guestId || 0) || null;
+    if (!guestId) return;
+    if (waiverSpotCount <= 0) return;
+    if (waiversAttached.length > 0) return;
+    if (autoWaiverLookupRef.current.inFlight) return;
+    if (autoWaiverLookupRef.current.guestId === guestId) return;
+    // Use the customer's email (preferred) or phone as the search
+    // term — searchWaivers does a fuzzy match against signer name,
+    // email and phone.
+    const term =
+      (cartCustomer.contactEmail || cartCustomer.email || "").trim()
+      || (cartCustomer.contactPhone || cartCustomer.phone || "").trim()
+      || (cartCustomer.name || "").trim();
+    if (!term || term.length < 2) return;
+    autoWaiverLookupRef.current = { guestId, inFlight: true };
+    (async () => {
+      try {
+        const res = await triggerWaiverSearch({
+          search: term,
+          limit: 12,
+          contactOnly: true,
+        }).unwrap();
+        const rows = Array.isArray(res?.data) ? res.data : [];
+        // Match the customer's guestId precisely — searchWaivers may
+        // return overlapping name hits for unrelated guests, and we
+        // don't want to attach the wrong person's waiver.
+        const hit = rows.find((row) => {
+          const rowGuestId = Number(row?.guestId || row?.guest?.guestId || 0) || null;
+          return rowGuestId && rowGuestId === guestId;
+        });
+        if (!hit) return;
+        const signatureId = Number(hit.signatureId ?? hit.id);
+        if (!Number.isFinite(signatureId) || signatureId <= 0) return;
+        const signerName = hit.signedBy
+          || hit.signedByName
+          || hit.guest?.guestName
+          || hit.name
+          || cartCustomer.name
+          || "Guest";
+        const contactEmail = hit.guest?.guestEmail || hit.email || cartCustomer.contactEmail || "";
+        const contactPhone = hit.guest?.guestPhone || hit.phone || cartCustomer.contactPhone || "";
+        const minorList = Array.isArray(hit.minors) ? hit.minors : [];
+        const minorCount = hit.includesMinors === false ? 0 : minorList.length;
+        setWaiversAttached((prev) => {
+          if (prev.some((w) => Number(w.signatureId) === signatureId)) return prev;
+          return [
+            ...prev,
+            {
+              signatureId,
+              name: signerName,
+              selectedHolderName: signerName,
+              contact: contactEmail || contactPhone || "",
+              contactEmail,
+              contactPhone,
+              minorCount,
+              coverage: 1 + minorCount,
+              preferredAssignmentKey: `${signatureId}:signer`,
+              minors: minorList.slice(0, minorCount),
+            },
+          ];
+        });
+      } catch {
+        // Swallow — cashier can still use "Find waiver" manually.
+      } finally {
+        autoWaiverLookupRef.current.inFlight = false;
+      }
+    })();
+  }, [cartCustomer, waiverSpotCount, waiversAttached.length, triggerWaiverSearch, setWaiversAttached]);
 
   const [createBooking, { isLoading: isCreating }] = useCreateBookingMutation();
   const [validateCart, { isLoading: isValidatingCart }] = useValidateCartMutation();
@@ -992,12 +1078,147 @@ export function CashierApp() {
   // Sell catalog. (The earlier "Waves"/"Builder" layouts were demo
   // scaffolding with static data that produced un-checkout-able lines, so
   // they were removed — the live terminal template is the single source.)
+  // The existing catalog search input doubles as a universal voucher /
+  // entitlement / pack lookup. When the cashier types or scans a token
+  // matching the redemption-token shape, CatalogGrid debounces and asks
+  // the backend; on a hit, the catalog tiles are replaced with the
+  // voucher's inclusions.
+  //
+  // Design choice: a voucher inclusion is added to the cart as a NORMAL
+  // catalog item (same shape, same scheduling, same waiver gating) but
+  // priced at $0 and tagged with voucher metadata. We resolve the
+  // inclusion to its real catalog productItem by activityId + variationId
+  // and pass that through the existing addItem path. This way every
+  // downstream concern — requiresWaiver gate, schedule picker, customer
+  // attach, ticket issuance — runs through the same code path as a paid
+  // sale. The voucherToken / entitlementId on the line tells the
+  // backend to decrement instead of charge at checkout.
+  const handleAddVoucherInclusion = (inclusion, packContext) => {
+    // Attach the voucher's customer to the cart (if any). CartPanel
+    // reads {name, contact, contactEmail, contactPhone} — NOT
+    // {guestName, guestEmail, ...}. The pack lookup nests guest under
+    // `pack.guest`; the single-voucher / single-entitlement lookup
+    // puts it on the payload root.
+    const guest = packContext?.payload?.pack?.guest
+      || packContext?.payload?.guest
+      || packContext?.pack?.guest
+      || null;
+    if (guest?.guestId && !cartCustomer) {
+      const gEmail = guest.guestEmail || guest.email || "";
+      const gPhone = guest.guestPhone || guest.phone || "";
+      setCartCustomer({
+        guestId: guest.guestId,
+        name: guest.guestName || guest.name || "Guest",
+        contact: gEmail || gPhone || "",
+        contactEmail: gEmail,
+        contactPhone: gPhone,
+      });
+    }
+
+    const qty = Math.max(1, Number(inclusion.qty) || 1);
+    const voucherMeta = {
+      isVoucherRedemption: true,
+      voucherToken: inclusion.redemptionToken || null,
+      voucherKind: inclusion.kind,
+      voucherEntitlementId: inclusion.entitlementId || null,
+      voucherBookingItemId: inclusion.bookingItemId || null,
+    };
+    // Stable suffix so two different vouchers for the same activity
+    // don't merge into a single cart line (each carries its own
+    // redemption token / entitlement id).
+    const voucherIdSuffix = `::v:${inclusion.redemptionToken
+      || inclusion.entitlementId
+      || inclusion.bookingItemId
+      || "x"}`;
+
+    // Look up the real catalog productItem by activityId so the cart
+    // line inherits requiresWaiver, productType, pricingMode, variation
+    // metadata, and any other config from the live terminal template.
+    let matchedProduct = null;
+    let matchedSection = null;
+    for (const section of sections || []) {
+      for (const item of section.items || []) {
+        if (item.activityId !== inclusion.activityId) continue;
+        const vOk = !inclusion.variationId
+          || item.variationId === inclusion.variationId
+          || (item.variationOptions || []).some(
+              (v) => v.variationId === inclusion.variationId
+            );
+        if (vOk) { matchedProduct = item; matchedSection = section; break; }
+      }
+      if (matchedProduct) break;
+    }
+
+    if (matchedProduct) {
+      // If the inclusion picks a specific variation, override the
+      // matched product's defaults with that variation's pricing /
+      // capacity (we still zero the price below).
+      const chosenVariation = inclusion.variationId
+        ? (matchedProduct.variationOptions || []).find(
+            (v) => v.variationId === inclusion.variationId
+          )
+        : null;
+      const synthetic = {
+        ...matchedProduct,
+        ...(chosenVariation ? {
+          variationId: chosenVariation.variationId,
+          variationName: chosenVariation.name,
+          pricingMode: chosenVariation.pricingMode || chosenVariation.pricingType || matchedProduct.pricingMode,
+          includedGuests: chosenVariation.includedGuests ?? matchedProduct.includedGuests,
+          additionalPersonPrice: chosenVariation.additionalPersonPrice ?? matchedProduct.additionalPersonPrice,
+          minGuests: chosenVariation.minGuests ?? chosenVariation.minimumGuests ?? matchedProduct.minGuests,
+          maxGuests: chosenVariation.maxGuests ?? chosenVariation.maximumGuests ?? matchedProduct.maxGuests,
+        } : {}),
+        id: `${matchedProduct.id}${voucherIdSuffix}`,
+        price: 0,
+        qty,
+        ...voucherMeta,
+        // If the voucher is already bound to a slot, pass it through so
+        // the cart line skips the schedule picker.
+        ...(inclusion.slotId ? {
+          slotId: inclusion.slotId,
+          selectedDate: inclusion.slotDate || null,
+          timeRange: inclusion.slotTime || null,
+        } : {}),
+      };
+      addItem(synthetic, matchedSection);
+    } else {
+      // Fallback: the inclusion's activity isn't on this terminal's
+      // template (e.g. a Pizza Slice credit on a Parties terminal).
+      // Still build a synthetic productItem carrying the backend-supplied
+      // requiresWaiver so cart-side gating works.
+      const synthetic = {
+        id: `voucher${voucherIdSuffix}`,
+        activityId: inclusion.activityId,
+        variationId: inclusion.variationId || null,
+        variationName: inclusion.variationName || inclusion.activityName,
+        name: inclusion.activityName || "Voucher inclusion",
+        sectionTitle: packContext?.payload?.pack?.name || "Voucher",
+        price: 0,
+        qty,
+        requiresWaiver: !!inclusion.requiresWaiver,
+        ...voucherMeta,
+        ...(inclusion.slotId ? {
+          slotId: inclusion.slotId,
+          selectedDate: inclusion.slotDate || null,
+          timeRange: inclusion.slotTime || null,
+        } : {}),
+      };
+      addItem(synthetic, { title: packContext?.payload?.pack?.name || "Voucher" });
+    }
+
+    toast.success(
+      `Added ${qty} × ${inclusion.activityName || "voucher item"}${guest?.guestName ? ` for ${guest.guestName}` : ""}`
+    );
+  };
+
   const catalogMain = (
     <CatalogGrid
       sections={sections}
       loading={presetLoading}
       error={presetError}
       onAdd={addItem}
+      onAddVoucherInclusion={handleAddVoucherInclusion}
       busyItemId={autoSchedulingId}
     />
   );
@@ -1291,11 +1512,17 @@ export function CashierApp() {
         }}
         label="payment dialog"
       >
-        <CashierPaymentDialog
+        {/* Sell-flow payment overlay. Pre-creates the booking(s) from
+            the cart draft, then renders the same CheckInPaymentModal
+            used on the Check-in screen so both flows share one
+            payment UI. The booking lives in the backend the moment
+            the cashier taps Take payment; if they close before
+            completing payment, the booking remains unpaid and can be
+            finished from Check-in later. */}
+        <SellPaymentOverlay
           open={!!paymentBooking}
-          booking={paymentBooking}
+          draftPayment={paymentBooking}
           onClose={() => setPaymentBooking(null)}
-          onCompleteDraft={completeDraftCheckout}
           onComplete={() => {
             // Wipe everything cart-related and rotate the idempotency
             // key so the next checkout gets a fresh one. clearCart() also
@@ -1334,8 +1561,6 @@ class ModalErrorBoundary extends React.Component {
   componentDidCatch(error, info) {
     console.error(`Modal failed (${this.props.label || "modal"})`, error, info);
     toast.error(`The ${this.props.label || "modal"} ran into a problem and was closed. Please try again.`);
-    // Defer to next tick so React can finish the error commit before we
-    // re-trigger a state update in the parent.
     queueMicrotask(() => this.props.onError?.(error));
   }
 
@@ -1350,4 +1575,3 @@ class ModalErrorBoundary extends React.Component {
     return this.props.children;
   }
 }
-

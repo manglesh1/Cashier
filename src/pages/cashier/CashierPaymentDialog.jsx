@@ -19,6 +19,7 @@ import {
   useRedeemGiftCardMutation,
 } from "../../features/vouchers/voucherApi";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
+import TerminalProgressModal from "./TerminalProgressModal";
 import { getTerminal } from "../../lib/terminal";
 import { openCashDrawer, printReceipt } from "../../lib/hardware";
 import { moneyFmt, roundMoney } from "../../lib/money";
@@ -63,6 +64,15 @@ const PAYMENT_METHODS = [
 const QUICK_CASH = [1, 5, 10, 20, 50, 100];
 const KEYPAD = ["7", "8", "9", "4", "5", "6", "1", "2", "3", "0", "00", "."];
 
+const cashTenderLabel = (value) => {
+  const amount = Number(value) || 0;
+  if (amount >= 1) return `$${amount}`;
+  if (amount === 0.25) return "Quarter";
+  if (amount === 0.1) return "Dime";
+  if (amount === 0.05) return "Nickel";
+  return moneyFmt(amount);
+};
+
 export default function CashierPaymentDialog({
   open,
   booking,            // { bookingId, bookingNumber, totalAmount, balanceDue?, taxAmount?, subTotal?, ... }
@@ -78,6 +88,7 @@ export default function CashierPaymentDialog({
 
   const [method, setMethod] = useState("card");
   const [amount, setAmount] = useState("");
+  const [cashTenders, setCashTenders] = useState([]);
   const [note, setNote] = useState("");
   const [discount, setDiscount] = useState(null);
   const [complete, setComplete] = useState(null);
@@ -103,6 +114,11 @@ export default function CashierPaymentDialog({
   // Receipt recipient. Pre-filled from any known booking/customer email;
   // for a walk-in (no email captured) the cashier can type one here and Send.
   const [receiptEmail, setReceiptEmail] = useState("");
+  // Card-on-terminal: when method='card' and the backend opens a sale on
+  // the pin-pad, we hold the pending state here and render
+  // <TerminalProgressModal> until the cardholder taps or the cashier
+  // cancels. Shape: { transactionId, amount, instructions } or null.
+  const [pendingTerminal, setPendingTerminal] = useState(null);
 
   // Reset every time a new booking is opened.
   useEffect(() => {
@@ -110,6 +126,7 @@ export default function CashierPaymentDialog({
     const due = Number(booking?.balanceDue ?? booking?.totalAmount ?? 0);
     setMethod("card");
     setAmount(due.toFixed(2));
+    setCashTenders([]);
     setNote("");
     setDiscount(null);
     setComplete(null);
@@ -174,9 +191,20 @@ export default function CashierPaymentDialog({
   const isDraftSale = booking?.draftSale === true;
   const isBusy = isSubmitting || draftSubmitting || gcLooking || gcRedeeming;
 
-  const applyAmount = (v) => setAmount(String(v));
-  const addTender = (v) => setAmount(roundMoney((Number(amount) || 0) + v).toFixed(2));
+  const addTender = (v) => {
+    const value = Number(v) || 0;
+    if (value <= 0) return;
+    setAmount(roundMoney((Number(amount) || 0) + value).toFixed(2));
+    setCashTenders((prev) => {
+      const idx = prev.findIndex((entry) => Number(entry.value) === value);
+      if (idx < 0) return [...prev, { value, count: 1 }];
+      const next = [...prev];
+      next[idx] = { ...next[idx], count: next[idx].count + 1 };
+      return next;
+    });
+  };
   const appendDigit = (digit) => {
+    if (isCash && cashTenders.length > 0) setCashTenders([]);
     const cur = String(amount || "");
     if (digit === "." && cur.includes(".")) return;
     const next = cur === "0" && digit !== "." ? digit : `${cur}${digit}`;
@@ -184,6 +212,7 @@ export default function CashierPaymentDialog({
   };
   const handleMethodChange = (next) => {
     setMethod(next);
+    setCashTenders([]);
     // The method tender settles whatever remains after the gift-card credit.
     setAmount(next === "cash" ? "" : remainingAfterGift.toFixed(2));
   };
@@ -464,9 +493,26 @@ export default function CashierPaymentDialog({
           changeDue,
           referenceNumber: methodRef,
           terminalDeviceId: terminal?.deviceId || null,
+          // For card-on-terminal, pass the paired terminal id so the
+          // backend can route the sale to the right pin-pad.
+          terminalId: method === "card" ? (terminal?.terminalId || terminal?.deviceId || null) : undefined,
           remarks: methodRemarks,
           idempotencyKey: sessionKey ? `${sessionKey}:payment` : undefined,
         }).unwrap();
+      }
+      // Card-on-terminal path: backend returns { status: 'pending', transactionId, terminalSessionId }.
+      // Show the progress modal and wait for the cardholder to tap. The
+      // modal calls onComplete/onCancelled/onFailed which finishes the
+      // happy path (setComplete) or shows an error toast.
+      if (method === "card" && res?.data?.status === "pending") {
+        setPendingTerminal({
+          transactionId: res.data.transactionId,
+          amount: finalRecord,
+          instructions: res.data.instructions,
+          discountAmount,
+          discountLabel: discount?.label || null,
+        });
+        return; // setComplete runs in the modal's onComplete handler
       }
       if (isCash && finalRecord > 0) {
         openCashDrawer({ bookingId: booking.bookingId, terminal });
@@ -534,7 +580,48 @@ export default function CashierPaymentDialog({
     if (complete) onComplete?.();
   };
 
+  // Card-on-terminal: when a card sale is in flight, the modal owns the
+  // UI until the cardholder taps, the cashier cancels, or polling times
+  // out. handleSubmit setComplete()s in the captured handler so the
+  // receipt + drawer logic stays in one place.
+  const terminalProgressModal = pendingTerminal ? (
+    <TerminalProgressModal
+      transactionId={pendingTerminal.transactionId}
+      amount={pendingTerminal.amount}
+      bookingId={booking?.bookingId}
+      instructions={pendingTerminal.instructions}
+      onComplete={(result) => {
+        const data = result?.data || result;
+        setComplete({
+          bookingId: booking?.bookingId,
+          amountPaid: roundMoney(pendingTerminal.amount + (pendingTerminal.discountAmount || 0)),
+          discountAmount: pendingTerminal.discountAmount || 0,
+          discountLabel: pendingTerminal.discountLabel || null,
+          paymentMethod: "card",
+          methodAmount: pendingTerminal.amount,
+          tenderedAmount: pendingTerminal.amount,
+          changeDue: 0,
+          providerTransactionId: data?.providerTransactionId || null,
+          providerReference: data?.providerReference || null,
+          balanceRemaining: 0,
+        });
+        setPendingTerminal(null);
+        toast.success(`${moneyFmt(pendingTerminal.amount)} on card`);
+      }}
+      onCancelled={() => {
+        setPendingTerminal(null);
+        toast.info("Card payment cancelled");
+      }}
+      onFailed={(msg) => {
+        setPendingTerminal(null);
+        toast.error(msg || "Card payment failed");
+      }}
+    />
+  ) : null;
+
   return (
+    <>
+    {terminalProgressModal}
     <div role="dialog" aria-modal="true" style={{
       position: "fixed", inset: 0, zIndex: 1200,
       background: "rgba(26, 24, 20, 0.62)",
@@ -781,12 +868,49 @@ export default function CashierPaymentDialog({
                 border: "1.5px solid var(--ink-200)", borderRadius: 10,
                 display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-500)" }}>
-                  {isCash ? "Cash tendered" : "Amount"}
+                  {isCash ? "Cash tendered" : PAYMENT_METHODS.find((m) => m.value === method)?.label || "Amount"}
                 </div>
                 <div style={{ fontSize: 22, fontWeight: 900, color: "var(--ink-900)" }}>
                   {moneyFmt(amount || 0)}
                 </div>
               </div>
+              {isCash && cashTenders.length > 0 && (
+                <div style={{
+                  marginTop: 8,
+                  padding: "10px 12px",
+                  border: "1.5px solid var(--ink-200)",
+                  borderRadius: 10,
+                  background: "#FFFDF0",
+                  display: "grid",
+                  gap: 6,
+                }}>
+                  <div style={{
+                    fontSize: 11,
+                    fontWeight: 900,
+                    letterSpacing: ".06em",
+                    textTransform: "uppercase",
+                    color: "var(--ink-500)",
+                  }}>
+                    Cash entered
+                  </div>
+                  {cashTenders.map((entry) => (
+                    <div
+                      key={entry.value}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        fontSize: 13,
+                        fontWeight: 800,
+                        color: "var(--ink-900)",
+                      }}
+                    >
+                      <span>{entry.count} x {cashTenderLabel(entry.value)}</span>
+                      <span>{moneyFmt(entry.count * entry.value)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               {isCheck && (
                 <div style={{ marginTop: 8 }}>
                   <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-500)", marginBottom: 4 }}>
@@ -824,24 +948,19 @@ export default function CashierPaymentDialog({
                 {KEYPAD.map((k) => (
                   <button key={k} type="button" onClick={() => appendDigit(k)}
                     style={{ minHeight: 54, border: "1px solid var(--ink-200)", background: "white",
-                      borderRadius: 7, fontSize: 20, fontWeight: 900, cursor: "pointer" }}>
+                      borderRadius: 7, fontSize: 16, fontWeight: 800, cursor: "pointer",
+                    }}>
                     {k}
                   </button>
                 ))}
-                <button type="button" onClick={() => applyAmount("")}
+                <button type="button" onClick={() => {
+                  setAmount("");
+                  setCashTenders([]);
+                }}
                   style={{ minHeight: 54, border: "1px solid var(--ink-200)", background: "white",
-                    borderRadius: 7, fontSize: 16, fontWeight: 900, cursor: "pointer" }}>
+                    borderRadius: 7, fontSize: 14, fontWeight: 800, cursor: "pointer",
+                  }}>
                   Clear
-                </button>
-                <button type="button" onClick={() => applyAmount(String(amount || "").slice(0, -1))}
-                  style={{ minHeight: 54, border: "1px solid var(--ink-200)", background: "white",
-                    borderRadius: 7, fontSize: 16, fontWeight: 900, cursor: "pointer" }}>
-                  <Icon name="delete" size={16} />
-                </button>
-                <button type="button" onClick={() => applyAmount(remainingAfterGift.toFixed(2))}
-                  style={{ minHeight: 54, border: "1px solid var(--ink-200)", background: "white",
-                    borderRadius: 7, fontSize: 14, fontWeight: 900, cursor: "pointer" }}>
-                  Exact
                 </button>
               </div>
               </>
@@ -881,5 +1000,6 @@ export default function CashierPaymentDialog({
         />
       </div>
     </div>
+    </>
   );
 }

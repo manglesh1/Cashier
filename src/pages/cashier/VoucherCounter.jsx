@@ -2,6 +2,7 @@
 // memberships, and gift cards.
 
 import React, { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import {
@@ -123,6 +124,21 @@ export function VoucherCounter() {
   useEffect(() => {
     inputRef.current?.focus();
   }, [tab]);
+
+  // When UniversalSearch (on the Sell screen) hands off a scanned
+  // token, we land here with ?token=<value>. Auto-submit so the cashier
+  // doesn't have to scan twice. Strip the param after consuming it so
+  // a refresh doesn't re-trigger.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const handoffToken = searchParams.get("token");
+    if (!handoffToken) return;
+    setSearchParams({}, { replace: true });
+    // submit() reads state.token if no raw arg is passed; pass raw here
+    // so we don't race against setToken in the same tick.
+    submit(handoffToken);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const focusInput = () => {
     setTimeout(() => inputRef.current?.focus(), 0);
