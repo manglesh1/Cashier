@@ -39,6 +39,7 @@ import {
 } from "../../features/vouchers/voucherApi";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import CheckInPaymentModal from "./CheckInPaymentModal";
+import TerminalProgressModal from "./TerminalProgressModal";
 import { useDebounceSearch } from "../../hooks/useDebounceSearch";
 import { getTerminal } from "../../lib/terminal";
 import { printReceipt, openCashDrawer } from "../../lib/hardware";
@@ -578,6 +579,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const [paymentNote, setPaymentNote] = useState("");
   const [paymentComplete, setPaymentComplete] = useState(null);
   const [paymentDiscount, setPaymentDiscount] = useState(null);
+  const [pendingTerminal, setPendingTerminal] = useState(null);
   const [addItemOpen, setAddItemOpen] = useState(false);
   const [waiverTargetCode, setWaiverTargetCode] = useState(null);
   const [recordPayment, { isLoading: recordingPayment }] = useRecordPaymentMutation();
@@ -1056,9 +1058,21 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           tenderedAmount,
           changeDue,
           terminalDeviceId: terminal?.deviceId || null,
+          terminalId: paymentMethod === "card" ? (terminal?.terminalId || undefined) : undefined,
+          posDeviceId: paymentMethod === "card" ? (terminal?.deviceId || undefined) : undefined,
           idempotencyKey: sessionKey ? `${sessionKey}:payment` : undefined,
           remarks: [paymentNote || "Payment recorded at POS check-in", cashRemark].filter(Boolean).join(" "),
         }).unwrap();
+      }
+      if (paymentMethod === "card" && res?.data?.status === "pending") {
+        setPendingTerminal({
+          transactionId: res.data.transactionId,
+          amount: recordAmount,
+          instructions: res.data.instructions,
+          discountAmount,
+          discountLabel: paymentDiscount?.label || null,
+        });
+        return;
       }
       if (paymentMethod === "cash" && recordAmount > 0) {
         openCashDrawer({ bookingId: booking.bookingId, terminal });
@@ -1266,7 +1280,39 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           onPrintReceipt={handlePrintReceipt}
           onEmailReceipt={handleEmailReceipt}
           isSendingReceipt={sendingReceipt}
-          onClose={() => { setPaymentOpen(false); setPaymentComplete(null); refresh(); }}
+          onClose={() => { setPaymentOpen(false); setPaymentComplete(null); setPendingTerminal(null); refresh(); }}
+        />
+      )}
+
+      {pendingTerminal && (
+        <TerminalProgressModal
+          transactionId={pendingTerminal.transactionId}
+          amount={pendingTerminal.amount}
+          bookingId={booking.bookingId}
+          instructions={pendingTerminal.instructions}
+          onComplete={() => {
+            setPaymentComplete({
+              amountPaid: roundMoney(pendingTerminal.amount + (pendingTerminal.discountAmount || 0)),
+              discountAmount: pendingTerminal.discountAmount || 0,
+              discountLabel: pendingTerminal.discountLabel || null,
+              paymentAmount: pendingTerminal.amount,
+              paymentMethod: "card",
+              tenderedAmount: pendingTerminal.amount,
+              changeDue: 0,
+              drawerOpened: false,
+            });
+            setPendingTerminal(null);
+            refresh();
+            toast.success(`${moneyFmt(pendingTerminal.amount)} on card`);
+          }}
+          onCancelled={() => {
+            setPendingTerminal(null);
+            toast.error("Card payment cancelled");
+          }}
+          onFailed={(message) => {
+            setPendingTerminal(null);
+            toast.error(message || "Card payment failed");
+          }}
         />
       )}
 

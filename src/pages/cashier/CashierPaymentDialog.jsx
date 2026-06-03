@@ -495,7 +495,8 @@ export default function CashierPaymentDialog({
           terminalDeviceId: terminal?.deviceId || null,
           // For card-on-terminal, pass the paired terminal id so the
           // backend can route the sale to the right pin-pad.
-          terminalId: method === "card" ? (terminal?.terminalId || terminal?.deviceId || null) : undefined,
+          terminalId: method === "card" ? (terminal?.terminalId || undefined) : undefined,
+          posDeviceId: method === "card" ? (terminal?.deviceId || undefined) : undefined,
           remarks: methodRemarks,
           idempotencyKey: sessionKey ? `${sessionKey}:payment` : undefined,
         }).unwrap();
