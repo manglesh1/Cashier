@@ -4,6 +4,42 @@ import { Icon } from "./Icon";
 import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discountApi";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
+import ApplyBenefitFlyout from "./ApplyBenefitFlyout";
+
+// Compute a member benefit discount amount from applied member benefits.
+// Reads the todaysBenefits[] array on the applied member and walks each
+// cart line, picking the best matching benefit per line. Matches happen
+// on activityId / variationId / typeKey targets.
+function computeMemberBenefitAmount(member, items) {
+  if (!member || !Array.isArray(member.todaysBenefits) || member.todaysBenefits.length === 0) {
+    return 0;
+  }
+  let total = 0;
+  for (const item of items) {
+    const lineSubtotal = (Number(item.price) || 0) * (Number(item.qty) || 1);
+    if (lineSubtotal <= 0) continue;
+    const matching = member.todaysBenefits.filter((b) => {
+      if (b.target?.variationId) {
+        return Number(b.target.variationId) === Number(item.variationId);
+      }
+      if (b.target?.activityId) {
+        return Number(b.target.activityId) === Number(item.activityId);
+      }
+      if (b.target?.typeKey) {
+        return b.target.typeKey === item.activityTypeKey;
+      }
+      return false;
+    });
+    if (matching.length === 0) continue;
+    // Highest discount wins per line.
+    const best = matching.reduce(
+      (max, b) => (Number(b.discountPct) > Number(max.discountPct) ? b : max),
+      matching[0]
+    );
+    total += lineSubtotal * (Number(best.discountPct) / 100);
+  }
+  return Math.max(0, total);
+}
 
 // Compute a discount amount from the validated discount + subtotal.
 // Mirrors what the admin's createBooking pricing logic does:
@@ -153,9 +189,30 @@ export function CartPanel({
     );
   };
 
+  // Apply-benefit flyout state — single source of truth for the
+  // four benefit types it can apply. The legacy `member` prop still
+  // surfaces a flat 10% as a fallback when no benefits[] are loaded
+  // (during the transition before the scan flow is the default).
+  const [benefitFlyoutOpen, setBenefitFlyoutOpen] = useState(false);
+  const [appliedBenefits, setAppliedBenefits] = useState({
+    promo: null,
+    member: null,
+    vouchers: [],
+    payments: [],
+  });
+
   const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
-  const discountAmount = computeDiscountAmount(promo, subtotal);
-  const memberDiscount = member ? subtotal * 0.1 : 0;
+  // Promo can come from the inline input (legacy) OR the flyout.
+  // Flyout takes precedence when both set.
+  const effectivePromo = appliedBenefits.promo || promo;
+  const discountAmount = computeDiscountAmount(effectivePromo, subtotal);
+  // Member discount: prefer real benefits[] from the flyout when set;
+  // otherwise fall back to the legacy flat-10% from the member prop.
+  const memberDiscount = appliedBenefits.member
+    ? computeMemberBenefitAmount(appliedBenefits.member, items)
+    : member
+      ? subtotal * 0.1
+      : 0;
   const afterDiscount = Math.max(0, subtotal - discountAmount - memberDiscount);
   const taxRate = resolveTaxRate(settings);
   const taxConfigMissing = taxRate === null;
@@ -171,22 +228,41 @@ export function CartPanel({
   React.useEffect(() => {
     onPricingChange?.({
       subtotal,
-      discount: promo
+      discount: effectivePromo
         ? {
-            code: promo.code,
-            name: promo.name,
-            type: promo.discountType,
-            value: promo.value,
-            maxValue: promo.maxValue,
+            code: effectivePromo.code,
+            name: effectivePromo.name,
+            type: effectivePromo.discountType,
+            value: effectivePromo.value,
+            maxValue: effectivePromo.maxValue,
             amount: discountAmount,
+            source: effectivePromo.source || "code",
           }
         : null,
       memberDiscount,
       tax,
       total,
+      // Apply-benefit flyout state — CashierApp can forward to the
+      // backend (member benefits + voucher tokens to bind on submit
+      // + gift card payment intents already redeemed against the
+      // outstanding amount).
+      appliedBenefits: {
+        membershipId: appliedBenefits.member?.membershipId || null,
+        memberBenefits: appliedBenefits.member?.todaysBenefits || [],
+        voucherTokens: appliedBenefits.vouchers.map((v) => v.token),
+        nonCashPayments: appliedBenefits.payments,
+      },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subtotal, discountAmount, memberDiscount, tax, total, promo?.code]);
+  }, [
+    subtotal,
+    discountAmount,
+    memberDiscount,
+    tax,
+    total,
+    effectivePromo?.code,
+    appliedBenefits,
+  ]);
 
   const applyPromo = async () => {
     const raw = promoInput.trim();
@@ -817,10 +893,31 @@ export function CartPanel({
         <Totals
           subtotal={subtotal}
           discount={discountAmount}
-          discountLabel={promo ? `Promo · ${promo.code}` : "Discount"}
+          discountLabel={
+            effectivePromo
+              ? effectivePromo.code
+                ? `Promo · ${effectivePromo.code}`
+                : effectivePromo.name || "Discount"
+              : "Discount"
+          }
           memberDiscount={memberDiscount}
+          memberLabel={
+            appliedBenefits.member
+              ? `Member benefit${appliedBenefits.member.guestName ? ` · ${appliedBenefits.member.guestName}` : ""}`
+              : "Member 10%"
+          }
           tax={tax}
           total={total}
+          giftCardPaid={appliedBenefits.payments
+            .filter((p) => p.method === "gift_card")
+            .reduce((s, p) => s + p.amount, 0)}
+          voucherReservedCount={appliedBenefits.vouchers.length}
+          outstanding={
+            total -
+            appliedBenefits.payments
+              .filter((p) => p.method === "gift_card")
+              .reduce((s, p) => s + p.amount, 0)
+          }
           taxConfigMissing={taxConfigMissing}
         />
         {taxConfigMissing && items.length > 0 && (
@@ -845,17 +942,61 @@ export function CartPanel({
           </div>
         )}
         <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-          {!promo && settings.enableDiscounts && (
+          <button
+            type="button"
+            onClick={() => setBenefitFlyoutOpen(true)}
+            className="a-btn a-btn--ghost a-btn--sm"
+            style={{ flex: 1, justifyContent: "center" }}
+          >
+            <Icon name="gift" size={16} /> Apply benefit
+            {(appliedBenefits.promo ||
+              appliedBenefits.member ||
+              appliedBenefits.vouchers.length > 0 ||
+              appliedBenefits.payments.length > 0) && (
+              <span
+                style={{
+                  marginLeft: 6,
+                  padding: "1px 6px",
+                  borderRadius: 6,
+                  background: "var(--aero-orange-500)",
+                  color: "white",
+                  fontSize: 10,
+                  fontWeight: 800,
+                }}
+              >
+                {[
+                  appliedBenefits.promo && "promo",
+                  appliedBenefits.member && "member",
+                  appliedBenefits.vouchers.length > 0 && `${appliedBenefits.vouchers.length}v`,
+                  appliedBenefits.payments.length > 0 && `${appliedBenefits.payments.length}p`,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </span>
+            )}
+          </button>
+          {!promo && !appliedBenefits.promo && settings.enableDiscounts && (
             <button
               type="button"
               onClick={() => setPromoOpen((o) => !o)}
               className="a-btn a-btn--ghost a-btn--sm"
               style={{ flex: 1, justifyContent: "center" }}
+              title="Legacy inline promo input — same flow lives inside Apply benefit"
             >
-              <Icon name="gift" size={16} /> {promoOpen ? "Cancel" : "Promo code"}
+              <Icon name="tag" size={16} /> {promoOpen ? "Cancel" : "Promo code"}
             </button>
           )}
         </div>
+
+        <ApplyBenefitFlyout
+          open={benefitFlyoutOpen}
+          onClose={() => setBenefitFlyoutOpen(false)}
+          applied={appliedBenefits}
+          outstanding={Math.max(0, total - appliedBenefits.payments
+            .filter((p) => p.method === "gift_card")
+            .reduce((s, p) => s + p.amount, 0))}
+          onChange={setAppliedBenefits}
+        />
         <button
           type="button"
           className="a-btn a-btn--primary"
@@ -879,7 +1020,9 @@ export function CartPanel({
               ? "Tax config missing"
               : waiversMissing > 0
               ? `Add ${waiversMissing} more guest${waiversMissing === 1 ? "" : "s"}`
-              : `Take payment · $${total.toFixed(2)}`}
+              : `Take payment · $${Math.max(0, total - appliedBenefits.payments
+                .filter((p) => p.method === "gift_card")
+                .reduce((s, p) => s + p.amount, 0)).toFixed(2)}`}
         </button>
       </div>
 
@@ -1015,7 +1158,19 @@ function CartRow({
   );
 }
 
-function Totals({ subtotal, discount, discountLabel, memberDiscount, tax, total, taxConfigMissing = false }) {
+function Totals({
+  subtotal,
+  discount,
+  discountLabel,
+  memberDiscount,
+  memberLabel = "Member benefit",
+  tax,
+  total,
+  giftCardPaid = 0,
+  voucherReservedCount = 0,
+  outstanding = null,
+  taxConfigMissing = false,
+}) {
   const Row = ({ label, value, accent, big }) => (
     <div style={{
       display: "flex", justifyContent: "space-between", alignItems: "center",
@@ -1035,9 +1190,32 @@ function Totals({ subtotal, discount, discountLabel, memberDiscount, tax, total,
     <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
       <Row label="Subtotal" value={`$${subtotal.toFixed(2)}`} />
       {discount > 0 && <Row label={discountLabel} value={`-$${discount.toFixed(2)}`} accent="var(--color-success)" />}
-      {memberDiscount > 0 && <Row label="Member 10%" value={`-$${memberDiscount.toFixed(2)}`} accent="var(--aero-electric-500)" />}
+      {memberDiscount > 0 && (
+        <Row
+          label={memberLabel}
+          value={`-$${memberDiscount.toFixed(2)}`}
+          accent="var(--aero-electric-500)"
+        />
+      )}
       <Row label="Tax" value={taxConfigMissing ? "Not configured" : `$${tax.toFixed(2)}`} accent={taxConfigMissing ? "#B83210" : undefined} />
       <Row label="Total" value={`$${total.toFixed(2)}`} big />
+      {giftCardPaid > 0 && (
+        <Row
+          label="Gift card paid"
+          value={`-$${giftCardPaid.toFixed(2)}`}
+          accent="#EC4899"
+        />
+      )}
+      {voucherReservedCount > 0 && (
+        <Row
+          label={`Voucher reserved (${voucherReservedCount})`}
+          value="binds on submit"
+          accent="#22C55E"
+        />
+      )}
+      {outstanding !== null && (giftCardPaid > 0 || voucherReservedCount > 0) && (
+        <Row label="Outstanding" value={`$${Math.max(0, outstanding).toFixed(2)}`} big />
+      )}
     </div>
   );
 }
