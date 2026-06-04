@@ -67,9 +67,6 @@ export const bookingApi = baseApi.injectEndpoints({
     sendBookingConfirmation: builder.mutation({
       query: (body) => ({ url: "/payment/send-booking-confirmation", method: "POST", body }),
     }),
-    paymentSendPaymentLink: builder.mutation({
-      query: (body) => ({ url: "/payment/send-payment-link", method: "POST", body }),
-    }),
     recordPayment: builder.mutation({
       // See createBooking for the Idempotency-Key contract. For payment
       // record the key is even more important: a duplicate POST would
@@ -239,7 +236,6 @@ export const {
   useLazyGetAvailabilityQuery,
   useValidateCartMutation,
   useSendBookingConfirmationMutation,
-  usePaymentSendPaymentLinkMutation,
   useRecordPaymentMutation,
   useRefundPaymentMutation,
   useGetTerminalPaymentStatusQuery,

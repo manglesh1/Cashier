@@ -19,6 +19,8 @@ import {
 } from "../../features/bookings/bookingApi";
 import { useGetBookingTicketsQuery } from "../../features/tickets/ticketApi";
 import { moneyFmt } from "../../lib/money";
+import { printReceipt } from "../../lib/hardware";
+import { getTerminal } from "../../lib/terminal";
 
 // ── Status helpers ────────────────────────────────────────────────
 const sinceLabel = (iso) => {
@@ -471,6 +473,11 @@ function StatusHeader({ booking, ticketSummary }) {
           </button>
         )}
         <button type="button" className="a-btn a-btn--ghost"
+          onClick={() => printReceipt({
+            bookingId: booking?.bookingId || null,
+            bookingNumber: booking?.bookingNumber || null,
+            terminal: getTerminal(),
+          })}
           style={{ justifyContent: "center", padding: "12px 16px", fontSize: 14 }}>
           <Icon name="printer" size={16} /> Reprint
         </button>
