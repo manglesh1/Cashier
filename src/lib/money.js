@@ -16,7 +16,3 @@ export const roundMoney = (v) => {
 };
 
 export const moneyFmt = (v) => `$${roundMoney(v).toFixed(2)}`;
-
-// Convert money to integer cents (use this when accumulating sums to
-// avoid float drift, e.g. line allocations in CashierApp).
-export const toCents = (v) => Math.round((Number(v) || 0) * 100);

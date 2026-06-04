@@ -29,6 +29,11 @@ const FALLBACKS = {
   openDrawerForCashOnly: true,
   deviceTimeoutMinutes: 10,
   receiptPrinterId: null,
+  // Card reader bound to THIS till (Stripe tmr_… or Nuvei terminal id).
+  // Passed to the backend as readerId when charging a card so the prompt
+  // lights up on this station's reader. null → backend falls back to the
+  // venue's online reader.
+  terminalReaderId: null,
   // Walk-in slot auto-pick (POS quick checkout). A running slot is offered
   // only if it started within joinGraceMinutes AND has at least
   // minRemainingMinutes left before it ends; otherwise the next upcoming

@@ -31,6 +31,5 @@ export const discountApi = baseApi.injectEndpoints({
 });
 
 export const {
-  useValidateDiscountCodeQuery,
   useLazyValidateDiscountCodeQuery,
 } = discountApi;
