@@ -18,7 +18,6 @@ import { baseApi } from "../../api/baseApi";
 // deep-link into the admin app.
 import { useLogoutMutation } from "../../features/auth/authApi";
 import { logout as logoutAction } from "../../features/auth/authSlice";
-import { Sidebar } from "./Sidebar";
 import { Header } from "./Header";
 import { StatusPill } from "./StatusPill";
 import { Icon } from "./Icon";
@@ -735,9 +734,13 @@ export function CashierApp() {
 
     // Gift card pays via the gift-cards/redeem endpoint AFTER the booking
     // exists (it records the payment itself), so we create the booking
-    // unpaid here — no payment payload baked in.
+    // unpaid here — no payment payload baked in. The card TERMINAL is the
+    // same shape: the booking must exist first so the Stripe Terminal
+    // PaymentIntent can attach to it (sourceId=bookingId) and the finalizer
+    // marks it paid on capture — so we also create it unpaid (no payment).
     const payByGiftCard = payment?.giftCard === true;
-    const paymentPayload = payByGiftCard
+    const payByTerminal = payment?.terminal === true;
+    const paymentPayload = (payByGiftCard || payByTerminal)
       ? {}
       : {
           amountPaid: Number(payment?.amountPaid || 0),
@@ -756,6 +759,7 @@ export function CashierApp() {
       payment
     );
     let bookingForReceipt = null;
+    const recurringPaymentLinks = [];
 
     // Stable base key for this whole checkout. Sub-keys (":main", ":voucherN")
     // scope individual createBooking calls so a retried multi-booking checkout
@@ -813,6 +817,15 @@ export function CashierApp() {
         }).unwrap();
         const data = res?.data || {};
         const bookingId = data.bookingId || res?.bookingId || res?.bookingMasterId || res?.id;
+        if (data.paymentLink || res?.paymentLink) {
+          recurringPaymentLinks.push({
+            url: data.paymentLink || res.paymentLink,
+            name: item.name,
+            bookingId,
+          });
+        } else if (data.paymentUnavailableReason) {
+          toast.error(data.paymentUnavailableReason);
+        }
         setCreatedBookingId(bookingId);
         if (!bookingForReceipt) {
           bookingForReceipt = {
@@ -823,8 +836,21 @@ export function CashierApp() {
       }
     }
 
-    toast.success(`Order ${bookingForReceipt?.bookingNumber || ""} completed`);
-    return bookingForReceipt;
+    // For the terminal path the booking is still UNPAID here — the card
+    // hasn't been tapped yet. The terminal modal shows the approval toast,
+    // so don't claim "completed" prematurely.
+    if (recurringPaymentLinks.length > 0) {
+      const first = recurringPaymentLinks[0];
+      const opened = window.open(first.url, "_blank", "noopener,noreferrer");
+      toast.success(
+        opened
+          ? `Recurring checkout opened for ${first.name || "membership"}`
+          : "Recurring checkout link created. Open the booking and send the payment request if the popup was blocked."
+      );
+    } else if (!payByTerminal) {
+      toast.success(`Order ${bookingForReceipt?.bookingNumber || ""} completed`);
+    }
+    return { ...bookingForReceipt, recurringPaymentLinks };
   };
 
   const handleCheckout = async () => {

@@ -34,6 +34,7 @@ import { getTerminal } from "../../lib/terminal";
 import { openCashDrawer, printReceipt } from "../../lib/hardware";
 import { buildPaidCheckoutPricingSummary } from "./cartPricing";
 import CheckInPaymentModal from "./CheckInPaymentModal";
+import TerminalPaymentModal from "./TerminalPaymentModal";
 import TerminalProgressModal from "./TerminalProgressModal";
 
 export default function SellPaymentOverlay({
@@ -49,6 +50,7 @@ export default function SellPaymentOverlay({
   const [paymentDiscount, setPaymentDiscount] = useState(null);
   const [paymentComplete, setPaymentComplete] = useState(null);
   const [pendingTerminal, setPendingTerminal] = useState(null);
+  const [terminalPayment, setTerminalPayment] = useState(null);
   // After atomic create+pay we know the real bookingId — store it so
   // receipt actions (print / email) can target the right booking.
   const [paidBooking, setPaidBooking] = useState(null);
@@ -121,6 +123,7 @@ export default function SellPaymentOverlay({
     setPaymentDiscount(null);
     setPaymentComplete(null);
     setPendingTerminal(null);
+    setTerminalPayment(null);
     setPaidBooking(null);
     paymentLockRef.current = false;
     paymentSessionRef.current = null;
@@ -140,7 +143,8 @@ export default function SellPaymentOverlay({
       throw new Error("Checkout draft is no longer available.");
     }
     const payByGiftCard = payment?.giftCard === true;
-    const paymentPayload = payByGiftCard
+    const payByTerminal = payment?.terminal === true;
+    const paymentPayload = (payByGiftCard || payByTerminal)
       ? {}
       : {
           amountPaid: Number(payment?.amountPaid || 0),
@@ -218,7 +222,7 @@ export default function SellPaymentOverlay({
 
   // ── Submit handlers (mirror CheckIn.jsx) ─────────────────────────
   const handleRecordPayment = async () => {
-    if (paidBooking || paymentLockRef.current) return;
+    if (paymentComplete || paymentLockRef.current) return;
     const discountAmount = roundMoney(Math.min(Number(paymentDiscount?.amount || 0), balanceDue));
     const payableBalance = roundMoney(Math.max(0, balanceDue - discountAmount));
     const tenderedAmount = Number(paymentAmount);
@@ -236,6 +240,7 @@ export default function SellPaymentOverlay({
     }
 
     paymentLockRef.current = true;
+    let keepLock = false;
     const recordAmount = paymentMethod === "cash" ? payableBalance : tenderedAmount;
     const changeDue = paymentMethod === "cash"
       ? Math.max(0, Number((tenderedAmount - payableBalance).toFixed(2)))
@@ -247,33 +252,39 @@ export default function SellPaymentOverlay({
 
     try {
       const isCard = paymentMethod === "card";
-      const primary = await performCreateAndPay(isCard
+      const existingPrimary = paidBooking?.bookingId
         ? {
-            giftCard: true,
-            discountAmount,
-            discount: paymentDiscount,
-            discountLabel: paymentDiscount?.label || null,
-            discountCode: paymentDiscount?.code || null,
+            bookingId: paidBooking.bookingId,
+            bookingNumber: paidBooking.bookingNumber || "",
           }
-        : {
-            amountPaid: recordAmount,
-            paymentMethod,
-            tenderedAmount,
-            changeDue,
-            terminalDeviceId: terminal?.deviceId || null,
-            remarks: [paymentNote || "Payment recorded at POS sell", cashRemark].filter(Boolean).join(" "),
-            discountAmount,
-            discount: paymentDiscount,
-            discountLabel: paymentDiscount?.label || null,
-            discountCode: paymentDiscount?.code || null,
-          });
+        : null;
+      const primary = existingPrimary || (await performCreateAndPay(isCard
+          ? {
+              terminal: true,
+              discountAmount,
+              discount: paymentDiscount,
+              discountLabel: paymentDiscount?.label || null,
+              discountCode: paymentDiscount?.code || null,
+            }
+          : {
+              amountPaid: recordAmount,
+              paymentMethod,
+              tenderedAmount,
+              changeDue,
+              terminalDeviceId: terminal?.deviceId || null,
+              remarks: [paymentNote || "Payment recorded at POS sell", cashRemark].filter(Boolean).join(" "),
+              discountAmount,
+              discount: paymentDiscount,
+              discountLabel: paymentDiscount?.label || null,
+              discountCode: paymentDiscount?.code || null,
+            }));
       if (!primary?.bookingId) throw new Error("Booking creation failed.");
 
       // Record a separate "complimentary" line for the discount AFTER
-      // the booking exists. This keeps the audit trail consistent with
-      // the Check-in flow even though the discount was applied during
-      // the atomic create.
-      if (discountAmount > 0 && primary?.bookingId) {
+      // the booking exists. Card-present sales skip this until the
+      // terminal approves, so a cancelled tap does not leave a partial
+      // payment audit line on an unpaid booking.
+      if (!isCard && discountAmount > 0 && primary?.bookingId) {
         try {
           await recordPayment({
             bookingId: primary.bookingId,
@@ -297,45 +308,44 @@ export default function SellPaymentOverlay({
       }
 
       if (isCard && recordAmount > 0) {
-        const res = await recordPayment({
+        setPaidBooking({
+          ...(syntheticBooking || {}),
+          bookingId: primary.bookingId,
+          bookingNumber: primary.bookingNumber || "",
+          guestEmail: syntheticBooking?.guestEmail || null,
+          guest: { guestEmail: syntheticBooking?.guestEmail || null },
+        });
+        setTerminalPayment({
+          bookingId: primary.bookingId,
+          bookingNumber: primary.bookingNumber || "",
+          amount: recordAmount,
+          discountAmount,
+          discountLabel: paymentDiscount?.label || null,
+        });
+        keepLock = true;
+        return;
+      }
+
+      if (existingPrimary && recordAmount > 0) {
+        await recordPayment({
           bookingId: primary.bookingId,
           amountPaid: recordAmount,
-          paymentMethod: "card",
+          paymentMethod,
           tenderedAmount,
           changeDue,
           terminalDeviceId: terminal?.deviceId || null,
-          terminalId: terminal?.terminalId || undefined,
-          posDeviceId: terminal?.deviceId || undefined,
-          remarks: paymentNote || "Payment recorded at POS sell",
+          remarks: [paymentNote || "Payment recorded at POS sell", cashRemark].filter(Boolean).join(" "),
           idempotencyKey: paymentSessionRef.current
-            ? `${paymentSessionRef.current}:terminal-payment`
+            ? `${paymentSessionRef.current}:retry-${paymentMethod}`
             : undefined,
         }).unwrap();
-
-        if (res?.data?.status === "pending") {
-          setPaidBooking({
-            bookingId: primary.bookingId,
-            bookingNumber: primary.bookingNumber || "",
-            guestEmail: syntheticBooking?.guestEmail || null,
-            guest: { guestEmail: syntheticBooking?.guestEmail || null },
-          });
-          setPendingTerminal({
-            transactionId: res.data.transactionId,
-            bookingId: primary.bookingId,
-            bookingNumber: primary.bookingNumber || "",
-            amount: recordAmount,
-            discountAmount,
-            discountLabel: paymentDiscount?.label || null,
-            instructions: res.data.instructions,
-          });
-          return;
-        }
       }
 
       if (paymentMethod === "cash" && recordAmount > 0) {
         openCashDrawer({ bookingId: primary?.bookingId, terminal });
       }
       setPaidBooking({
+        ...(syntheticBooking || {}),
         bookingId: primary?.bookingId || null,
         bookingNumber: primary?.bookingNumber || "",
         guestEmail: syntheticBooking?.guestEmail || null,
@@ -358,7 +368,7 @@ export default function SellPaymentOverlay({
       const msg = err?.data?.message || err?.data?.error || err?.message || "Could not record payment";
       toast.error(msg);
     } finally {
-      paymentLockRef.current = false;
+      if (!keepLock) paymentLockRef.current = false;
     }
   };
 
@@ -370,7 +380,7 @@ export default function SellPaymentOverlay({
   // redemption can only happen against an existing booking by API
   // contract.
   const handleGiftCardPayment = async ({ code, pin, amount }) => {
-    if (paidBooking || paymentLockRef.current) return;
+    if (paymentComplete || paymentLockRef.current) return;
     const discountAmount = roundMoney(Math.min(Number(paymentDiscount?.amount || 0), balanceDue));
     const payable = roundMoney(Math.max(0, balanceDue - discountAmount));
     const apply = roundMoney(Math.min(payable, Number(amount) || 0));
@@ -382,11 +392,17 @@ export default function SellPaymentOverlay({
     const terminal = getTerminal();
     try {
       // Create the booking unpaid first (no payment payload) so we
-      // have a bookingId to redeem against.
-      const primary = await performCreateAndPay({ giftCard: true });
+      // have a bookingId to redeem against. If a previous card-terminal
+      // attempt already created the unpaid booking, reuse it.
+      const primary = paidBooking?.bookingId
+        ? {
+            bookingId: paidBooking.bookingId,
+            bookingNumber: paidBooking.bookingNumber || "",
+          }
+        : await performCreateAndPay({ giftCard: true });
       if (!primary?.bookingId) throw new Error("Booking creation failed.");
 
-      if (discountAmount > 0) {
+      if (discountAmount > 0 && !paidBooking?.bookingId) {
         await recordPayment({
           bookingId: primary.bookingId,
           amountPaid: discountAmount,
@@ -407,11 +423,24 @@ export default function SellPaymentOverlay({
       }).unwrap();
       const balanceRemaining = roundMoney(Math.max(0, payable - apply));
       setPaidBooking({
+        ...(syntheticBooking || {}),
         bookingId: primary.bookingId,
         bookingNumber: primary.bookingNumber || "",
         guestEmail: syntheticBooking?.guestEmail || null,
         guest: { guestEmail: syntheticBooking?.guestEmail || null },
+        totalAmount: balanceRemaining || apply,
+        balanceDue: balanceRemaining,
+        subtotalAmount: balanceRemaining || apply,
+        taxAmount: 0,
+        discountAmount: 0,
       });
+      if (balanceRemaining > 0) {
+        setPaymentMethod("card");
+        setPaymentAmount(balanceRemaining.toFixed(2));
+        setPaymentDiscount(null);
+        toast.success(`${moneyFmt(apply)} on gift card - ${moneyFmt(balanceRemaining)} still due`);
+        return;
+      }
       setPaymentComplete({
         bookingId: primary.bookingId,
         bookingNumber: primary.bookingNumber || "",
@@ -467,6 +496,7 @@ export default function SellPaymentOverlay({
       onComplete?.(paymentComplete);
     } else {
       setPendingTerminal(null);
+      setTerminalPayment(null);
       onClose?.();
     }
   };
@@ -496,6 +526,41 @@ export default function SellPaymentOverlay({
         isSendingReceipt={sendingReceipt}
         onClose={handleClose}
       />
+      {terminalPayment && (
+        <TerminalPaymentModal
+          open={!!terminalPayment}
+          onClose={() => {
+            setTerminalPayment(null);
+            paymentLockRef.current = false;
+            if (!paymentComplete) toast.info("Card payment cancelled.");
+          }}
+          amount={terminalPayment.amount}
+          locationId={getTerminal()?.locationId}
+          posDeviceId={getTerminal()?.deviceId}
+          readerId={getTerminal()?.settings?.terminalReaderId || undefined}
+          sourceType="booking"
+          sourceId={terminalPayment.bookingId}
+          onApproved={(result) => {
+            const data = result?.transaction || result?.data || result || {};
+            setPaymentComplete({
+              bookingId: terminalPayment.bookingId,
+              bookingNumber: terminalPayment.bookingNumber || "",
+              amountPaid: roundMoney(terminalPayment.amount + Number(terminalPayment.discountAmount || 0)),
+              discountAmount: terminalPayment.discountAmount || 0,
+              discountLabel: terminalPayment.discountLabel || null,
+              paymentAmount: terminalPayment.amount,
+              paymentMethod: "card",
+              tenderedAmount: terminalPayment.amount,
+              changeDue: 0,
+              providerTransactionId: data.providerTransactionId || data.transactionId || null,
+              providerReference: data.providerReference || null,
+            });
+            setTerminalPayment(null);
+            paymentLockRef.current = false;
+            toast.success(`${moneyFmt(terminalPayment.amount)} approved`);
+          }}
+        />
+      )}
       {pendingTerminal && (
         <TerminalProgressModal
           transactionId={pendingTerminal.transactionId}
