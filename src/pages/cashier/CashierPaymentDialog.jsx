@@ -219,13 +219,14 @@ export default function CashierPaymentDialog({
 
   const handleGcLookup = async () => {
     const code = gcCode.trim();
-    const pin = gcPin.trim();
-    if (!code || !pin) {
-      toast.error("Enter gift card code and PIN.");
+    if (!code) {
+      toast.error("Enter gift card code.");
       return;
     }
     try {
-      const res = await lookupGiftCard({ code, pin }).unwrap();
+      // Venue policy: no PIN. Backend lookup tolerates the missing
+      // field — PIN check is conditional on a non-empty pin.
+      const res = await lookupGiftCard({ code }).unwrap();
       const card = res?.data;
       if (!card) { toast.error("Card not found."); return; }
       if (String(card.status || "").toLowerCase() !== "active") {
@@ -249,7 +250,7 @@ export default function CashierPaymentDialog({
     if (!gcCard) return;
     const amt = roundMoney(Math.min(Number(gcCard.currentBalance || 0), payableBalance));
     if (amt <= 0) { toast.error("Gift card has no balance to apply."); return; }
-    setGcApplied({ code: gcCode.trim(), pin: gcPin.trim(), amount: amt });
+    setGcApplied({ code: gcCode.trim(), amount: amt });
     const rem = roundMoney(Math.max(0, payableBalance - amt));
     setAmount(method === "cash" ? "" : rem.toFixed(2));
     toast.success(
@@ -790,12 +791,9 @@ export default function CashierPaymentDialog({
                       onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }}
                       placeholder="Card code" autoComplete="off"
                       style={{ flex: 1, fontSize: 13, padding: "6px 8px", border: "1.5px solid var(--ink-200)", borderRadius: 6, fontFamily: "var(--font-mono)", fontWeight: 700 }} />
-                    <input value={gcPin} onChange={(e) => setGcPin(e.target.value.replace(/\D/g, ""))}
-                      onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }}
-                      placeholder="PIN" inputMode="numeric" maxLength={6} type="password" autoComplete="off"
-                      style={{ width: 64, fontSize: 13, padding: "6px 8px", border: "1.5px solid var(--ink-200)", borderRadius: 6 }} />
+                    {/* PIN input removed — venue policy doesn't issue PINs. */}
                     <button type="button" className="a-btn a-btn--secondary a-btn--sm" onClick={handleGcLookup}
-                      disabled={gcLooking || !gcCode.trim() || !gcPin.trim()}>
+                      disabled={gcLooking || !gcCode.trim()}>
                       {gcLooking ? "…" : "Look up"}
                     </button>
                   </div>

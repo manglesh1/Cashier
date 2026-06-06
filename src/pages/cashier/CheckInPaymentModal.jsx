@@ -111,10 +111,12 @@ function CheckInPaymentModal({
 
   const handleGcLookup = async () => {
     const code = gcCode.trim();
-    const pin = gcPin.trim();
-    if (!code || !pin) { toast.error("Enter gift card code and PIN."); return; }
+    if (!code) { toast.error("Enter gift card code."); return; }
     try {
-      const res = await lookupGiftCard({ code, pin }).unwrap();
+      // Venue policy: no PIN on gift cards. Backend lookup tolerates
+      // a missing pin field — the PIN check fires only when a non-empty
+      // pin is supplied.
+      const res = await lookupGiftCard({ code }).unwrap();
       const card = res?.data;
       if (!card) { toast.error("Card not found."); return; }
       if (String(card.status || "").toLowerCase() !== "active") { toast.error(`Card is ${card.status || "unavailable"}.`); return; }
@@ -399,8 +401,8 @@ function CheckInPaymentModal({
                   {!gcCard ? (
                     <>
                       <input value={gcCode} onChange={(e) => setGcCode(e.target.value.toUpperCase())} onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }} placeholder="Card code" autoComplete="off" style={{ fontSize: 15, padding: "12px 14px", border: "1.5px solid var(--ink-300)", borderRadius: 8, fontFamily: "var(--font-mono)", fontWeight: 800 }} />
-                      <input value={gcPin} onChange={(e) => setGcPin(e.target.value.replace(/\D/g, ""))} onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }} placeholder="PIN" inputMode="numeric" maxLength={6} type="password" autoComplete="off" style={{ fontSize: 15, padding: "12px 14px", border: "1.5px solid var(--ink-300)", borderRadius: 8 }} />
-                      <button type="button" className="a-btn a-btn--secondary" onClick={handleGcLookup} disabled={gcLooking || !gcCode.trim() || !gcPin.trim()} style={{ justifyContent: "center", minHeight: 48 }}>
+                      {/* PIN input removed — venue policy doesn't issue PINs. */}
+                      <button type="button" className="a-btn a-btn--secondary" onClick={handleGcLookup} disabled={gcLooking || !gcCode.trim()} style={{ justifyContent: "center", minHeight: 48 }}>
                         <Icon name="search" size={16} /> {gcLooking ? "Looking…" : "Look up card"}
                       </button>
                     </>
@@ -466,7 +468,7 @@ function CheckInPaymentModal({
               </>
               )}
               <button type="button" className="a-btn a-btn--primary"
-                onClick={isGiftCard ? () => onGiftCardSubmit?.({ code: gcCode, pin: gcPin, amount: gcApply }) : onSubmit}
+                onClick={isGiftCard ? () => onGiftCardSubmit?.({ code: gcCode, amount: gcApply }) : onSubmit}
                 disabled={isSubmitting || gcRedeeming || (isGiftCard && !gcCard)}
                 style={{ width: "100%", justifyContent: "center", minHeight: 52, marginTop: 8, fontSize: 16 }}>
                 <Icon name="check" size={16} />
