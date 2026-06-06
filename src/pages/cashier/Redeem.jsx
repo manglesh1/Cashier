@@ -145,9 +145,19 @@ export function Redeem() {
           terminalDeviceId: terminal?.deviceId || null,
           gateOrZone: terminal?.deviceName || null,
         }).unwrap();
-        toast.success(
-          `Redeemed · ${res?.data?.activity?.activityName || res?.data?.productType || "ticket"}`
-        );
+        const ticket = res?.data || {};
+        const baseLabel = ticket.activity?.activityName || ticket.productType || "ticket";
+        // Snapshotted soft-rule constraints (Mon-Fri only, POS-only,
+        // 4-10 PM window, etc.) are display-only — surface them on the
+        // toast so the cashier can apply judgment. Hard gates
+        // (validUntil / status / redemption count) are already
+        // auto-enforced by the redeem endpoint.
+        const rules = ticket.constraints?.notes
+          ? ` · ${ticket.constraints.notes}`
+          : "";
+        toast.success(`Redeemed · ${baseLabel}${rules}`, {
+          duration: rules ? 8000 : 4000,
+        });
       } catch (err) {
         toast.error(err?.data?.error || "Ticket redeem failed");
       }
@@ -893,6 +903,25 @@ function RecentRow({ entry }) {
           {ok ? "Redeemed" : entry.status || "Failed"}
           {entry.gateOrZone ? ` · ${entry.gateOrZone}` : ""}
         </div>
+        {entry.constraints?.notes && (
+          // Snapshotted constraint rules surface as a small chip
+          // under each redemption row — at-a-glance audit of what
+          // the cashier was meant to apply.
+          <div style={{
+            marginTop: 4,
+            fontSize: 10,
+            fontWeight: 700,
+            color: "var(--ink-700)",
+            background: "var(--ink-50)",
+            border: "1px solid var(--ink-200)",
+            padding: "2px 6px",
+            borderRadius: 4,
+            display: "inline-block",
+            letterSpacing: "0.02em",
+          }}>
+            {entry.constraints.notes}
+          </div>
+        )}
       </div>
       <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-500)" }}>
         {time}
