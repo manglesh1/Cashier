@@ -30,9 +30,11 @@ const rawBaseQuery = fetchBaseQuery({
 const baseQueryWithLocation = async (args, api, extraOptions) => {
   const requestUrl = typeof args === "string" ? args : args?.url || "";
   let locationId = null;
+  const state = api.getState?.();
+  locationId = state?.auth?.locations?.[0]?.locationId || null;
   try {
     const t = JSON.parse(localStorage.getItem("cashier:terminal") || "null");
-    locationId = t?.locationId || null;
+    if (!locationId) locationId = t?.locationId || null;
   } catch { /* noop */ }
   if (!locationId) locationId = Cookies.get("locationId") || null;
 

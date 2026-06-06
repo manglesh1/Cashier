@@ -395,6 +395,10 @@ function VoucherPanel({ vouchers, onAddVoucher, onRemove, onClose }) {
         entitlementId: data.entitlementId || null,
         activityId: data.activityId || null,
         variationId: data.variationId || null,
+        // $ value the voucher covers. Drives the cart's "outstanding"
+        // reduction. 0 for entitlements (counter-based, no per-redeem
+        // dollar value).
+        price: Number(data.price) || 0,
         remainingQty: data.remainingQty || null,
         expiresAt: data.expiresAt || null,
       });
@@ -780,7 +784,13 @@ export default function ApplyBenefitFlyout({
           />
         </div>
 
-        <GroupLabel>Pay with (non-cash)</GroupLabel>
+        {/* Pay-with (non-cash) section: gift card + store credit
+            removed. Gift card is a tender — it lives on the payment
+            screen alongside cash/card. Store credit will too when it
+            ships. Voucher / pack stays here because it's a redemption
+            (not money) — the voucher reserves a cart line at apply
+            time and binds on submit. */}
+        <GroupLabel>Redeem voucher</GroupLabel>
         <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
           <Tile
             accent={ACCENT.voucher}
@@ -789,32 +799,6 @@ export default function ApplyBenefitFlyout({
             sub={applied.vouchers.length > 0 ? `${applied.vouchers.length} reserved` : "Scan voucher"}
             active={active === "voucher" || applied.vouchers.length > 0}
             onClick={() => setActive(active === "voucher" ? null : "voucher")}
-          />
-          <Tile
-            accent={ACCENT.gift}
-            icon="credit-card"
-            title="Gift card"
-            sub={
-              applied.payments.filter((p) => p.method === "gift_card").length > 0
-                ? `$${applied.payments
-                    .filter((p) => p.method === "gift_card")
-                    .reduce((s, p) => s + p.amount, 0)
-                    .toFixed(2)} applied`
-                : "Code + PIN"
-            }
-            active={active === "gift" || applied.payments.some((p) => p.method === "gift_card")}
-            onClick={() => setActive(active === "gift" ? null : "gift")}
-          />
-        </div>
-        <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-          <Tile
-            accent={ACCENT.comp}
-            icon="dollar-sign"
-            title="Store credit"
-            sub="Coming next phase"
-            disabled
-            active={false}
-            onClick={() => {}}
           />
         </div>
 
@@ -846,23 +830,8 @@ export default function ApplyBenefitFlyout({
             onClose={() => setActive(null)}
           />
         )}
-        {active === "gift" && (
-          <GiftCardPanel
-            outstanding={outstanding}
-            payments={applied.payments}
-            onApply={(payment) =>
-              update({ payments: [...applied.payments, payment] })
-            }
-            onRemove={(p) =>
-              update({
-                payments: applied.payments.filter(
-                  (x) => x.redemptionId !== p.redemptionId
-                ),
-              })
-            }
-            onClose={() => setActive(null)}
-          />
-        )}
+        {/* Gift card panel removed — gift card is a payment tender,
+            applied on the payment screen alongside cash/card. */}
 
         {/* Summary footer */}
         <div
@@ -909,11 +878,8 @@ function BenefitSummary({ applied, outstanding }) {
       {applied.vouchers.length > 0 && (
         <div>• {applied.vouchers.length} voucher(s) reserved (bind on submit)</div>
       )}
-      {giftCardPaid > 0 && (
-        <div>• Gift card paid ${giftCardPaid.toFixed(2)}</div>
-      )}
       <div style={{ marginTop: 4, color: "var(--ink-500)" }}>
-        Outstanding after applied benefits + payments: ~${Number(outstanding).toFixed(2)}
+        Outstanding after applied benefits: ~${Number(outstanding).toFixed(2)}
       </div>
     </div>
   );

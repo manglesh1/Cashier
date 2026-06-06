@@ -340,35 +340,10 @@ function CheckInPaymentModal({
                   </button>
                 );
               })}
-              <div style={{ height: 18 }} />
-              <button type="button" onClick={applyCoupon} disabled={validatingCoupon} style={{ border: "1.5px solid var(--ink-500)", background: "#F529C8", color: "white", borderRadius: 6, padding: "13px 8px", fontWeight: 900, cursor: "pointer" }}>
-                Customer Coupon
-              </button>
-              <button type="button" onClick={requestManagerDiscount} style={{ border: "1.5px solid var(--ink-500)", background: "#FF78A5", color: "#111", borderRadius: 6, padding: "13px 8px", fontWeight: 900, cursor: "pointer" }}>
-                Manager Discount
-              </button>
-              <button type="button" onClick={() => {
-                const amt = roundMoney(Math.min(Number(manualDiscount), balanceDue));
-                if (amt <= 0) return toast.error("Enter discount amount.");
-                if (settings?.enableCustomDiscount === false) {
-                  return toast.error("Custom discounts are disabled for this terminal.");
-                }
-                // Above the cashier's allowance (and not explicitly waived),
-                // an employee discount needs manager approval — same gate as
-                // the Manager Discount button.
-                const limit = Number(settings?.cashierDiscountAmountLimit) || 0;
-                const needsManager =
-                  settings?.allowCustomDiscountWithoutPin !== true && limit > 0 && amt > limit;
-                if (needsManager) {
-                  toast.message(`Discounts over ${moneyFmt(limit)} need manager approval.`);
-                  setManagerOpen(true);
-                  return;
-                }
-                onDiscountChange({ amount: amt, label: "Employee discount", source: "employee" });
-                onAmountChange(method === "cash" ? "" : roundMoney(Math.max(0, balanceDue - amt)).toFixed(2));
-              }} style={{ border: "1.5px solid var(--ink-500)", background: "#F8287D", color: "white", borderRadius: 6, padding: "13px 8px", fontWeight: 900, cursor: "pointer" }}>
-                Employee Discount
-              </button>
+              {/* Customer Coupon / Manager Discount / Employee Discount
+                  buttons removed — benefits are applied in the cart's
+                  "Apply benefit" flyout now. Payment screen is purely
+                  for tendering. */}
               <button type="button" className="a-btn a-btn--secondary" onClick={onClose} style={{ marginTop: "auto", justifyContent: "center", minHeight: 46 }}>
                 Continue Ordering
               </button>
@@ -413,10 +388,8 @@ function CheckInPaymentModal({
                   Clear Payments
                 </button>
               </div>
-              <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <input value={couponCode} onChange={(e) => setCouponCode(e.target.value)} placeholder="Coupon code" style={{ border: "1.5px solid var(--ink-300)", borderRadius: 8, padding: 10 }} />
-                <input value={manualDiscount} onChange={(e) => setManualDiscount(e.target.value)} type="number" min="0" step="0.01" placeholder="Discount $" style={{ border: "1.5px solid var(--ink-300)", borderRadius: 8, padding: 10 }} />
-              </div>
+              {/* Coupon / discount inputs removed — applied via cart's
+                  Apply-benefit flyout. */}
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>

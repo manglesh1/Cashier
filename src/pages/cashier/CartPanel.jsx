@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discountApi";
+import { usePreviewVoucherCoverageMutation } from "../../features/benefits/benefitsApi";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 import ApplyBenefitFlyout from "./ApplyBenefitFlyout";
@@ -201,6 +202,22 @@ export function CartPanel({
     payments: [],
   });
 
+  // Reset applied benefits whenever the cart goes empty. After a
+  // successful checkout, CashierApp dispatches clearCart() which
+  // empties the Redux items list — but the flyout state lives
+  // here in component state and would otherwise survive, leaving
+  // "Voucher reserved (1)" stamped on an empty cart.
+  React.useEffect(() => {
+    if (items.length === 0) {
+      setAppliedBenefits({
+        promo: null,
+        member: null,
+        vouchers: [],
+        payments: [],
+      });
+    }
+  }, [items.length]);
+
   const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
   // Promo can come from the inline input (legacy) OR the flyout.
   // Flyout takes precedence when both set.
@@ -223,6 +240,51 @@ export function CartPanel({
     ? afterDiscount - afterDiscount / (1 + taxRate)
     : afterDiscount * taxRate;
   const total = taxConfigMissing ? afterDiscount : taxInclusive ? afterDiscount : afterDiscount + tax;
+
+  // Voucher coverage comes from the backend — see
+  // POST /api/benefits/preview-voucher-coverage. The cashier sends
+  // applied voucher tokens + cart lines; backend returns the total
+  // covered amount (line subtotal + applicable tax for each matched
+  // voucher). Local math here would duplicate logic that needs to
+  // match what normalizePricingSummary / createBooking does on save,
+  // so we let one source of truth own it.
+  const [voucherCoveredAmount, setVoucherCoveredAmount] = React.useState(0);
+  const [previewVoucherCoverage] = usePreviewVoucherCoverageMutation();
+
+  React.useEffect(() => {
+    const tokens = appliedBenefits.vouchers.map((v) => ({ token: v.token }));
+    if (tokens.length === 0) {
+      setVoucherCoveredAmount(0);
+      return;
+    }
+    const cartLinesForPreview = items.map((it, idx) => ({
+      itemKey: `line-${idx}`,
+      variationId: Number(it.variationId) || null,
+      activityId: Number(it.activityId) || null,
+      subtotal: Number(it.price || 0) * Number(it.qty || 1),
+    }));
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await previewVoucherCoverage({
+          tokens,
+          cartLines: cartLinesForPreview,
+        }).unwrap();
+        if (cancelled) return;
+        setVoucherCoveredAmount(Number(res?.data?.totalCovered) || 0);
+      } catch {
+        if (!cancelled) setVoucherCoveredAmount(0);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Re-fetch whenever the applied tokens or relevant cart shape changes.
+  }, [
+    JSON.stringify(appliedBenefits.vouchers.map((v) => v.token)),
+    JSON.stringify(items.map((it) => `${it.variationId}:${it.price}:${it.qty}`)),
+    previewVoucherCoverage,
+  ]);
 
   // Push current pricing up so CashierApp can include it in createBooking
   React.useEffect(() => {
@@ -252,6 +314,14 @@ export function CartPanel({
         voucherTokens: appliedBenefits.vouchers.map((v) => v.token),
         nonCashPayments: appliedBenefits.payments,
       },
+      // membershipRedemptions: explicit list of memberships in play
+      // for backend normalizePricingSummary. lineId is optional — when
+      // omitted, the backend auto-picks the first eligible un-covered
+      // cart line for each membership. The multi-membership flyout
+      // UX (with per-line pinning) lands in a follow-up.
+      membershipRedemptions: appliedBenefits.member?.membershipId
+        ? [{ membershipId: appliedBenefits.member.membershipId }]
+        : [],
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -578,8 +648,17 @@ export function CartPanel({
                       </div>
                       <button
                         type="button"
-                        onClick={() => removeWaiver(w.signatureId)}
-                        title="Remove waiver coverage; booking customer stays"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          // Customer-row X removes the customer entirely.
+                          // Without onClearCustomer, the primary-customer
+                          // fallback (waiversAttached[0]) keeps them
+                          // attached even after the waiver row drops,
+                          // so the click looks like nothing happened.
+                          removeWaiver(w.signatureId);
+                          onClearCustomer?.();
+                        }}
+                        title="Remove customer"
                         style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)", padding: 4 }}
                       >
                         <Icon name="x" size={14} />
@@ -912,12 +991,15 @@ export function CartPanel({
             .filter((p) => p.method === "gift_card")
             .reduce((s, p) => s + p.amount, 0)}
           voucherReservedCount={appliedBenefits.vouchers.length}
-          outstanding={
+          voucherReservedValue={voucherCoveredAmount}
+          outstanding={Math.max(
+            0,
             total -
-            appliedBenefits.payments
-              .filter((p) => p.method === "gift_card")
-              .reduce((s, p) => s + p.amount, 0)
-          }
+              appliedBenefits.payments
+                .filter((p) => p.method === "gift_card")
+                .reduce((s, p) => s + p.amount, 0) -
+              voucherCoveredAmount
+          )}
           taxConfigMissing={taxConfigMissing}
         />
         {taxConfigMissing && items.length > 0 && (
@@ -1013,16 +1095,39 @@ export function CartPanel({
                 : undefined
           }
         >
-          <Icon name="credit-card" size={20} />
-          {isSubmitting
-            ? "Creating…"
-            : taxConfigMissing
-              ? "Tax config missing"
-              : waiversMissing > 0
-              ? `Add ${waiversMissing} more guest${waiversMissing === 1 ? "" : "s"}`
-              : `Take payment · $${Math.max(0, total - appliedBenefits.payments
-                .filter((p) => p.method === "gift_card")
-                .reduce((s, p) => s + p.amount, 0)).toFixed(2)}`}
+          {(() => {
+            const outstandingForCta = Math.max(
+              0,
+              total -
+                appliedBenefits.payments
+                  .filter((p) => p.method === "gift_card")
+                  .reduce((s, p) => s + p.amount, 0) -
+                voucherCoveredAmount
+            );
+            const fullyCovered = outstandingForCta < 0.005; // cents tolerance
+            const cta = isSubmitting
+              ? "Creating…"
+              : taxConfigMissing
+                ? "Tax config missing"
+                : waiversMissing > 0
+                  ? `Add ${waiversMissing} more guest${waiversMissing === 1 ? "" : "s"}`
+                  : fullyCovered
+                    ? "Complete booking"
+                    : `Take payment · $${outstandingForCta.toFixed(2)}`;
+            // Swap the credit-card icon for a checkmark when nothing
+            // needs to be charged — the cashier isn't taking money,
+            // they're just closing out the booking against the
+            // applied vouchers / gift cards / etc.
+            return (
+              <>
+                <Icon
+                  name={fullyCovered && !isSubmitting && !taxConfigMissing && waiversMissing === 0 ? "check-circle" : "credit-card"}
+                  size={20}
+                />
+                {cta}
+              </>
+            );
+          })()}
         </button>
       </div>
 
@@ -1168,6 +1273,7 @@ function Totals({
   total,
   giftCardPaid = 0,
   voucherReservedCount = 0,
+  voucherReservedValue = 0,
   outstanding = null,
   taxConfigMissing = false,
 }) {
@@ -1209,7 +1315,9 @@ function Totals({
       {voucherReservedCount > 0 && (
         <Row
           label={`Voucher reserved (${voucherReservedCount})`}
-          value="binds on submit"
+          value={voucherReservedValue > 0
+            ? `-$${voucherReservedValue.toFixed(2)}`
+            : "binds on submit"}
           accent="#22C55E"
         />
       )}

@@ -36,7 +36,6 @@ import { GuestProfile } from "./GuestProfile";
 import { Refund } from "./Refund";
 import { WaiverDetail } from "./WaiverDetail";
 import { Redeem } from "./Redeem";
-import { VoucherCounter } from "./VoucherCounter";
 import BookingDetail from "./BookingDetail";
 import {
   buildPaidCheckoutPricingSummary,
@@ -57,6 +56,7 @@ import {
   useValidateCartMutation,
   useLazyGetAvailabilityQuery,
   useLazySearchWaiversQuery,
+  useLazySearchGuestsQuery,
 } from "../../features/bookings/bookingApi";
 import { autoScheduleLine, formatDateValue } from "./scheduleHelpers";
 import {
@@ -258,6 +258,13 @@ function allocateCartPricingToLines(lines, cartPricing) {
       taxAmount: taxCents / 100,
       grandTotal: totalCents / 100,
       totalAmount: totalCents / 100,
+      // Explicit membership redemptions land on the FIRST (regular) line
+      // only — voucher lines are independent bookings that don't get
+      // member discounts. lineId is optional; backend auto-picks the
+      // matching cart line server-side.
+      membershipRedemptions: idx === 0
+        ? (Array.isArray(cartPricing?.membershipRedemptions) ? cartPricing.membershipRedemptions : [])
+        : [],
     };
   });
 }
@@ -339,13 +346,21 @@ export function CashierApp() {
   // survive a refresh (network conditions may have changed; the cashier
   // should consciously re-trigger from the cart).
   const [paymentBooking, setPaymentBooking] = useState(null);
-  const [pendingPaymentBooking, setPendingPaymentBooking] = useState(null);
   const [cartPricing, setCartPricing] = useState(null);
+
+  // No pendingPaymentBooking cache — the draft is rebuilt from the
+  // current cart state on every Take Payment click. Retry-dedupe is
+  // handled by the Redux-persisted checkoutKey (see ensureCheckoutKey),
+  // which gives all retries of the same checkout the same idempotency
+  // key without us needing to freeze the draft payload.
+
   const [checkoutBlocker, setCheckoutBlocker] = useState(null);
   const [scheduleRequiredItem, setScheduleRequiredItem] = useState(null);
   const [member] = useState(null);
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
   const [waiverModalMode, setWaiverModalMode] = useState("customer");
+  const [recipientAssignments, setRecipientAssignments] = useState({});
+  const [recipientPicker, setRecipientPicker] = useState(null);
 
   // Pool of waiver-covered people available for the cart. One waiver
   // contributes the signer plus each minor on it. The order here is
@@ -715,7 +730,10 @@ export function CashierApp() {
     addItem(productItem, section);
   };
 
-  const removeItem = (idx) => setItems((prev) => prev.filter((_, i) => i !== idx));
+  const removeItem = (idx) => {
+    setItems((prev) => prev.filter((_, i) => i !== idx));
+    setRecipientAssignments({});
+  };
   const setQty = (idx, delta) =>
     setItems((prev) => {
       const n = [...prev];
@@ -788,6 +806,15 @@ export function CashierApp() {
       const repeats = Math.max(1, Number(item.qty) || 1);
       for (let i = 0; i < repeats; i += 1) {
         const lineItem = { ...item, qty: 1 };
+        const recipient = normalizeRecipientForCheckout(item.recipientUnits?.[i] || item.recipient || null);
+        const recipientGuestInfo = recipient
+          ? {
+              guestId: recipient.guestId || null,
+              guestName: recipient.name,
+              guestEmail: recipient.contactEmail,
+              guestPhone: recipient.contactPhone || "",
+            }
+          : draft.payload.guestInfo;
         const shouldCarryPayment = !bookingForReceipt;
         // voucherSeq is 1-indexed; allocation array is 0-indexed and ordered
         // identically to this loop. Fall back to a synthetic per-line
@@ -803,6 +830,10 @@ export function CashierApp() {
         const res = await createBooking({
           ...draft.payload,
           ...(shouldCarryPayment ? paymentPayload : {}),
+          guestInfo: recipientGuestInfo,
+          guestName: recipientGuestInfo?.guestName || draft.guestName,
+          guestEmail: recipientGuestInfo?.guestEmail || draft.payload.guestEmail,
+          guestPhone: recipientGuestInfo?.guestPhone || draft.payload.guestPhone,
           pricingSummary: buildPaidCheckoutPricingSummary(
             allocation,
             shouldCarryPayment ? payment : null
@@ -811,7 +842,7 @@ export function CashierApp() {
           waiverSignatureIds: undefined,
           activityIds: [Number(item.activityId)],
           variationId: item.variationId || null,
-          bookingName: `${draft.guestName} - ${item.name}`.trim(),
+          bookingName: `${recipientGuestInfo?.guestName || draft.guestName} - ${item.name}`.trim(),
           deferWaiverEnforcement: true,
           idempotencyKey: baseKey ? `${baseKey}:voucher${voucherSeq}` : undefined,
         }).unwrap();
@@ -868,11 +899,10 @@ export function CashierApp() {
       blockCheckout("location", "No location selected for this terminal.");
       return;
     }
-    if (pendingPaymentBooking) {
-      setCheckoutBlocker(null);
-      setPaymentBooking(pendingPaymentBooking);
-      return;
-    }
+    // (Old cache shortcut removed — every click rebuilds the draft
+    // from the live cart. The Redux-stored checkoutKey gives all
+    // retries of one checkout the same idempotency key, so dedupe
+    // still works even though the draft is rebuilt each time.)
 
     // Mint an idempotency key for this checkout attempt if we don't have
     // one yet. Reused across retries (so the backend can dedupe a double-
@@ -885,8 +915,18 @@ export function CashierApp() {
       waiverCoverage: Object.values(ticketAssignments).filter(Boolean).length,
       waiverPolicy: "beforePayment",
     });
-    const noScheduleItems = items.filter(isNoScheduleSkuItem);
-    const regularItems = items.filter((it) => !isNoScheduleSkuItem(it));
+    const indexedItems = items.map((item, cartIndex) => ({ ...item, cartIndex }));
+    const noScheduleItems = indexedItems
+      .filter(isNoScheduleSkuItem)
+      .map((item) => ({
+        ...item,
+        recipientUnits: Array.from({ length: Math.max(1, Number(item.qty) || 1) }, (_, unitIndex) =>
+          normalizeRecipientForCheckout(
+            recipientAssignments[`${item.cartIndex}:${unitIndex}`] || primaryGuest
+          )
+        ),
+      }));
+    const regularItems = indexedItems.filter((it) => !isNoScheduleSkuItem(it));
     const missingScheduleItems = checkoutRequirements.missingScheduleItems.filter(
       (item) => !isNoScheduleSkuItem(item)
     );
@@ -1020,6 +1060,13 @@ export function CashierApp() {
       // Backend's createBooking re-validates and recomputes; we just supply
       // the chosen discount so the booking record carries the right code.
       pricingSummary: regularAllocation,
+      // Walk-in flow: customer is paying NOW and walking in NOW. Tell
+      // the backend to check in participants AND redeem their tickets
+      // in the same transaction as the booking + payment. Controlled
+      // by the per-device setting autoCheckInOnPurchase (true by
+      // default for POS terminals; can be turned off for a front-desk
+      // terminal that's selling tickets for a future visit).
+      autoCheckIn: posSettings.autoCheckInOnPurchase !== false,
     };
 
     let validatedPricing = null;
@@ -1033,7 +1080,7 @@ export function CashierApp() {
             (cartPricing?.discount?.amount || 0) + (cartPricing?.memberDiscount || 0)
           ),
         },
-        items: items.map((item) => ({
+        items: items.map((item, idx) => ({
           activityId: item.activityId,
           variationId: item.variationId,
           productType: item.productType,
@@ -1042,12 +1089,22 @@ export function CashierApp() {
           // Line subtotal lets the backend price authoritatively without
           // re-deriving prices, then return the canonical tax + total.
           subtotal: getCartLineSubtotal(item),
+          // Stable line key so the backend can attribute applied
+          // benefits (vouchers / memberships) to a specific cart line.
+          itemKey: `line-${idx}`,
           slotId: item.slotId || null,
           date: item.selectedDate || item.date || bookingDate,
           selectedDate: item.selectedDate || item.date || bookingDate,
           bundleInclusions: item.bundleInclusions || [],
           choiceSelections: item.choiceSelections || {},
         })),
+        // Applied voucher tokens — backend resolves coverage via the
+        // shared resolveVoucherCoverage utility and returns:
+        //   pricing.voucherCoveredAmount
+        //   pricing.outstandingAmount  (= totalAmount − voucherCovered)
+        voucherTokens: Array.isArray(cartPricing?.appliedBenefits?.voucherTokens)
+          ? cartPricing.appliedBenefits.voucherTokens
+          : [],
       }).unwrap();
       validatedPricing = validateRes?.pricing || null;
     } catch (err) {
@@ -1070,12 +1127,20 @@ export function CashierApp() {
     const chargeDiscount = validatedPricing
       ? Number(validatedPricing.discountAmount)
       : Number((cartPricing?.discount?.amount || 0) + (cartPricing?.memberDiscount || 0));
+    // Voucher coverage from validate-cart. Drives the payment overlay's
+    // balance — when vouchers fully cover the cart, balanceDue = 0 and
+    // the cashier just confirms; no cash/card capture needed.
+    const voucherCoveredAmount = validatedPricing
+      ? Number(validatedPricing.voucherCoveredAmount) || 0
+      : 0;
+    const balanceDue = Math.max(0, chargeTotal - voucherCoveredAmount);
 
     const draftPayment = {
       draftSale: true,
       bookingNumber: "DRAFT SALE",
       totalAmount: chargeTotal,
-      balanceDue: chargeTotal,
+      balanceDue,
+      voucherCoveredAmount,
       subTotal: chargeSubtotal,
       taxAmount: chargeTax,
       discountAmount: chargeDiscount,
@@ -1096,7 +1161,6 @@ export function CashierApp() {
         voucherAllocations,
       },
     };
-    setPendingPaymentBooking(draftPayment);
     setCheckoutBlocker(null);
     setPaymentBooking(draftPayment);
   };
@@ -1259,7 +1323,6 @@ export function CashierApp() {
     { id: "sell", label: "Sell", icon: "ticket" },
     { id: "find", label: "Find", icon: "search" },
     { id: "redeem", label: "Redeem", icon: "qr-code" },
-    { id: "vouchers", label: "Vouchers", icon: "ticket" },
     { id: "checkin", label: "Check-in", icon: "log-in" },
     { id: "guest", label: "Guest", icon: "user-round" },
     { id: "waiver", label: "Waiver", icon: "shield-alert" },
@@ -1318,6 +1381,7 @@ export function CashierApp() {
           onChangeWaivers={setWaiversAttached}
           waiverPool={waiverPool}
           ticketAssignments={ticketAssignments}
+          recipientAssignments={recipientAssignments}
           onAssignTicket={(idx, key) =>
             setTicketAssignments((prev) => {
               // Replacing a row: free up whoever was there, and free up
@@ -1327,6 +1391,14 @@ export function CashierApp() {
                 if (v === key) delete next[k];
               }
               next[idx] = key;
+              return next;
+            })
+          }
+          onAssignRecipient={(itemIndex, unitIndex) => setRecipientPicker({ itemIndex, unitIndex })}
+          onClearRecipient={(itemIndex, unitIndex) =>
+            setRecipientAssignments((prev) => {
+              const next = { ...prev };
+              delete next[`${itemIndex}:${unitIndex}`];
               return next;
             })
           }
@@ -1375,7 +1447,7 @@ export function CashierApp() {
         subtitle="Admit guests — scan a wristband / ticket at the gate"
       />
     );
-  } else if (screen === "vouchers") {
+  } else if (false && screen === "vouchers") {
     body = <VoucherCounter />;
     header = (
       <Header
@@ -1534,7 +1606,6 @@ export function CashierApp() {
           // state. Close the dialog so the cashier can re-trigger from
           // the cart, but keep cart items intact so they don't lose work.
           setPaymentBooking(null);
-          setPendingPaymentBooking(null);
         }}
         label="payment dialog"
       >
@@ -1556,11 +1627,199 @@ export function CashierApp() {
             // a new one at the start of the next checkout attempt.
             dispatch(clearCart());
             setPaymentBooking(null);
-            setPendingPaymentBooking(null);
             setCreatedBookingId(null);
+            setRecipientAssignments({});
           }}
         />
       </ModalErrorBoundary>
+      <RecipientPickerModal
+        open={!!recipientPicker}
+        customer={cartCustomer || waiversAttached[0] || null}
+        current={
+          recipientPicker
+            ? recipientAssignments[`${recipientPicker.itemIndex}:${recipientPicker.unitIndex}`] || cartCustomer || waiversAttached[0] || null
+            : null
+        }
+        onPick={(guest) => {
+          if (!recipientPicker) return;
+          const recipient = normalizeRecipientForCheckout(guest);
+          if (!recipient?.contactEmail) {
+            toast.error("Selected member must have an email.");
+            return;
+          }
+          setRecipientAssignments((prev) => ({
+            ...prev,
+            [`${recipientPicker.itemIndex}:${recipientPicker.unitIndex}`]: recipient,
+          }));
+          setRecipientPicker(null);
+          toast.success(`Attached member: ${recipient.name}`);
+        }}
+        onUseCustomer={() => {
+          if (!recipientPicker) return;
+          setRecipientAssignments((prev) => {
+            const next = { ...prev };
+            delete next[`${recipientPicker.itemIndex}:${recipientPicker.unitIndex}`];
+            return next;
+          });
+          setRecipientPicker(null);
+        }}
+        onClose={() => setRecipientPicker(null)}
+      />
+    </div>
+  );
+}
+
+function normalizeRecipientForCheckout(guest) {
+  if (!guest) return null;
+  const name = guest.name || guest.guestName || guest.fullName || "";
+  const contactEmail = guest.contactEmail || guest.guestEmail || guest.email || "";
+  const contactPhone = guest.contactPhone || guest.guestPhone || guest.phone || "";
+  return {
+    guestId: guest.guestId || null,
+    name,
+    contact: contactEmail || contactPhone,
+    contactEmail,
+    contactPhone,
+  };
+}
+
+function RecipientPickerModal({ open, customer, current, onPick, onUseCustomer, onClose }) {
+  const [query, setQuery] = useState("");
+  const [triggerSearch, { data, isFetching }] = useLazySearchGuestsQuery();
+
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const timer = setTimeout(() => {
+      if (query.trim().length >= 2) {
+        triggerSearch(query.trim());
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [open, query, triggerSearch]);
+
+  if (!open) return null;
+
+  const rows = query.trim().length >= 2 ? (data?.data || []) : [];
+  const currentName = current?.name || current?.guestName || "Booking customer";
+  const currentEmail = current?.contactEmail || current?.guestEmail || current?.email || "";
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 1200,
+        background: "rgba(0,0,0,.42)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 18,
+      }}
+    >
+      <div
+        onClick={(event) => event.stopPropagation()}
+        style={{
+          width: 520,
+          maxWidth: "100%",
+          maxHeight: "82vh",
+          background: "white",
+          border: "2px solid var(--ink-800)",
+          borderRadius: 14,
+          boxShadow: "0 8px 0 var(--ink-800)",
+          padding: 18,
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 950 }}>Change attached member</div>
+            <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 3 }}>
+              Membership benefits will belong to this person.
+            </div>
+          </div>
+          <button type="button" onClick={onClose} style={{ all: "unset", cursor: "pointer", padding: 4 }}>
+            <Icon name="x" size={18} />
+          </button>
+        </div>
+
+        <div style={{ border: "1.5px solid var(--ink-100)", borderRadius: 10, padding: 10, background: "var(--ink-25)" }}>
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--ink-500)", fontWeight: 800 }}>
+            Current member
+          </div>
+          <div style={{ fontWeight: 900, marginTop: 4 }}>{currentName}</div>
+          <div style={{ fontSize: 12, color: "var(--ink-500)" }}>{currentEmail || "Email not on file"}</div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1.5px solid var(--ink-200)", borderRadius: 10, padding: "11px 12px" }}>
+          <Icon name="search" size={16} />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search member by name, email, or phone"
+            autoFocus
+            style={{ all: "unset", flex: 1, fontSize: 14, fontWeight: 700 }}
+          />
+        </div>
+
+        <div style={{ overflowY: "auto", display: "grid", gap: 8, minHeight: 120 }}>
+          {query.trim().length < 2 ? (
+            <div style={{ padding: 18, textAlign: "center", color: "var(--ink-500)" }}>Type at least 2 characters.</div>
+          ) : isFetching ? (
+            <div style={{ padding: 18, textAlign: "center", color: "var(--ink-500)" }}>Searching...</div>
+          ) : rows.length === 0 ? (
+            <div style={{ padding: 18, textAlign: "center", color: "var(--ink-500)" }}>No matching customers found.</div>
+          ) : (
+            rows.map((guest) => {
+              const normalized = normalizeRecipientForCheckout(guest);
+              return (
+                <button
+                  key={guest.guestId || `${normalized.name}:${normalized.contactEmail}`}
+                  type="button"
+                  onClick={() => onPick?.(normalized)}
+                  style={{
+                    all: "unset",
+                    cursor: normalized.contactEmail ? "pointer" : "not-allowed",
+                    opacity: normalized.contactEmail ? 1 : 0.55,
+                    display: "grid",
+                    gridTemplateColumns: "32px minmax(0, 1fr) auto",
+                    gap: 10,
+                    alignItems: "center",
+                    border: "1.5px solid var(--ink-150)",
+                    borderRadius: 10,
+                    padding: "10px 12px",
+                  }}
+                >
+                  <Icon name="user-round" size={18} />
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ display: "block", fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {normalized.name || "Guest"}
+                    </span>
+                    <span style={{ display: "block", fontSize: 12, color: "var(--ink-500)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {normalized.contactEmail || normalized.contactPhone || "No email or phone"}
+                    </span>
+                  </span>
+                  <span style={{ fontSize: 12, fontWeight: 900, color: "var(--aero-orange-600)" }}>Attach</span>
+                </button>
+              );
+            })
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button type="button" className="a-btn a-btn--ghost" onClick={onUseCustomer} disabled={!customer?.contactEmail}>
+            Use booking customer
+          </button>
+          <button type="button" className="a-btn a-btn--secondary" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
     </div>
   );
 }

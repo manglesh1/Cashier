@@ -32,21 +32,32 @@ export const voucherApi = baseApi.injectEndpoints({
 
     // Decrement a stock-item entitlement at the counter.
     redeemEntitlement: builder.mutation({
-      query: ({ entitlementId, quantity = 1 }) => ({
+      query: ({
+        entitlementId,
+        quantity = 1,
+        terminalDeviceId = null,
+        gateOrZone = null,
+      }) => ({
         url: `/vouchers/entitlements/${entitlementId}/redeem`,
         method: "POST",
-        body: { quantity },
+        body: { quantity, terminalDeviceId, gateOrZone },
       }),
       invalidatesTags: ["Redemption"],
     }),
 
     // Membership scan + redeem (digital-pass flow).
     redeemMembership: builder.mutation({
-      query: ({ membershipId, activityId = null }) => ({
+      query: ({
+        membershipId,
+        activityId = null,
+        terminalDeviceId = null,
+        gateOrZone = null,
+      }) => ({
         url: `/memberships/${membershipId}/redeem`,
         method: "POST",
-        body: { activityId },
+        body: { activityId, terminalDeviceId, gateOrZone },
       }),
+      invalidatesTags: ["Redemption"],
     }),
 
     // Gift card lookup + redeem (apply-at-checkout flow).

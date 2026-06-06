@@ -74,7 +74,6 @@ export default function SellPaymentOverlay({
   const syntheticBooking = useMemo(() => {
     if (!draftPayment?.draft) return null;
     const draft = draftPayment.draft;
-    const pricing = draft.payload?.pricingSummary || {};
     const guestEmail = draftPayment?.guestEmail
       || draftPayment?.cartCustomer?.contactEmail
       || draft.payload?.guestEmail
@@ -83,14 +82,28 @@ export default function SellPaymentOverlay({
       || draftPayment?.cartCustomer?.guestId
       || draft.payload?.guestId
       || null;
+    // Totals are cart-level (validateCart's authoritative output,
+    // captured into draftPayment by CashierApp.handleCheckout).
+    //
+    // We deliberately do NOT read from draft.payload.pricingSummary —
+    // that's a per-LINE allocation (one per booking we'll create).
+    // For a no-schedule-only cart (membership / voucher pack purchase
+    // by itself), the regular-line allocation is $0 because every
+    // line went into a per-voucher allocation, and reading it here
+    // would show the customer "Total $0" on the receipt.
     return {
       bookingId: null,
       bookingNumber: "New sale",
       bookingName: draft.guestName || "Walk-in",
-      totalAmount: roundMoney(Number(pricing.grandTotal) || 0),
-      subtotalAmount: roundMoney(Number(pricing.subtotal) || 0),
-      taxAmount: roundMoney(Number(pricing.tax) || 0),
-      discountAmount: roundMoney(Number(pricing.discount) || 0),
+      totalAmount: roundMoney(Number(draftPayment.totalAmount) || 0),
+      subtotalAmount: roundMoney(Number(draftPayment.subTotal) || 0),
+      taxAmount: roundMoney(Number(draftPayment.taxAmount) || 0),
+      discountAmount: roundMoney(Number(draftPayment.discountAmount) || 0),
+      // Server-computed voucher coverage from validate-cart. Reduces
+      // balanceDue so the overlay asks for the post-voucher amount.
+      // Total still shows the gross for the receipt; voucher acts as
+      // a tender on the payment side.
+      voucherCoveredAmount: roundMoney(Number(draftPayment.voucherCoveredAmount) || 0),
       guestEmail,
       guest: { guestEmail, guestId },
       guestId,
@@ -102,7 +115,14 @@ export default function SellPaymentOverlay({
   // What the modal sees as "the booking" — real one after payment,
   // synthetic one while collecting.
   const displayBooking = paidBooking || syntheticBooking;
-  const balanceDue = roundMoney(Number(displayBooking?.totalAmount || 0));
+  const balanceDue = roundMoney(
+    Math.max(
+      0,
+      Number(displayBooking?.totalAmount || 0) -
+        Number(displayBooking?.voucherCoveredAmount || 0)
+    )
+  );
+  const fullyCovered = balanceDue < 0.005;
 
   // ── Initial amount when the overlay opens ────────────────────────
   useEffect(() => {
@@ -164,11 +184,131 @@ export default function SellPaymentOverlay({
     const baseKey = draft.checkoutKey || null;
     let primary = null;
 
-    if ((draft.regularItems || []).length > 0) {
+    let voucherSeq = 0;
+    const voucherAllocations = Array.isArray(draft.voucherAllocations) ? draft.voucherAllocations : [];
+
+    // Separate memberships from other no-schedule items. Memberships
+    // ride on the SAME booking as regular cart items (cart-level rule:
+    // 1 cart → 1 booking). Memberships, gift cards, and voucher
+    // packs ALL ride on the same booking now.
+    const membershipUnits = [];
+    const giftCardUnits = [];
+    const voucherPackUnits = [];
+    const nonMembershipItems = [];
+    for (const item of draft.noScheduleItems || []) {
+      const productType = String(item.productType || "").toLowerCase();
+      if (productType === "membership") {
+        const repeats = Math.max(1, Number(item.qty) || 1);
+        for (let i = 0; i < repeats; i += 1) {
+          const recipient = normalizeRecipientForCheckout(
+            item.recipientUnits?.[i] || item.recipient || null
+          );
+          membershipUnits.push({
+            activityId: Number(item.activityId),
+            variationId: item.variationId || null,
+            allocationIndex: voucherSeq,
+            guestInfo: recipient
+              ? {
+                  guestId: recipient.guestId || null,
+                  guestName: recipient.name,
+                  guestEmail: recipient.contactEmail,
+                  guestPhone: recipient.contactPhone || "",
+                }
+              : draft.payload.guestInfo,
+          });
+          voucherSeq += 1;
+        }
+      } else if (productType === "gift_card") {
+        const repeats = Math.max(1, Number(item.qty) || 1);
+        for (let i = 0; i < repeats; i += 1) {
+          const recipient = normalizeRecipientForCheckout(
+            item.recipientUnits?.[i] || item.recipient || null
+          );
+          giftCardUnits.push({
+            activityId: Number(item.activityId),
+            variationId: item.variationId || null,
+            allocationIndex: voucherSeq,
+            customAmount: item.customAmount || item.faceValue || null,
+            guestInfo: recipient
+              ? {
+                  guestId: recipient.guestId || null,
+                  guestName: recipient.name,
+                  guestEmail: recipient.contactEmail,
+                  guestPhone: recipient.contactPhone || "",
+                }
+              : null,
+          });
+          voucherSeq += 1;
+        }
+      } else if (productType === "voucher_pack") {
+        // Voucher packs: one entry per pack purchased. Backend mints
+        // the child voucher BookingItems + Entitlements on the same
+        // booking. Multiple packs of the same SKU = multiple entries.
+        const repeats = Math.max(1, Number(item.qty) || 1);
+        for (let i = 0; i < repeats; i += 1) {
+          voucherPackUnits.push({
+            activityId: Number(item.activityId),
+            variationId: item.variationId || null,
+            quantity: 1, // each entry = 1 pack
+            allocationIndex: voucherSeq,
+          });
+          voucherSeq += 1;
+        }
+      } else {
+        nonMembershipItems.push(item);
+      }
+    }
+
+    const membershipsPayload = membershipUnits.map(
+      ({ activityId, variationId, guestInfo }) => ({ activityId, variationId, guestInfo })
+    );
+    const giftCardsPayload = giftCardUnits.map(
+      ({ activityId, variationId, guestInfo, customAmount }) => ({
+        activityId,
+        variationId,
+        guestInfo,
+        customAmount,
+      })
+    );
+    const voucherPacksPayload = voucherPackUnits.map(
+      ({ activityId, variationId, quantity }) => ({
+        activityId,
+        variationId,
+        quantity,
+      })
+    );
+
+    // The full cart total — what the cashier collected at the overlay.
+    // When regular items + memberships are in the cart, the regular
+    // booking absorbs BOTH and the payment lands on it once.
+    const cartGrandTotal = Number(draftPayment.totalAmount) || 0;
+
+    if (
+      (draft.regularItems || []).length > 0 ||
+      membershipUnits.length > 0 ||
+      giftCardUnits.length > 0 ||
+      voucherPackUnits.length > 0
+    ) {
+      // Mixed cart: one createBooking call carries regular items +
+      // memberships + gift cards. Backend updates Booking.totalAmount
+      // to include all artifacts and lands a single PaymentTransaction.
+      // When there are no regular items, we still go through this path —
+      // backend treats memberships/giftCards as the artifacts on a
+      // booking with no schedule items, same flow.
+      const fullPayment = payByGiftCard || payByTerminal
+        ? {}
+        : {
+            ...paymentPayload,
+            amountPaid: cartGrandTotal,
+          };
+      const noRegular = (draft.regularItems || []).length === 0;
       const res = await createBooking({
         ...draft.payload,
-        pricingSummary: paidPricingSummary,
-        ...paymentPayload,
+        ...(noRegular ? { sessions: undefined, waiverSignatureIds: undefined, deferWaiverEnforcement: true } : { pricingSummary: paidPricingSummary }),
+        ...fullPayment,
+        memberships: membershipsPayload,
+        giftCards: giftCardsPayload,
+        voucherPacks: voucherPacksPayload,
         idempotencyKey: baseKey ? `${baseKey}:main` : undefined,
       }).unwrap();
       const data = res?.data || {};
@@ -178,13 +318,21 @@ export default function SellPaymentOverlay({
       };
     }
 
-    let voucherSeq = 0;
-    const voucherAllocations = Array.isArray(draft.voucherAllocations) ? draft.voucherAllocations : [];
-    for (const item of draft.noScheduleItems || []) {
+    // Per-line payment split for the REMAINING no-schedule items
+    // (vouchers, gift cards, etc.) — these still go one-per-booking.
+    for (const item of nonMembershipItems) {
       const repeats = Math.max(1, Number(item.qty) || 1);
       for (let i = 0; i < repeats; i += 1) {
         const lineItem = { ...item, qty: 1 };
-        const shouldCarryPayment = !primary;
+        const recipient = normalizeRecipientForCheckout(item.recipientUnits?.[i] || item.recipient || null);
+        const recipientGuestInfo = recipient
+          ? {
+              guestId: recipient.guestId || null,
+              guestName: recipient.name,
+              guestEmail: recipient.contactEmail,
+              guestPhone: recipient.contactPhone || "",
+            }
+          : draft.payload.guestInfo;
         const allocation = voucherAllocations[voucherSeq] || {
           subtotalAmount: 0,
           discountAmount: 0,
@@ -193,18 +341,40 @@ export default function SellPaymentOverlay({
           totalAmount: 0,
         };
         voucherSeq += 1;
+
+        // Build a payment payload sized to THIS line. Card/terminal
+        // payments are passed through as-is (the adapter handles
+        // capture against the booking total); cash/check/etc. get
+        // amountPaid = this line's allocation total.
+        const lineTotal = Number(allocation.totalAmount || allocation.grandTotal) || 0;
+        const linePayment = payByGiftCard || payByTerminal
+          ? {}
+          : {
+              ...paymentPayload,
+              amountPaid: lineTotal,
+              paymentDetails: {
+                ...(paymentPayload.paymentDetails || {}),
+                // Tendered/change reflect the CART total — preserved
+                // on the first line so the receipt shows what the
+                // customer handed over; subsequent lines just record
+                // their own slice without re-counting cash.
+                ...(primary ? { tenderedAmount: lineTotal, changeDue: 0 } : {}),
+              },
+            };
+
         const res = await createBooking({
           ...draft.payload,
-          ...(shouldCarryPayment ? paymentPayload : {}),
-          pricingSummary: buildPaidCheckoutPricingSummary(
-            allocation,
-            shouldCarryPayment ? payment : null
-          ),
+          ...linePayment,
+          guestInfo: recipientGuestInfo,
+          guestName: recipientGuestInfo?.guestName || draft.guestName,
+          guestEmail: recipientGuestInfo?.guestEmail || draft.payload.guestEmail,
+          guestPhone: recipientGuestInfo?.guestPhone || draft.payload.guestPhone,
+          pricingSummary: buildPaidCheckoutPricingSummary(allocation, payment),
           sessions: undefined,
           waiverSignatureIds: undefined,
           activityIds: [Number(item.activityId)],
           variationId: item.variationId || null,
-          bookingName: `${draft.guestName || ""} - ${item.name}`.trim(),
+          bookingName: `${recipientGuestInfo?.guestName || draft.guestName || ""} - ${item.name}`.trim(),
           deferWaiverEnforcement: true,
           idempotencyKey: baseKey ? `${baseKey}:voucher${voucherSeq}` : undefined,
         }).unwrap();
@@ -598,4 +768,18 @@ export default function SellPaymentOverlay({
       )}
     </>
   );
+}
+
+function normalizeRecipientForCheckout(guest) {
+  if (!guest) return null;
+  const name = guest.name || guest.guestName || guest.fullName || "";
+  const contactEmail = guest.contactEmail || guest.guestEmail || guest.email || "";
+  const contactPhone = guest.contactPhone || guest.guestPhone || guest.phone || "";
+  return {
+    guestId: guest.guestId || null,
+    name,
+    contact: contactEmail || contactPhone,
+    contactEmail,
+    contactPhone,
+  };
 }

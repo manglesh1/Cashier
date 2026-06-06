@@ -80,6 +80,9 @@ export const authApi = baseApi.injectEndpoints({
           // the tablet was paired — the pairing-time snapshot is stale.
           if (data?.device?.deviceId) {
             try {
+              if (data.device.locationId) {
+                Cookies.set("locationId", data.device.locationId, { expires: 2 / 24 });
+              }
               const existing = JSON.parse(localStorage.getItem("cashier:terminal") || "{}");
               localStorage.setItem(
                 "cashier:terminal",
