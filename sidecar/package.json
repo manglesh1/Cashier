@@ -7,12 +7,14 @@
   "type": "commonjs",
   "scripts": {
     "start": "electron .",
-    "start:mock": "MOVIRA_WRISTBAND_ADAPTER=mock electron .",
+    "start:mock": "cross-env MOVIRA_WRISTBAND_ADAPTER=mock electron .",
+    "start:acr122u": "cross-env MOVIRA_WRISTBAND_ADAPTER=acr122u electron .",
     "package:win": "electron-builder --win --x64",
     "package:mac": "electron-builder --mac --x64 --arm64",
     "package:linux": "electron-builder --linux --x64"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
     "electron": "^31.0.0",
     "electron-builder": "^24.13.0"
   },
@@ -20,15 +22,25 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "node-hid": "^3.1.0",
-    "@pokusew/pcsclite": "^1.0.0"
+    "@pokusew/pcsclite": "^1.0.0",
+    "node-hid": "^3.1.0"
   },
   "build": {
     "appId": "com.movira.wristband-sidecar",
     "productName": "Movira Wristband Sidecar",
-    "files": ["src/**/*", "package.json"],
-    "win": { "target": "nsis" },
-    "mac": { "target": "dmg", "category": "public.app-category.business" },
-    "linux": { "target": "AppImage" }
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.business"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
   }
 }

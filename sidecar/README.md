@@ -24,6 +24,11 @@ npm install
 npm run start:mock    # emits a fake scan every 7s — no hardware needed
 ```
 
+Scripts use `cross-env` so they work in Windows PowerShell/CMD as well
+as POSIX shells. If you see `'MOVIRA_WRISTBAND_ADAPTER' is not
+recognized as an internal or external command`, re-run `npm install` —
+`cross-env` needs to be on disk.
+
 Open the Cashier (`http://localhost:5173`) in Chrome on the same
 machine. If the venue's `wristbandMode` is `rfid`, the bridge auto-
 connects on cashier login. You'll see fake scans dispatched as
@@ -39,7 +44,7 @@ smartcard device. The adapter uses [`@pokusew/pcsclite`](https://github.com/poku
 1. Install ACS's unified driver: <https://www.acs.com.hk/en/driver/3/acr122u-usb-nfc-reader/>
 2. Plug in the reader — Device Manager should show a "Smart Card Reader"
 3. `npm install` (includes the pcsclite optional dep)
-4. `MOVIRA_WRISTBAND_ADAPTER=acr122u npm start`
+4. `npm run start:acr122u`
 
 **macOS:**
 PC/SC is built-in (CryptoTokenKit). Just plug + run.
@@ -48,8 +53,11 @@ PC/SC is built-in (CryptoTokenKit). Just plug + run.
 ```bash
 sudo apt install pcscd libccid     # or your distro's equivalent
 sudo systemctl start pcscd
-MOVIRA_WRISTBAND_ADAPTER=acr122u npm start
+npm run start:acr122u
 ```
+
+(The `start:acr122u` script wraps the env var with `cross-env`; the
+manual `MOVIRA_WRISTBAND_ADAPTER=...` form only works on POSIX shells.)
 
 If pcsclite isn't installed or can't find the reader, the sidecar
 stays up and the status panel shows "ACR122U · driver not installed"
