@@ -40,6 +40,10 @@ import {
   useRedeemTicketMutation,
   useGetRecentRedemptionsQuery,
 } from "../../features/tickets/ticketApi";
+import {
+  useGetMembershipBillingQuery,
+  useCollectMemberPaymentMutation,
+} from "../../features/memberships/membershipBillingApi";
 import { getTerminal } from "../../lib/terminal";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 import { actRedeemable } from "./actRedeemable";
@@ -47,7 +51,7 @@ import { CartWaiverModal } from "./CartWaiverModal";
 
 const TOKEN_LOOKS_LIKE = /^AS-[A-Z]-[A-Z0-9]+$/i;
 
-export function Redeem() {
+export function Redeem({ onRedeemCheckout }) {
   const [mode, setMode] = useState("search"); // "search" | "token"
   const [search, setSearch] = useState("");
   const [selectedGuest, setSelectedGuest] = useState(null);
@@ -306,6 +310,7 @@ export function Redeem() {
             redeemables={redeemables}
             isLoading={isFetchingRedeemables}
             onRefresh={refreshRedeemables}
+            onRedeemCheckout={onRedeemCheckout}
           />
         ) : (
           <RecentActivity recent={recentRedemptions} />
@@ -316,7 +321,7 @@ export function Redeem() {
 }
 
 /* ── Selected guest view ─────────────────────────────────────── */
-function SelectedGuestView({ guest, redeemables, isLoading, onRefresh }) {
+function SelectedGuestView({ guest, redeemables, isLoading, onRefresh, onRedeemCheckout }) {
   const posSettings = useEffectiveSettings();
   const [redeemMembership] = useRedeemMembershipMutation();
   const [scheduleVoucher] = useScheduleVoucherMutation();
@@ -337,14 +342,32 @@ function SelectedGuestView({ guest, redeemables, isLoading, onRefresh }) {
   ];
   const noneFound =
     vouchers.length === 0 && entitlements.length === 0 && memberships.length === 0;
+  const isRedeemableTicket = (ticket) => {
+    const status = String(ticket?.status || "").toLowerCase();
+    if (ticket?.isExpired) return false;
+    if (ticket?.usable === false) return false;
+    if (["expired", "cancelled", "canceled", "exhausted", "voided", "refunded"].includes(status)) {
+      return false;
+    }
+    if (ticket?.kind === "entitlement" && Number(ticket.remainingQty) <= 0) return false;
+    return true;
+  };
 
   useEffect(() => {
-    setSelectedKeys(new Set(ticketItems.map((item) => item.key)));
+    setSelectedKeys(new Set(ticketItems.filter(({ item }) => isRedeemableTicket(item)).map((item) => item.key)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ticketItems.map((item) => item.key).join("|")]);
 
   const selectedItems = ticketItems.filter((item) => selectedKeys.has(item.key));
   const allSelected = ticketItems.length > 0 && selectedItems.length === ticketItems.length;
+  const canFinishWithoutPayment =
+    selectedItems.length > 0 &&
+    selectedItems.every(({ kind, item }) => {
+      if (!isRedeemableTicket(item)) return false;
+      if (item.requiresWaiver && !item.waiverAttached) return false;
+      if (kind !== "membership") return true;
+      return (item.todaysBenefits || []).some((benefit) => Number(benefit.discountPct) >= 100);
+    });
 
   const toggleOne = (key) => {
     setSelectedKeys((prev) => {
@@ -356,7 +379,11 @@ function SelectedGuestView({ guest, redeemables, isLoading, onRefresh }) {
   };
 
   const toggleAll = () => {
-    setSelectedKeys(allSelected ? new Set() : new Set(ticketItems.map((item) => item.key)));
+    setSelectedKeys(
+      allSelected
+        ? new Set()
+        : new Set(ticketItems.filter(({ item }) => isRedeemableTicket(item)).map((item) => item.key))
+    );
   };
 
   const redeemOne = async ({ kind, item }) => {
@@ -459,6 +486,16 @@ function SelectedGuestView({ guest, redeemables, isLoading, onRefresh }) {
     }
   };
 
+  const sendToSell = (items, { autoFinish = false } = {}) => {
+    if (!items.length) return;
+    const blocked = items.find(({ item }) => item.requiresWaiver && !item.waiverAttached);
+    if (blocked) {
+      toast.error("Attach waiver before redeeming.");
+      return;
+    }
+    onRedeemCheckout?.({ guest, items, autoFinish });
+  };
+
   const attachWaiver = async (attached) => {
     const picked = Array.isArray(attached) ? attached[attached.length - 1] : null;
     const signatureId = Number(picked?.signatureId);
@@ -467,6 +504,7 @@ function SelectedGuestView({ guest, redeemables, isLoading, onRefresh }) {
     try {
       await linkParticipantFromWaiver({
         bookingId,
+        bookingItemId: waiverTarget?.bookingItemId || null,
         waiverSignatureId: signatureId,
         includeMinors: false,
         people: ["signer"],
@@ -556,18 +594,23 @@ function SelectedGuestView({ guest, redeemables, isLoading, onRefresh }) {
               <button
                 type="button"
                 className="a-btn a-btn--secondary a-btn--sm"
-                onClick={() => redeemMany(selectedItems)}
-                disabled={batchBusy || selectedItems.length === 0}
+                onClick={() => sendToSell(selectedItems, { autoFinish: true })}
+                disabled={batchBusy || !canFinishWithoutPayment || !onRedeemCheckout}
+                title={
+                  canFinishWithoutPayment
+                    ? "Create a zero-balance booking and consume the selected benefits"
+                    : "Available only when selected items are fully covered and waiver-ready"
+                }
               >
-                {batchBusy ? "Redeeming..." : `Redeem selected (${selectedItems.length})`}
+                Redeem and finish
               </button>
               <button
                 type="button"
                 className="a-btn a-btn--primary a-btn--sm"
-                onClick={() => redeemMany(ticketItems)}
-                disabled={batchBusy || ticketItems.length === 0}
+                onClick={() => sendToSell(selectedItems)}
+                disabled={batchBusy || selectedItems.length === 0 || !onRedeemCheckout}
               >
-                Redeem all
+                Add items and redeem
               </button>
             </div>
           </div>
@@ -580,7 +623,7 @@ function SelectedGuestView({ guest, redeemables, isLoading, onRefresh }) {
                 m={m}
                 selected={selectedKeys.has(key)}
                 onToggle={() => toggleOne(key)}
-                disabled={batchBusy}
+                disabled={batchBusy || !isRedeemableTicket(m)}
                 onAttachWaiver={() => setWaiverTarget(m)}
               />
             );
@@ -593,7 +636,7 @@ function SelectedGuestView({ guest, redeemables, isLoading, onRefresh }) {
                 v={v}
                 selected={selectedKeys.has(key)}
                 onToggle={() => toggleOne(key)}
-                disabled={batchBusy}
+                disabled={batchBusy || !isRedeemableTicket(v)}
                 onAttachWaiver={() => setWaiverTarget(v)}
               />
             );
@@ -606,7 +649,7 @@ function SelectedGuestView({ guest, redeemables, isLoading, onRefresh }) {
                 e={e}
                 selected={selectedKeys.has(key)}
                 onToggle={() => toggleOne(key)}
-                disabled={batchBusy}
+                disabled={batchBusy || !isRedeemableTicket(e)}
                 onAttachWaiver={() => setWaiverTarget(e)}
               />
             );
@@ -678,6 +721,11 @@ function WaiverStatus({ item, onAttachWaiver, disabled }) {
   if (!item?.requiresWaiver) return null;
 
   if (item.waiverAttached) {
+    const attachedName =
+      item.waiver?.participantName ||
+      item.waiver?.signedBy ||
+      item.waiver?.signedByName ||
+      "Waiver attached";
     return (
       <span
         style={{
@@ -695,7 +743,7 @@ function WaiverStatus({ item, onAttachWaiver, disabled }) {
         }}
       >
         <Icon name="check" size={13} stroke={3} />
-        Waiver attached
+        {attachedName}
       </span>
     );
   }
@@ -727,46 +775,139 @@ function MembershipCard({ m, selected, onToggle, disabled, onAttachWaiver }) {
     ? new Date(m.expiresAt).toLocaleDateString()
     : null;
 
+  // Subscription-billing surface. Skip the fetch entirely for memberships
+  // that we already know aren't recurring (no autoRenew + has expiresAt
+  // means one-time). For the rest, the by-membership endpoint resolves
+  // to either the recurring profile or null (no_subscription) — the API
+  // module maps the 404 case to null so we don't render a failed state.
+  const possiblyRecurring = m.autoRenew !== false;
+  const { data: billing, isFetching: billingFetching } =
+    useGetMembershipBillingQuery(m.membershipId, {
+      skip: !m.membershipId || !possiblyRecurring,
+    });
+  const [collect, { isLoading: collecting }] = useCollectMemberPaymentMutation();
+
+  const subStatus = String(billing?.status || "").toLowerCase();
+  const isPastDue = subStatus === "past_due" || subStatus === "unpaid";
+  const amountOwed = Number(billing?.amountDue ?? billing?.openInvoiceAmount ?? 0);
+
+  const handleCollect = async () => {
+    if (!billing?.profileId) return;
+    try {
+      await collect(billing.profileId).unwrap();
+      toast.success(
+        amountOwed > 0
+          ? `Collected $${amountOwed.toFixed(2)} from ${title}`
+          : "Subscription settled"
+      );
+    } catch (err) {
+      toast.error(err?.data?.message || err?.data?.error || "Collect failed");
+    }
+  };
+
   return (
     <div
       style={{
         background: "white",
-        border: "1.5px solid #6366F1",
+        border: isPastDue ? "1.5px solid #B83210" : "1.5px solid #6366F1",
         borderRadius: 12,
         padding: "12px 14px",
-        display: "grid",
-        gridTemplateColumns: "auto auto minmax(0, 1fr) auto",
-        alignItems: "center",
-        gap: 12,
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
       }}
     >
-      <input
-        type="checkbox"
-        checked={selected}
-        onChange={onToggle}
-        disabled={disabled}
-        aria-label={`Select ${title}`}
-      />
-      <Icon name="ticket" size={20} style={{ color: "#6366F1" }} />
-      <div style={{ minWidth: 0, lineHeight: 1.4 }}>
-        <div style={{ fontWeight: 700, fontSize: 14 }}>
-          {title}
-          {m.variationName ? ` · ${m.variationName}` : ""}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "auto auto minmax(0, 1fr) auto",
+          alignItems: "center",
+          gap: 12,
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggle}
+          disabled={disabled}
+          aria-label={`Select ${title}`}
+        />
+        <Icon name="ticket" size={20} style={{ color: isPastDue ? "#B83210" : "#6366F1" }} />
+        <div style={{ minWidth: 0, lineHeight: 1.4 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <span>
+              {title}
+              {m.variationName ? ` · ${m.variationName}` : ""}
+            </span>
+            {isPastDue && (
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 950,
+                  letterSpacing: "0.06em",
+                  textTransform: "uppercase",
+                  color: "white",
+                  background: "#B83210",
+                  padding: "2px 6px",
+                  borderRadius: 6,
+                }}
+              >
+                Past due{amountOwed > 0 ? ` · $${amountOwed.toFixed(2)}` : ""}
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--ink-500)" }}>
+            <code style={{ fontFamily: "var(--font-mono)" }}>{m.redemptionToken}</code>
+            {m.expiresAt ? ` · expires ${new Date(m.expiresAt).toLocaleDateString()}` : ""}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--ink-600)", marginTop: 3 }}>
+            Member #{m.membershipId}
+            {m.bookingNumber ? ` - ${m.bookingNumber}` : ""}
+            {purchasedLabel ? ` - bought ${purchasedLabel}` : ""}
+            {expiresLabel ? ` - expires ${expiresLabel}` : ""}
+            {m.paymentStatus ? ` - ${String(m.paymentStatus).toUpperCase()}` : ""}
+            {Number.isFinite(m.redemptionsToday) ? ` - ${m.redemptionsToday} used today` : ""}
+          </div>
         </div>
-        <div style={{ fontSize: 11, color: "var(--ink-500)" }}>
-          <code style={{ fontFamily: "var(--font-mono)" }}>{m.redemptionToken}</code>
-          {m.expiresAt ? ` · expires ${new Date(m.expiresAt).toLocaleDateString()}` : ""}
-        </div>
-        <div style={{ fontSize: 11, color: "var(--ink-600)", marginTop: 3 }}>
-          Member #{m.membershipId}
-          {m.bookingNumber ? ` - ${m.bookingNumber}` : ""}
-          {purchasedLabel ? ` - bought ${purchasedLabel}` : ""}
-          {expiresLabel ? ` - expires ${expiresLabel}` : ""}
-          {m.paymentStatus ? ` - ${String(m.paymentStatus).toUpperCase()}` : ""}
-          {Number.isFinite(m.redemptionsToday) ? ` - ${m.redemptionsToday} used today` : ""}
-        </div>
+        <WaiverStatus item={m} onAttachWaiver={onAttachWaiver} disabled={disabled} />
       </div>
-      <WaiverStatus item={m} onAttachWaiver={onAttachWaiver} disabled={disabled} />
+
+      {/* Past-due strip: only renders when the recurring profile is in
+          past_due/unpaid. One-tap Collect Now settles the invoice; the
+          query auto-refetches via the MembershipBilling tag so the
+          badge clears on success. */}
+      {isPastDue && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            padding: "8px 10px",
+            background: "#FFF0EA",
+            border: "1.5px solid #FFB199",
+            borderRadius: 8,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#B83210", fontSize: 12, fontWeight: 800 }}>
+            <Icon name="alert-octagon" size={14} stroke={2.5} />
+            <span>
+              Subscription past due
+              {amountOwed > 0 ? ` — $${amountOwed.toFixed(2)} owed` : ""}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleCollect}
+            disabled={collecting || billingFetching || !billing?.profileId}
+            className="a-btn a-btn--primary a-btn--sm"
+            style={{ justifyContent: "center" }}
+          >
+            <Icon name="credit-card" size={13} />
+            {collecting ? "Collecting…" : "Collect now"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

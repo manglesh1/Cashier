@@ -55,7 +55,7 @@ const baseQueryWithLocation = async (args, api, extraOptions) => {
 export const baseApi = createApi({
   reducerPath: "api",
   baseQuery: baseQueryWithLocation,
-  tagTypes: ["Booking", "Bookings", "Tickets", "CheckIn", "Availability", "PresetBuilder", "PosDevice", "PosSettings", "Redemption"],
+  tagTypes: ["Booking", "Bookings", "Tickets", "CheckIn", "Availability", "PresetBuilder", "PosDevice", "PosSettings", "Redemption", "MembershipBilling"],
   endpoints: () => ({}),
   refetchOnReconnect: true,
 });
