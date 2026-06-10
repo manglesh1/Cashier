@@ -39,6 +39,11 @@ import {
   useLookupWristbandMutation,
 } from "../../features/wristbands/wristbandBindApi";
 import {
+  armParticipant,
+  disarmParticipant,
+  isAnyArmed,
+} from "../../lib/wristbandArmed";
+import {
   useLazyLookupGiftCardQuery,
   useRedeemGiftCardMutation,
 } from "../../features/vouchers/voucherApi";
@@ -184,6 +189,10 @@ export function CheckIn() {
       // what we want (auto-jump to that booking's detail pane).
       const uid = String(detail.code || "").trim();
       if (!uid) return;
+      // Race fix: when a ticket row has armed a participant for bind,
+      // the per-row effect owns this scan. Skip the lookup so we don't
+      // 404 on an unbound UID and clobber the bind's success toast.
+      if (isAnyArmed()) return;
       try {
         const res = await lookupWristbandMutation({ rfidUid: uid }).unwrap();
         const booking = res?.data?.booking;
@@ -1878,6 +1887,23 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                       busy={binding}
                     />
                   )}
+                  {/* RFID wristband binding lives on the ticket row so
+                      the cashier acts where their eye already is. Only
+                      renders when this ticket has a participant and the
+                      ticket isn't already redeemed. */}
+                  {t.participantId && !isRedeemed && (
+                    <TicketWristbandBind
+                      bookingId={booking?.bookingId}
+                      participantId={Number(t.participantId)}
+                      participantName={t.participant?.displayName}
+                      wristbandNumber={
+                        participantsById.get(Number(t.participantId))?.wristbandNumber ||
+                        t.participant?.wristbandNumber ||
+                        null
+                      }
+                      onChanged={refresh}
+                    />
+                  )}
                   {!isRedeemed && !t.participantId && t.activity?.captureTicketHolder !== false && (
                     <HolderPicker
                       candidates={candidatesFor(t)}
@@ -2069,65 +2095,11 @@ function GuestWorkflowPanel({
   const assignedCount = tickets.filter((ticket) => ticket.participantId).length;
   const sampleParticipants = participants.slice(0, 10);
 
-  // ── RFID bind flow ──
-  // Cashier "arms" one participant; the next `cashier:scan` with
-  // source="rfid" binds that UID to them. Disarms on success or
-  // when the cashier picks a different participant (or 30s timeout).
-  const [armedBindParticipantId, setArmedBindParticipantId] = React.useState(null);
-  const [bindWristbandMutation, { isLoading: binding }] = useBindWristbandMutation();
-  const [unbindWristbandMutation] = useUnbindWristbandMutation();
-
-  React.useEffect(() => {
-    if (!armedBindParticipantId) return undefined;
-    const onScan = (e) => {
-      const detail = e?.detail || {};
-      if (detail.source !== "rfid") return;
-      const uid = String(detail.code || "").trim();
-      if (!uid) return;
-      // Fire-and-forget; toast surfaces success/failure
-      bindWristbandMutation({
-        bookingId,
-        participantId: armedBindParticipantId,
-        rfidUid: uid,
-      })
-        .unwrap()
-        .then((res) => {
-          toast.success(
-            `Bound ${res?.data?.rfidUid || uid} → ${res?.data?.participantName || "guest"}`
-          );
-          setArmedBindParticipantId(null);
-          onSaved?.();
-        })
-        .catch((err) => {
-          toast.error(
-            err?.data?.message ||
-              err?.data?.error ||
-              "Could not bind wristband"
-          );
-        });
-    };
-    window.addEventListener("cashier:scan", onScan);
-    // Auto-disarm after 30s so a forgotten arm doesn't trap the next scan.
-    const timer = setTimeout(() => setArmedBindParticipantId(null), 30_000);
-    return () => {
-      window.removeEventListener("cashier:scan", onScan);
-      clearTimeout(timer);
-    };
-  }, [armedBindParticipantId, bookingId, bindWristbandMutation, onSaved]);
-
-  const handleUnbindWristband = (participantId) => {
-    unbindWristbandMutation({ bookingId, participantId })
-      .unwrap()
-      .then(() => {
-        toast.success("Wristband unbound");
-        onSaved?.();
-      })
-      .catch((err) =>
-        toast.error(
-          err?.data?.message || err?.data?.error || "Could not unbind"
-        )
-      );
-  };
+  // RFID binding is owned by the ticket-row component (TicketWristbandBind
+  // below). Each ticket has its own holder + bind button. Moving the
+  // affordance off the Guests-panel chips keeps that panel about names
+  // and waiver coverage; the ticket row is where the cashier's eye is
+  // when they hand over a wristband.
 
   return (
     <div
@@ -2205,8 +2177,6 @@ function GuestWorkflowPanel({
           {sampleParticipants.map((participant) => {
             const id = Number(participant.bookingParticipantId);
             const isBound = boundIds.has(id);
-            const wristbandUid = participant.wristbandNumber || null;
-            const isArmed = armedBindParticipantId === id;
             return (
               <span
                 key={participant.bookingParticipantId}
@@ -2218,16 +2188,12 @@ function GuestWorkflowPanel({
                   maxWidth: 220,
                   padding: "4px 8px",
                   borderRadius: 999,
-                  border: isArmed
-                    ? "1.5px solid #1D4ED8"
-                    : `1.5px solid ${participant.hasValidWaiver ? "#8AD5A3" : "var(--ink-200)"}`,
-                  background: isArmed
-                    ? "#EFF6FF"
-                    : isBound
-                      ? "var(--aero-orange-50)"
-                      : participant.hasValidWaiver
-                        ? "#EAF8EF"
-                        : "var(--ink-50)",
+                  border: `1.5px solid ${participant.hasValidWaiver ? "#8AD5A3" : "var(--ink-200)"}`,
+                  background: isBound
+                    ? "var(--aero-orange-50)"
+                    : participant.hasValidWaiver
+                      ? "#EAF8EF"
+                      : "var(--ink-50)",
                   color: participant.hasValidWaiver ? "#137A35" : "var(--ink-600)",
                   fontSize: 11,
                   fontWeight: 750,
@@ -2237,90 +2203,6 @@ function GuestWorkflowPanel({
                 <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {displayText(participant.displayName, "Guest")}
                 </span>
-                {/* RFID wristband state. Three visual states:
-                    • UID present → small monospace chip + unbind ×
-                    • Armed for bind → blue "Scan now…" pill
-                    • Otherwise → "Bind" mini-button */}
-                {wristbandUid ? (
-                  <span
-                    title={`Wristband ${wristbandUid}`}
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 4,
-                      marginLeft: 4,
-                      padding: "1px 6px",
-                      borderRadius: 999,
-                      background: "#1D4ED8",
-                      color: "white",
-                      fontSize: 9,
-                      fontWeight: 950,
-                      fontFamily: "var(--font-mono)",
-                      letterSpacing: "0.04em",
-                    }}
-                  >
-                    <Icon name="radio" size={9} stroke={3} />
-                    {wristbandUid.length > 8 ? wristbandUid.slice(-6) : wristbandUid}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleUnbindWristband(id);
-                      }}
-                      title="Unbind wristband"
-                      style={{
-                        all: "unset",
-                        cursor: "pointer",
-                        marginLeft: 2,
-                        opacity: 0.85,
-                      }}
-                    >
-                      <Icon name="x" size={9} stroke={3} />
-                    </button>
-                  </span>
-                ) : isArmed ? (
-                  <span
-                    style={{
-                      marginLeft: 4,
-                      padding: "1px 6px",
-                      borderRadius: 999,
-                      background: "#1D4ED8",
-                      color: "white",
-                      fontSize: 9,
-                      fontWeight: 900,
-                      letterSpacing: "0.04em",
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    Scan now…
-                  </span>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setArmedBindParticipantId(id);
-                    }}
-                    title="Bind RFID wristband"
-                    disabled={binding}
-                    style={{
-                      all: "unset",
-                      cursor: "pointer",
-                      marginLeft: 4,
-                      padding: "1px 6px",
-                      borderRadius: 999,
-                      border: "1px solid var(--ink-300)",
-                      background: "white",
-                      color: "var(--ink-700)",
-                      fontSize: 9,
-                      fontWeight: 800,
-                      letterSpacing: "0.04em",
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    Bind
-                  </button>
-                )}
               </span>
             );
           })}
@@ -2959,6 +2841,189 @@ function ReslotModal({ activityId, variationId, activityName, busy, onPick, onCl
 // Palette switches on waiver state so the cashier reads readiness at a glance:
 //   • valid waiver → green (ready to admit)
 //   • missing waiver → orange (still needs a signed waiver before redeem)
+// TicketWristbandBind — RFID bind/unbind affordance that lives on each
+// ticket row, next to the holder chip. Three visual states:
+//
+//   • UID bound      → blue monospace pill (last 6 chars) + unbind ×
+//   • Armed for scan → blue "SCAN NOW…" pill, waiting for the next
+//                      cashier:scan event with source="rfid"
+//   • Not bound      → small ghost "Bind wristband" button
+//
+// Uses the shared wristbandArmed registry so the CheckIn gate listener
+// can detect "a ticket is armed" and skip its own lookup-against-this-
+// scan flow — otherwise the gate's 404 toast would race the bind's
+// success toast and the cashier sees a confusing "not recognised"
+// message right next to a "bound" success.
+//
+// Auto-disarms after 30s so a forgotten arm doesn't trap unrelated
+// later scans.
+function TicketWristbandBind({
+  bookingId,
+  participantId,
+  participantName,
+  wristbandNumber,
+  onChanged,
+}) {
+  const [armed, setArmed] = React.useState(false);
+  const [bind, { isLoading: binding }] = useBindWristbandMutation();
+  const [unbind] = useUnbindWristbandMutation();
+
+  // Arm/disarm the shared registry whenever local state flips.
+  React.useEffect(() => {
+    if (armed) {
+      armParticipant(participantId);
+    } else {
+      disarmParticipant(participantId);
+    }
+    return () => disarmParticipant(participantId);
+  }, [armed, participantId]);
+
+  // Listen for the next RFID scan when armed; bind it to this
+  // ticket's participant.
+  React.useEffect(() => {
+    if (!armed) return undefined;
+    const onScan = (e) => {
+      const detail = e?.detail || {};
+      if (detail.source !== "rfid") return;
+      const uid = String(detail.code || "").trim();
+      if (!uid) return;
+      bind({ bookingId, participantId, rfidUid: uid })
+        .unwrap()
+        .then((res) => {
+          toast.success(
+            `Bound ${res?.data?.rfidUid || uid} → ${participantName || "guest"}`
+          );
+          setArmed(false);
+          onChanged?.();
+        })
+        .catch((err) => {
+          toast.error(
+            err?.data?.message || err?.data?.error || "Could not bind wristband"
+          );
+          // Stay armed so the cashier can re-tap once they resolve
+          // the issue (e.g. wristband already bound, ask previous
+          // holder to return it).
+        });
+    };
+    window.addEventListener("cashier:scan", onScan);
+    const timer = setTimeout(() => setArmed(false), 30_000);
+    return () => {
+      window.removeEventListener("cashier:scan", onScan);
+      clearTimeout(timer);
+    };
+  }, [armed, bind, bookingId, participantId, participantName, onChanged]);
+
+  const handleUnbind = () => {
+    unbind({ bookingId, participantId })
+      .unwrap()
+      .then(() => {
+        toast.success("Wristband unbound");
+        onChanged?.();
+      })
+      .catch((err) =>
+        toast.error(err?.data?.message || err?.data?.error || "Could not unbind")
+      );
+  };
+
+  // BOUND
+  if (wristbandNumber) {
+    const shortUid =
+      wristbandNumber.length > 8 ? wristbandNumber.slice(-6) : wristbandNumber;
+    return (
+      <div style={{ marginTop: 6, marginLeft: 8, display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <span
+          title={`Wristband · ${wristbandNumber}`}
+          style={{
+            display: "inline-flex", alignItems: "center", gap: 4,
+            padding: "2px 8px",
+            borderRadius: 999,
+            background: "#1D4ED8",
+            color: "white",
+            fontSize: 10,
+            fontWeight: 950,
+            fontFamily: "var(--font-mono)",
+            letterSpacing: "0.04em",
+          }}
+        >
+          <Icon name="radio" size={10} stroke={3} />
+          {shortUid}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); handleUnbind(); }}
+            title="Unbind wristband"
+            style={{
+              all: "unset", cursor: "pointer", marginLeft: 2, opacity: 0.85,
+            }}
+          >
+            <Icon name="x" size={10} stroke={3} />
+          </button>
+        </span>
+      </div>
+    );
+  }
+
+  // ARMED
+  if (armed) {
+    return (
+      <div style={{ marginTop: 6, marginLeft: 8, display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <button
+          type="button"
+          onClick={() => setArmed(false)}
+          title="Cancel — disarm this row"
+          style={{
+            all: "unset", cursor: "pointer",
+            padding: "2px 10px",
+            borderRadius: 999,
+            background: "#1D4ED8",
+            color: "white",
+            fontSize: 10,
+            fontWeight: 950,
+            letterSpacing: "0.04em",
+            textTransform: "uppercase",
+            display: "inline-flex", alignItems: "center", gap: 6,
+          }}
+        >
+          <span style={{
+            display: "inline-block",
+            width: 6, height: 6, borderRadius: 999,
+            background: "white",
+            animation: "wb-pulse 1s ease-in-out infinite",
+          }} />
+          Scan now…
+        </button>
+      </div>
+    );
+  }
+
+  // NOT BOUND
+  return (
+    <div style={{ marginTop: 6, marginLeft: 8, display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <button
+        type="button"
+        onClick={() => setArmed(true)}
+        disabled={binding}
+        title="Bind RFID wristband to this ticket's holder"
+        style={{
+          all: "unset", cursor: binding ? "wait" : "pointer",
+          padding: "2px 10px",
+          borderRadius: 999,
+          border: "1.5px solid var(--ink-300)",
+          background: "white",
+          color: "var(--ink-700)",
+          fontSize: 10,
+          fontWeight: 800,
+          letterSpacing: "0.04em",
+          textTransform: "uppercase",
+          display: "inline-flex", alignItems: "center", gap: 4,
+        }}
+      >
+        <Icon name="radio" size={10} stroke={2.5} />
+        Bind wristband
+      </button>
+    </div>
+  );
+}
+
 function BoundHolderChip({ participant, onUnbind, busy }) {
   const ready = !!participant?.hasValidWaiver;
   const palette = ready
