@@ -34,6 +34,7 @@ import { GuestProfile } from "./GuestProfile";
 // sidebar (see the `screens` array). The files remain on disk so the
 // next dev to wire them has a starting point.
 import { Refund } from "./Refund";
+import SettingsPage from "./SettingsPage";
 import { WaiverDetail } from "./WaiverDetail";
 import { Redeem } from "./Redeem";
 import BookingDetail from "./BookingDetail";
@@ -74,6 +75,8 @@ import { attachScannerListener } from "../../lib/scanner";
 import {
   startWristbandBridge,
   stopWristbandBridge,
+  getWristbandBridgeStatus,
+  onWristbandBridgeStatus,
 } from "../../lib/wristbandBridge";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 
@@ -504,6 +507,80 @@ function AddOnSuggestionPopup({ suggestions, cartCounts, onAdd, position, onMove
 // column. Appears only when the cashier has dismissed the popup but
 // suggestions are still relevant; one tap restores the popup at its
 // last-known position.
+// Top-bar banner that appears when this terminal is configured for
+// RFID wristbands AND the local sidecar isn't responding. Reads the
+// terminal's wristbandMode from the paired-terminal blob, polls the
+// bridge status, and links the cashier to Settings for install steps.
+//
+// Renders nothing on paper / none venues, and nothing when the bridge
+// reports connected — so the banner is silent unless the cashier
+// actually needs it.
+function SidecarMissingBanner({ onOpenSettings }) {
+  const [shown, setShown] = React.useState(false);
+  React.useEffect(() => {
+    const recompute = () => {
+      let terminal;
+      try {
+        terminal = JSON.parse(localStorage.getItem("cashier:terminal") || "null");
+      } catch { terminal = null; }
+      const mode = terminal?.settings?.wristbandMode || terminal?.wristbandMode || "none";
+      if (mode !== "rfid") { setShown(false); return; }
+      const status = getWristbandBridgeStatus();
+      setShown(!status.connected);
+    };
+    recompute();
+    const off = onWristbandBridgeStatus(recompute);
+    // Tile-based polling fallback. Bridge fires on every state change,
+    // but if the venue is reconfigured mid-session we want to pick up
+    // the new mode without a sign-out.
+    const tick = setInterval(recompute, 3000);
+    return () => { off(); clearInterval(tick); };
+  }, []);
+
+  if (!shown) return null;
+
+  return (
+    <div
+      role="alert"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "10px 18px",
+        background: "#FFF0EA",
+        borderBottom: "2px solid #B83210",
+        color: "#B83210",
+        fontSize: 13,
+        fontWeight: 800,
+        flexShrink: 0,
+      }}
+    >
+      <Icon name="alert-octagon" size={16} stroke={2.5} />
+      <span style={{ flex: 1, minWidth: 0 }}>
+        Wristband Sidecar not detected on this till — RFID scans won't reach
+        the Cashier until it's installed and running.
+      </span>
+      <button
+        type="button"
+        onClick={onOpenSettings}
+        style={{
+          appearance: "none",
+          cursor: "pointer",
+          padding: "6px 12px",
+          borderRadius: 999,
+          border: "1.5px solid #B83210",
+          background: "white",
+          color: "#B83210",
+          fontWeight: 800,
+          fontSize: 12,
+        }}
+      >
+        Open Settings
+      </button>
+    </div>
+  );
+}
+
 function AddOnReopenTab({ onClick }) {
   return (
     <button
@@ -1983,6 +2060,7 @@ export function CashierApp() {
     { id: "guest", label: "Guest", icon: "user-round" },
     { id: "waiver", label: "Waiver", icon: "shield-alert" },
     { id: "refund", label: "Refund", icon: "undo-2" },
+    { id: "settings", label: "Settings", icon: "settings" },
   ];
 
   // Normalize unknown/empty hash routes to /sell. Runs on first mount and
@@ -2145,6 +2223,9 @@ export function CashierApp() {
   } else if (screen === "refund") {
     body = <Refund />;
     header = <Header breadcrumb="VOID & REFUND" title="Refund" subtitle="Manager review for > $50" />;
+  } else if (screen === "settings") {
+    body = <SettingsPage />;
+    header = <Header breadcrumb="TILL" title="Settings" subtitle="Terminal config + installs" />;
   } else {
     // Unknown / hidden route (e.g. legacy /payment, /shift bookmarks).
     // The redirect effect above will navigate to /sell on next tick;
@@ -2223,6 +2304,10 @@ export function CashierApp() {
         </button>
       </aside>
       <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
+        {/* Top-bar banner — shown when the venue is in RFID mode but the
+            local Wristband Sidecar isn't responding. Clicking the link
+            jumps to /settings where the cashier sees install steps. */}
+        <SidecarMissingBanner onOpenSettings={() => setScreen("settings")} />
         {/* Inject location + terminal name into every Header so the cashier
             always sees which location / lane they're operating from. Falls
             back to the auth locations list when an older paired snapshot
