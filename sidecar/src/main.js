@@ -56,34 +56,42 @@ const buildStatusHtml = () => `<!doctype html>
     window keeps the sidecar running in the tray.
   </p>
   <script>
-    const evtSrc = new EventSource("/events");
-    evtSrc.onmessage = (e) => {
-      try {
-        const m = JSON.parse(e.data);
-        if (m.type === "status") {
-          document.getElementById("bridge").textContent = m.bridge;
-          document.getElementById("reader").textContent = m.reader;
-        }
-        if (m.type === "scan") {
-          document.getElementById("scans").textContent = m.count;
-          document.getElementById("last").textContent = m.uid + " · " + new Date(m.at).toLocaleTimeString();
-        }
-      } catch {}
+    // The main process pushes status by invoking __pushStatus via
+    // win.webContents.executeJavaScript. Each call may include any
+    // subset of fields — we patch only what's present.
+    window.__pushStatus = function (m) {
+      if (!m) return;
+      if (m.bridge != null) document.getElementById("bridge").textContent = m.bridge;
+      if (m.reader != null) document.getElementById("reader").textContent = m.reader;
+      if (m.scans != null)  document.getElementById("scans").textContent = m.scans;
+      if (m.last != null)   document.getElementById("last").textContent = m.last;
     };
   </script>
 </body></html>`;
 
+// Push the current sidecar state into the status window. `patch` lets
+// callers override individual fields (e.g. the scan handler bumps
+// `scans` + `last`). Calls are no-ops when the window has been closed
+// (the sidecar still runs in the tray, just nothing to render to).
 const updateStatus = (patch = {}) => {
   if (!win || win.isDestroyed()) return;
-  const payload = {
-    type: "status",
-    bridge: bridge?.url || "offline",
+  const state = {
+    bridge: bridge?.url || "starting…",
     reader: adapter?.status() || "—",
+    scans: scanCount,
+    last: lastUid
+      ? `${lastUid} · ${new Date(lastScanAt).toLocaleTimeString()}`
+      : "—",
     ...patch,
   };
-  win.webContents.executeJavaScript(
-    `(${JSON.stringify(payload)}); typeof __pushStatus === "function" && __pushStatus(${JSON.stringify(payload)});`
-  ).catch(() => {});
+  // Inject by calling __pushStatus directly. dom-ready isn't fired
+  // until the data: URL finishes parsing, so swallow the rejection
+  // for the very first call.
+  win.webContents
+    .executeJavaScript(
+      `(typeof __pushStatus === "function" && __pushStatus(${JSON.stringify(state)}))`
+    )
+    .catch(() => {});
 };
 
 const createWindow = () => {
@@ -99,6 +107,10 @@ const createWindow = () => {
   // Load the inline status HTML.
   const dataUrl = "data:text/html;charset=utf-8," + encodeURIComponent(buildStatusHtml());
   win.loadURL(dataUrl);
+  // The first updateStatus() calls race the data:URL parse, so push
+  // a fresh snapshot once the page is actually live. Subsequent
+  // adapter events flow through updateStatus normally.
+  win.webContents.once("did-finish-load", () => updateStatus());
   win.on("close", (e) => {
     // Keep the sidecar running in the tray when the window is closed.
     if (!app.isQuitting) {
