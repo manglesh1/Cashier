@@ -37,8 +37,40 @@ into the DevTools console to verify.
 
 ## Running against real hardware (ACR122U)
 
+Two adapters work for the ACR122U / any PC/SC reader. Pick whichever
+matches your install constraints — both produce the same `scan`
+events downstream.
+
+### Option A — Python helper (recommended for Windows dev)
+
+`pyscard` ships **prebuilt Windows wheels**, so there's no compiler
+involved. Total setup: ~5 minutes if you don't already have Python.
+
+```powershell
+# 1. Install Python 3 if you don't have it (skip if `py --version` works)
+#    Get the .exe from python.org — tick "Add to PATH" during install.
+
+# 2. Install pyscard (one line)
+pip install pyscard
+
+# 3. From sidecar/
+npm install
+npm run start:python
+```
+
+Status panel should show `PC/SC (Python) · listening (ACS ACR122 0 PICC Interface)`.
+Tap a wristband → counter ticks, UID surfaces.
+
+### Option B — Native node module (production-packaged build)
+
 The ACR122U is a $40 USB NFC reader that enumerates as a PC/SC
 smartcard device. The adapter uses [`@pokusew/pcsclite`](https://github.com/pokusew/node-pcsclite).
+This route needs the Visual Studio C++ Build Tools on Windows
+(~2 GB, ~30 min one-time install) but produces a pure-Node binary
+that doesn't depend on Python being on the till.
+
+For production builds we'll use Option B and bundle the compiled
+binary in the installer. For dev work day-to-day, Option A is faster.
 
 **Windows:**
 1. Install ACS's unified driver: <https://www.acs.com.hk/en/driver/3/acr122u-usb-nfc-reader/>

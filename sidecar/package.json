@@ -9,6 +9,7 @@
     "start": "electron .",
     "start:mock": "cross-env MOVIRA_WRISTBAND_ADAPTER=mock electron .",
     "start:acr122u": "cross-env MOVIRA_WRISTBAND_ADAPTER=acr122u electron .",
+    "start:python": "cross-env MOVIRA_WRISTBAND_ADAPTER=pcsc-python electron .",
     "package:win": "electron-builder --win --x64",
     "package:mac": "electron-builder --mac --x64 --arm64",
     "package:linux": "electron-builder --linux --x64"
@@ -22,7 +23,6 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "@pokusew/pcsclite": "^1.0.0",
     "node-hid": "^3.1.0"
   },
   "build": {

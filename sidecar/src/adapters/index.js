@@ -15,13 +15,17 @@ const loadAdapter = (key) => {
   if (k === "acr122u") {
     return require("./acr122u");
   }
+  // PC/SC reader via a Python child process (pyscard). Easier than
+  // the native node-pcsclite path on Windows — no C++ build tools
+  // needed. Works for the ACR122U + any other PC/SC reader.
+  if (k === "pcsc-python" || k === "python" || k === "pyscard") {
+    return require("./pcsc-python");
+  }
   if (k === "mock" || k === "" || !k) {
     return require("./mock");
   }
-  // Unknown adapter — fall back to mock so the sidecar still runs and
-  // the user sees the misconfiguration in the status panel.
   console.warn(
-    `[sidecar] unknown adapter "${k}", falling back to mock. Set MOVIRA_WRISTBAND_ADAPTER to one of: mock, acr122u`
+    `[sidecar] unknown adapter "${k}", falling back to mock. Set MOVIRA_WRISTBAND_ADAPTER to one of: mock, pcsc-python, acr122u`
   );
   return require("./mock");
 };
