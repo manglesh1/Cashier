@@ -133,8 +133,10 @@ export default function TerminalPaymentModal({
         errorStreak = 0;
         if (status === "captured") {
           resolve("approved", "Payment approved.", r);
-        } else if (["failed", "cancelled", "voided"].includes(status)) {
-          resolve("declined", r.error?.message || "The card was declined or the payment was cancelled.");
+        } else if (status === "cancelled") {
+          resolve("cancelled", r.reason || "Payment was cancelled.", r);
+        } else if (["failed", "voided"].includes(status)) {
+          resolve("declined", r.error?.message || "The card was declined.");
         }
         // else still processing — keep polling
       } catch {
@@ -161,8 +163,11 @@ export default function TerminalPaymentModal({
       try {
         const { status, r } = await readStatus();
         if (status === "captured") return resolve("approved", "Payment approved.", r);
-        if (["failed", "cancelled", "voided"].includes(status)) {
-          return resolve("declined", r.error?.message || "Payment was cancelled.");
+        if (status === "cancelled") {
+          return resolve("cancelled", r.reason || "Payment was cancelled.", r);
+        }
+        if (["failed", "voided"].includes(status)) {
+          return resolve("declined", r.error?.message || "The card was declined.");
         }
       } catch {
         /* fall through to the error state */
