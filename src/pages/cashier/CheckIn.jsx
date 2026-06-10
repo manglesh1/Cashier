@@ -1767,6 +1767,36 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                       {ticketCode}
                     </span>
                     {time && <span>· {time}</span>}
+                    {/* Paper-wristband chip from the backend resolver. Null
+                        when the venue is in RFID / none mode, when the
+                        activity is excluded, or when no rotation is
+                        configured. The cashier reads the color + name to
+                        grab the right physical wristband. */}
+                    {t.wristbandColor && (
+                      <span
+                        title={`Wristband · ${t.wristbandColor.name}`}
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 5,
+                          padding: "2px 8px", borderRadius: 999,
+                          background: "white",
+                          border: `1.5px solid ${t.wristbandColor.hex}`,
+                          fontWeight: 800, fontSize: 10,
+                          color: "var(--ink-900)",
+                        }}
+                      >
+                        <span
+                          style={{
+                            display: "inline-block",
+                            width: 10,
+                            height: 10,
+                            borderRadius: 3,
+                            background: t.wristbandColor.hex,
+                            border: "1px solid rgba(0,0,0,.18)",
+                          }}
+                        />
+                        {String(t.wristbandColor.name).toUpperCase()}
+                      </span>
+                    )}
                     {isBlocked && (
                       <span style={{
                         display: "inline-flex", alignItems: "center", gap: 4,
