@@ -1295,10 +1295,17 @@ export function CashierApp() {
     dispatch(ensureCheckoutKey());
 
     const primaryGuest = cartCustomer || waiversAttached[0] || null;
+    // Sell-screen mode drives the waiver policy:
+    //   • check-in → "beforePayment" — guest is here NOW, admission needs
+    //                a signed waiver before we take payment.
+    //   • booking  → "deferred" — future visit; waiver can be collected
+    //                at the gate. Backend also gets deferWaiverEnforcement
+    //                in the payload below so it doesn't reject the booking
+    //                for missing coverage.
     const checkoutRequirements = getCheckoutRequirements(items, {
       customer: primaryGuest,
       waiverCoverage: Object.values(ticketAssignments).filter(Boolean).length,
-      waiverPolicy: "beforePayment",
+      waiverPolicy: sellMode === "booking" ? "deferred" : "beforePayment",
     });
     const indexedItems = items.map((item, cartIndex) => ({ ...item, cartIndex }));
     const noScheduleItems = indexedItems
@@ -1448,6 +1455,11 @@ export function CashierApp() {
       voucherTokens: Array.isArray(cartPricing?.appliedBenefits?.voucherTokens)
         ? cartPricing.appliedBenefits.voucherTokens
         : [],
+      // Booking mode: future-visit booking, waiver gets collected at the
+      // gate. Tell the backend not to reject for missing waiver coverage.
+      // (The cart-side gate is also lifted via waiverPolicy: "deferred"
+      // above so checkoutRequirements.missingWaiver stays false.)
+      ...(sellMode === "booking" ? { deferWaiverEnforcement: true } : {}),
       // Walk-in flow: customer is paying NOW and walking in NOW. Tell
       // the backend to check in participants AND redeem their tickets
       // in the same transaction as the booking + payment.
