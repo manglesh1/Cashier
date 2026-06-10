@@ -71,6 +71,10 @@ import {
 } from "../../features/cart/cartSlice";
 import { getTerminal, clearTerminal, updateTerminalSettings } from "../../lib/terminal";
 import { attachScannerListener } from "../../lib/scanner";
+import {
+  startWristbandBridge,
+  stopWristbandBridge,
+} from "../../lib/wristbandBridge";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 
 // ── Map preset { sections: [{ products: [...] }] } → CatalogGrid sections
@@ -961,6 +965,26 @@ export function CashierApp() {
   // so this fires only for actual USB-HID scans. Subscribers listen on
   // the `cashier:scan` window event (see Redeem.jsx).
   React.useEffect(() => attachScannerListener(), []);
+
+  // Wristband Sidecar bridge (RFID mode only). Reads bridgePort from
+  // the terminal's locally-cached wristbandConfig.rfid; falls back to
+  // 7777 if the terminal hasn't synced its venue settings yet. Auto-
+  // reconnects with backoff if the sidecar restarts or the tablet
+  // wakes from sleep. Idempotent — safe across re-renders.
+  React.useEffect(() => {
+    let cached;
+    try {
+      cached = JSON.parse(localStorage.getItem("cashier:terminal") || "null");
+    } catch { cached = null; }
+    const mode = cached?.settings?.wristbandMode || cached?.wristbandMode || "none";
+    if (mode !== "rfid") return;
+    const port =
+      Number(cached?.settings?.wristbandConfig?.rfid?.bridgePort) ||
+      Number(cached?.wristbandConfig?.rfid?.bridgePort) ||
+      7777;
+    startWristbandBridge({ port });
+    return () => stopWristbandBridge();
+  }, []);
 
   const {
     data: presetData,

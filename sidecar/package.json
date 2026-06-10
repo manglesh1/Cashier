@@ -1,0 +1,34 @@
+{
+  "name": "movira-wristband-sidecar",
+  "version": "0.1.0",
+  "description": "Local desktop bridge between USB RFID wristband readers and the Movira Cashier browser app. Talks USB on one side, WebSocket on the other.",
+  "private": true,
+  "main": "src/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "start:mock": "MOVIRA_WRISTBAND_ADAPTER=mock electron .",
+    "package:win": "electron-builder --win --x64",
+    "package:mac": "electron-builder --mac --x64 --arm64",
+    "package:linux": "electron-builder --linux --x64"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "node-hid": "^3.1.0",
+    "@pokusew/pcsclite": "^1.0.0"
+  },
+  "build": {
+    "appId": "com.movira.wristband-sidecar",
+    "productName": "Movira Wristband Sidecar",
+    "files": ["src/**/*", "package.json"],
+    "win": { "target": "nsis" },
+    "mac": { "target": "dmg", "category": "public.app-category.business" },
+    "linux": { "target": "AppImage" }
+  }
+}
