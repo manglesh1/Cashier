@@ -156,6 +156,11 @@ export function CheckIn() {
   const { searchTerm, inputValue, setDebouncedSearch } = useDebounceSearch(400);
   const [selected, setSelected] = useState(null);
   const [bookingBucket, setBookingBucket] = useState("upcoming");
+  // Row-level quick check-in: fires checkInAll against ONE booking
+  // without opening the detail pane. Spinner state is tracked per row
+  // so other rows stay tappable while one is in flight.
+  const [rowCheckingInId, setRowCheckingInId] = useState(null);
+  const [rowCheckInAll] = useCheckInAllTicketsMutation();
 
   const { data, isLoading, refetch } = useGetAllBookingQuery({
     page: 1,
@@ -176,6 +181,30 @@ export function CheckIn() {
     const updated = bookings.find((b) => String(b.bookingId) === String(selected.bookingId));
     if (updated && updated !== selected) setSelected(updated);
   }, [bookings, selected?.bookingId]);
+
+  // Multi-terminal partial check-in: when terminal B checks someone in
+  // for the same booking that terminal A is staring at, A must see the
+  // state change without a manual Refresh. Poll every 15s on the In
+  // Progress tab (where partial state churns), every 30s elsewhere.
+  // Only when the page is in the foreground — no background traffic
+  // when the tablet is asleep / docked.
+  useEffect(() => {
+    const intervalMs = bookingBucket === "inProgress" ? 15_000 : 30_000;
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      refetch();
+    };
+    const id = setInterval(tick, intervalMs);
+    // Fire once immediately on tab return so a stale tablet syncs without waiting.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refetch();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [bookingBucket, refetch]);
 
   const partition = useMemo(() => {
     const now = new Date();
@@ -228,30 +257,80 @@ export function CheckIn() {
     if (updated) setSelected(updated);
   };
 
+  // Inline row check-in: when waiver is complete + booking paid + at
+  // least one guest still to go, the cashier taps "Check in N" right
+  // on the list row to admit the remaining guests without opening the
+  // detail pane. Same backend call as the in-detail "Check in all".
+  const handleRowCheckIn = async (booking) => {
+    if (!booking?.bookingId) return;
+    setRowCheckingInId(booking.bookingId);
+    const terminal = getTerminal();
+    try {
+      const res = await rowCheckInAll({
+        bookingId: booking.bookingId,
+        terminalDeviceId: terminal?.deviceId || null,
+        gateOrZone: terminal?.deviceName || "Cashier check-in",
+        allowEarlyCheckIn: true,
+      }).unwrap();
+      const succ = res?.succeeded ?? 0;
+      const att = res?.attempted ?? 0;
+      if (succ > 0) {
+        toast.success(`Checked in ${succ}${att > succ ? ` of ${att}` : ""} · ${booking.bookingName || booking.bookingNumber}`);
+      } else {
+        toast.warning("Nothing to check in — already admitted or blocked.");
+      }
+      await refetch();
+    } catch (err) {
+      toast.error(
+        err?.data?.error
+          || err?.data?.message
+          || "Row check-in failed."
+      );
+    } finally {
+      setRowCheckingInId(null);
+    }
+  };
+
   return (
     <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-      {/* Search bar */}
-      <div style={{ padding: "16px 28px", borderBottom: "1px solid var(--ink-100)", display: "flex", gap: 12, alignItems: "center", flexShrink: 0 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "12px 18px",
-            background: "#fff",
-            border: "1.5px solid var(--ink-200)",
-            borderRadius: 14,
-            flex: 1,
-            maxWidth: 480,
-            minWidth: 0,
-          }}
-        >
-          <Icon name="search" size={20} stroke={2} style={{ color: "var(--ink-500)" }} />
+      {/* Combined top bar: title · search (grows) · refresh · location chip.
+          Replaces the shared Header + a separate search row (saves ~96px). */}
+      <div style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 14,
+        padding: "10px 20px",
+        borderBottom: "1px solid var(--ink-100)",
+        flexShrink: 0,
+        background: "var(--ink-0)",
+      }}>
+        <h1 style={{
+          margin: 0,
+          fontFamily: "var(--font-display)",
+          fontWeight: 800,
+          fontSize: 22,
+          letterSpacing: "-.02em",
+          whiteSpace: "nowrap",
+        }}>
+          Check-in
+        </h1>
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "8px 14px",
+          background: "#fff",
+          border: "1.5px solid var(--ink-200)",
+          borderRadius: 12,
+          flex: 1,
+          minWidth: 0,
+        }}>
+          <Icon name="search" size={18} stroke={2} style={{ color: "var(--ink-500)" }} />
           <input
             value={inputValue}
             onChange={(e) => setDebouncedSearch(e.target.value)}
             placeholder="Search by name, email, phone, or booking ID…"
-            style={{ all: "unset", flex: 1, minWidth: 0, fontSize: 16 }}
+            style={{ all: "unset", flex: 1, minWidth: 0, fontSize: 15 }}
           />
         </div>
         <button
@@ -259,34 +338,38 @@ export function CheckIn() {
           onClick={refetch}
           className="a-btn a-btn--ghost a-btn--sm"
           title="Refresh"
+          style={{ padding: "6px 8px" }}
         >
-          <Icon name="refresh" size={14} /> Refresh
+          <Icon name="refresh" size={14} />
         </button>
       </div>
 
-      {/* Stats strip */}
+      {/* Inline KPI strip — replaces the 4 cards (saves ~70px).
+          Compact pills that fit on one row; subtitles dropped because the
+          uppercase label already conveys the unit. */}
       <div style={{
-        padding: "12px 28px",
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
-        gap: 12,
-        flexShrink: 0,
+        display: "flex",
+        alignItems: "center",
+        gap: 18,
+        padding: "6px 20px",
         borderBottom: "1px solid var(--ink-100)",
+        flexShrink: 0,
+        fontSize: 12,
+        fontWeight: 800,
+        color: "var(--ink-600)",
       }}>
-        <Stat label="Booked today" value={totalToday} hint="Bookings" />
-        <Stat
-          label="Guests checked in"
-          value={guestTotals.checkedInGuests}
-          hint={`of ${guestTotals.totalGuests} guests`}
+        <InlineStat label="Today" value={totalToday} />
+        <InlineStat
+          label="Checked in"
+          value={`${guestTotals.checkedInGuests}/${guestTotals.totalGuests}`}
           fg="var(--color-success)"
         />
-        <Stat
-          label="Pending guests"
+        <InlineStat
+          label="Pending"
           value={guestTotals.pendingGuests}
-          hint="Guests remaining"
-          fg={guestTotals.pendingGuests > 0 ? "#8A5A00" : "var(--color-success)"}
+          fg={guestTotals.pendingGuests > 0 ? "#8A5A00" : "var(--ink-600)"}
         />
-        <Stat label="Completed bookings" value={guestTotals.completedBookings} hint="Fully checked in" />
+        <InlineStat label="Completed" value={guestTotals.completedBookings} />
       </div>
 
       {/* Body — list (left) + selected detail (right) */}
@@ -298,29 +381,31 @@ export function CheckIn() {
           overscrollBehavior: "contain",
           scrollbarGutter: "stable",
           minHeight: 0,
-          padding: "12px 14px 12px 18px",
+          padding: "8px 14px 12px 18px",
           borderRight: "1px solid var(--ink-100)",
           background: "var(--ink-25)",
         }}>
+          {/* Segmented control — replaces 3 big tab cards (saves ~44px). */}
           <div style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-            gap: 6,
-            marginBottom: 10,
+            display: "flex",
+            background: "var(--ink-100)",
+            borderRadius: 10,
+            padding: 3,
+            marginBottom: 8,
           }}>
-            <BookingBucketTab
+            <SegTab
               label="Upcoming"
               count={bookingBuckets.upcoming.length}
               active={bookingBucket === "upcoming"}
               onClick={() => setBookingBucket("upcoming")}
             />
-            <BookingBucketTab
+            <SegTab
               label="In Progress"
               count={bookingBuckets.inProgress.length}
               active={bookingBucket === "inProgress"}
               onClick={() => setBookingBucket("inProgress")}
             />
-            <BookingBucketTab
+            <SegTab
               label="Completed"
               count={bookingBuckets.completed.length}
               active={bookingBucket === "completed"}
@@ -343,6 +428,8 @@ export function CheckIn() {
                 b={b}
                 isSelected={selected?.bookingId === b.bookingId}
                 onClick={() => setSelected(b)}
+                onQuickCheckIn={() => handleRowCheckIn(b)}
+                quickCheckInBusy={rowCheckingInId === b.bookingId}
               />
             ))
           )}
@@ -383,6 +470,74 @@ function parseTime(range) {
   const d = new Date();
   d.setHours(h, min, 0, 0);
   return d;
+}
+
+// One-line KPI: "Label: VALUE" — meant to live in a flex row of 3-4
+// peers, replacing a 4-card grid. Keeps the title's color but lets
+// callers tint the value (e.g. amber for pending).
+function InlineStat({ label, value, fg }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "baseline", gap: 6 }}>
+      <span style={{
+        textTransform: "uppercase",
+        letterSpacing: "0.06em",
+        fontSize: 10,
+        fontWeight: 800,
+        color: "var(--ink-500)",
+      }}>
+        {label}
+      </span>
+      <span style={{
+        fontFamily: "var(--font-display, inherit)",
+        fontSize: 16,
+        fontWeight: 900,
+        color: fg || "var(--ink-900)",
+        lineHeight: 1,
+      }}>
+        {value}
+      </span>
+    </span>
+  );
+}
+
+// Segmented-control tab — a denser replacement for BookingBucketTab.
+// Sits in a shared rail (background = ink-100, padding = 3px) so the
+// active tab pops as a white pill instead of needing its own border.
+function SegTab({ label, count, active, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        appearance: "none",
+        border: "none",
+        flex: 1,
+        padding: "6px 8px",
+        borderRadius: 8,
+        background: active ? "white" : "transparent",
+        color: active ? "var(--aero-orange-700)" : "var(--ink-700)",
+        boxShadow: active ? "0 1px 2px rgba(0,0,0,.08)" : "none",
+        fontWeight: 800,
+        fontSize: 12,
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 6,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span>{label}</span>
+      <span style={{
+        fontFamily: "var(--font-display, inherit)",
+        fontSize: 13,
+        fontWeight: 950,
+        color: active ? "var(--aero-orange-700)" : "var(--ink-900)",
+      }}>
+        {count}
+      </span>
+    </button>
+  );
 }
 
 function Stat({ label, value, fg, hint }) {
@@ -451,7 +606,7 @@ function BookingBucketTab({ label, count, active, onClick }) {
   );
 }
 
-function BookingRow({ b, isSelected, onClick }) {
+function BookingRow({ b, isSelected, onClick, onQuickCheckIn, quickCheckInBusy }) {
   // Primary pill reflects check-in state first (Checked in / partly in),
   // falling back to waiver readiness only when nobody's checked in yet.
   let statusTone;
@@ -470,6 +625,18 @@ function BookingRow({ b, isSelected, onClick }) {
     statusTone = "danger";
     statusLabel = `${missing} waiver${missing === 1 ? "" : "s"} missing`;
   }
+
+  // Inline quick check-in: render the button only when the booking is
+  // truly ready to go (waiver complete + paid + still has guests to
+  // admit). Anything else falls through to the detail pane where the
+  // operator can resolve blockers individually.
+  const remainingGuests = Math.max(0, (b._totalGuests || 0) - (b._checkedInGuests || 0));
+  const canQuickCheckIn =
+    !b._isCompleted
+    && b._waiverComplete
+    && b._isPaid
+    && remainingGuests > 0
+    && typeof onQuickCheckIn === "function";
 
   return (
     <div
@@ -540,6 +707,36 @@ function BookingRow({ b, isSelected, onClick }) {
       }}>
         <StatusPill tone={statusTone}>{statusLabel}</StatusPill>
         {!b._isPaid && <StatusPill tone="danger">Unpaid</StatusPill>}
+        {/* Inline quick check-in: only when fully ready. stopPropagation
+            so tapping the button doesn't also open the detail pane. */}
+        {canQuickCheckIn && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (quickCheckInBusy) return;
+              onQuickCheckIn();
+            }}
+            disabled={quickCheckInBusy}
+            title={`Check in the remaining ${remainingGuests} guest${remainingGuests === 1 ? "" : "s"} without opening the booking`}
+            style={{
+              marginLeft: "auto",
+              flexShrink: 0,
+              appearance: "none",
+              border: "1.5px solid var(--aero-orange-500)",
+              background: quickCheckInBusy ? "var(--ink-100)" : "var(--aero-orange-500)",
+              color: quickCheckInBusy ? "var(--ink-500)" : "white",
+              fontWeight: 800,
+              fontSize: 11,
+              letterSpacing: "0.02em",
+              borderRadius: 8,
+              padding: "5px 10px",
+              cursor: quickCheckInBusy ? "default" : "pointer",
+            }}
+          >
+            {quickCheckInBusy ? "…" : `Check in ${remainingGuests}`}
+          </button>
+        )}
       </div>
       <Icon name="chevron-right" size={18} style={{ color: "var(--ink-400)", gridColumn: "3", gridRow: "1 / span 3", justifySelf: "end" }} />
     </div>
@@ -571,6 +768,10 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const [checkInAll, { isLoading: checkingInAll }] = useCheckInAllTicketsMutation();
   const [bindHolder, { isLoading: binding }] = useBindTicketHolderMutation();
   const [selectedCodes, setSelectedCodes] = useState(new Set());
+  // Default "Hide checked in" to true so partials open in "Remaining
+  // only" mode — the late-arrival pattern. The effect below flips it
+  // back to false (show all) for fresh bookings where nobody's in yet,
+  // and resets it whenever a different booking is selected.
   const [hideCheckedIn, setHideCheckedIn] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [paymentOpen, setPaymentOpen] = useState(false);
@@ -594,6 +795,19 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const remaining = Math.max(0, totalCount - redeemedCount);
   const balanceDue = getBookingBalanceDue(booking);
   const isFullyCheckedIn = totalCount > 0 && redeemedCount >= totalCount;
+
+  // Partial-arrival default: when the operator opens a booking that's
+  // already In Progress (some guests in, some still to come), hide the
+  // already-checked-in tickets so only the remaining ones are listed.
+  // Fresh bookings (nobody in yet) and fully-completed bookings both
+  // default to "show all" — the operator gets the same view they get
+  // today. Resets on every booking switch via the bookingId dep.
+  React.useEffect(() => {
+    const isPartial = redeemedCount > 0 && !isFullyCheckedIn;
+    setHideCheckedIn(isPartial);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [booking?.bookingId, redeemedCount, isFullyCheckedIn]);
+
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
   const [removeParticipant] = useRemoveParticipantMutation();
 
@@ -1388,25 +1602,28 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         </div>
       )}
 
-      {reslotActivity && (
+      {/* Late arrivals (slot ended earlier today) no longer block check-in
+          — they fall through getTicketBlocker as redeemable, so this banner
+          is suppressed for the expired branch. The blue in-progress banner
+          stays: it surfaces the "I can also move this party to another open
+          slot today" option to the cashier without forcing it. */}
+      {reslotActivity && !reslotIsExpired && (
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap",
           gap: 10, marginBottom: 8, padding: "10px 12px",
-          background: reslotIsExpired ? "#FFF7ED" : "#EFF6FF",
-          border: reslotIsExpired ? "1.5px solid #FFB199" : "1.5px solid #9DC4F0",
+          background: "#EFF6FF",
+          border: "1.5px solid #9DC4F0",
           borderRadius: 12,
         }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, color: reslotIsExpired ? "#B83210" : "#1D4ED8", fontWeight: 700, fontSize: 13 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#1D4ED8", fontWeight: 700, fontSize: 13 }}>
             <Icon name="clock" size={16} stroke={2.5} />
-            {reslotIsExpired
-              ? "This session's time has passed — move the guest to an open slot today."
-              : "Session in progress — check in here, or move the guest to another open slot today."}
+            Session in progress — check in here, or move the guest to another open slot today.
           </div>
           <button
             type="button"
             onClick={() => setReslotOpen(true)}
             disabled={reslotting || !reslotActivity.activityId}
-            className={reslotIsExpired ? "a-btn a-btn--primary a-btn--sm" : "a-btn a-btn--ghost a-btn--sm"}
+            className="a-btn a-btn--ghost a-btn--sm"
             style={{ justifyContent: "center" }}
           >
             <Icon name="calendar-clock" size={14} /> Move to available slot
@@ -1487,7 +1704,16 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           </div>
         )
       ) : (
-        <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 6 }}>
+        <ul style={{
+          margin: 0, padding: 0, listStyle: "none",
+          // 2-column grid for event-volume density. On narrower terminals
+          // (≤ 720px of available ticket-list width) the minmax falls back
+          // to 1 column automatically. Each column gets the same ticket
+          // card layout — no truncation, just two side-by-side.
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(min(320px, 100%), 1fr))",
+          gap: 6,
+        }}>
           {visibleTickets.map((t, i) => {
             const isRedeemed = isRedeemedTicket(t);
             const isSelected = selectedCodes.has(t.ticketCode);
@@ -1556,7 +1782,13 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                   </div>
                   {t.participantId && t.participant?.displayName && (
                     <BoundHolderChip
-                      participant={t.participant}
+                      // Merge the enriched participant (carries hasValidWaiver
+                      // from the check-in payload) over the ticket's stub.
+                      // The chip palette flips green when the waiver is valid.
+                      participant={{
+                        ...t.participant,
+                        ...(participantsById.get(Number(t.participantId)) || {}),
+                      }}
                       onUnbind={isRedeemed ? null : () => handleUnbind(t.ticketCode)}
                       busy={binding}
                     />
@@ -1668,25 +1900,41 @@ function activityNameFromBooking(b) {
 
 function SelectedProgressPanel({ progress }) {
   const percent = Number(progress?.percent || 0);
+  // Tiny inline counter chip used for ready/blocked/pending. Stays
+  // visible only when the value is non-zero so the row stays terse.
+  const Chip = ({ label, value, fg }) =>
+    value > 0 ? (
+      <span style={{ fontSize: 11, fontWeight: 800, color: fg, whiteSpace: "nowrap" }}>
+        {value} {label}
+      </span>
+    ) : null;
   return (
     <div
       style={{
         marginBottom: 8,
-        padding: "9px 10px",
+        padding: "8px 10px",
         background: "white",
         border: "1.5px solid var(--ink-200)",
         borderRadius: 12,
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 7 }}>
-        <div style={{ fontSize: 12, fontWeight: 900, color: "var(--ink-900)" }}>
-          Booking progress
-        </div>
-        <div style={{ fontSize: 11, fontWeight: 800, color: "var(--ink-500)" }}>
-          {progress.checkedIn}/{progress.total} checked in
-        </div>
-      </div>
-      <div style={{ height: 8, borderRadius: 999, background: "var(--ink-100)", overflow: "hidden", marginBottom: 8 }}>
+      <span style={{
+        fontSize: 11, fontWeight: 900, color: "var(--ink-700)",
+        whiteSpace: "nowrap",
+      }}>
+        {progress.checkedIn}/{progress.total} in
+      </span>
+      <div style={{
+        flex: 1,
+        height: 6,
+        borderRadius: 999,
+        background: "var(--ink-100)",
+        overflow: "hidden",
+        minWidth: 60,
+      }}>
         <div
           style={{
             width: `${percent}%`,
@@ -1696,11 +1944,10 @@ function SelectedProgressPanel({ progress }) {
           }}
         />
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6 }}>
-        <MiniStat label="Ready" value={progress.ready} tone={progress.ready ? "success" : "default"} />
-        <MiniStat label="Blocked" value={progress.blocked} tone={progress.blocked ? "warning" : "default"} />
-        <MiniStat label="Pending" value={progress.pending} tone={progress.pending ? "warning" : "success"} />
-        <MiniStat label="Done" value={progress.checkedIn} tone={progress.checkedIn ? "success" : "default"} />
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <Chip label="ready" value={progress.ready} fg="#137A35" />
+        <Chip label="blocked" value={progress.blocked} fg="#B83210" />
+        <Chip label="pending" value={progress.pending} fg="#8A5A00" />
       </div>
     </div>
   );
@@ -1747,15 +1994,27 @@ function GuestWorkflowPanel({
         borderRadius: 12,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <Icon name="users" size={15} style={{ color: "var(--ink-600)" }} />
-          <div style={{ fontSize: 12, fontWeight: 900, color: "var(--ink-900)" }}>
-            Guests
-          </div>
-          <span style={{ fontSize: 11, fontWeight: 750, color: "var(--ink-500)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: participants.length > 0 ? 8 : 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flexWrap: "wrap" }}>
+          {/* Single-line summary: "1/3 named" + only the non-zero
+              attention chips (Unassigned / Names needed). Redundant
+              counts (Waiver ready / Tickets linked) live in the
+              closeout-pill row above; restating them here was the
+              biggest source of detail-pane bloat. */}
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 900, color: "var(--ink-900)" }}>
+            <Icon name="users" size={14} style={{ color: "var(--ink-600)" }} />
             {participants.length}/{totalGuests || tickets.length || 0} named
           </span>
+          {missingNames > 0 && (
+            <span style={{ fontSize: 11, fontWeight: 800, color: "#8A5A00", whiteSpace: "nowrap" }}>
+              {missingNames} name{missingNames === 1 ? "" : "s"} needed
+            </span>
+          )}
+          {availableValidParticipants.length > 0 && (
+            <span style={{ fontSize: 11, fontWeight: 800, color: "#8A5A00", whiteSpace: "nowrap" }}>
+              {availableValidParticipants.length} to assign
+            </span>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
           <button
@@ -1794,13 +2053,6 @@ function GuestWorkflowPanel({
             Auto assign
           </button>
         </div>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6, marginBottom: participants.length > 0 ? 8 : 0 }}>
-        <MiniStat label="Waiver ready" value={validParticipants.length} tone={validParticipants.length ? "success" : "default"} />
-        <MiniStat label="Unassigned" value={availableValidParticipants.length} tone={availableValidParticipants.length ? "warning" : "default"} />
-        <MiniStat label="Tickets linked" value={assignedCount} tone={assignedCount ? "success" : "default"} />
-        <MiniStat label="Names needed" value={missingNames} tone={missingNames ? "warning" : "success"} />
       </div>
 
       {participants.length > 0 && (
@@ -1864,14 +2116,41 @@ function CloseoutPill({ label, value, tone = "neutral" }) {
     neutral: { bg: "white", border: "var(--ink-200)", fg: "var(--ink-700)" },
   };
   const c = colors[tone] || colors.neutral;
+  // Inline single-line layout — "LABEL VALUE" — instead of label-above-value.
+  // ~30px shorter per pill, and the row stays a single line on the detail
+  // pane so closeout state is takeable at a glance.
   return (
-    <div style={{ background: c.bg, border: `1.5px solid ${c.border}`, borderRadius: 9, padding: "7px 9px", minWidth: 0 }}>
-      <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--ink-500)" }}>
+    <div style={{
+      background: c.bg,
+      border: `1.5px solid ${c.border}`,
+      borderRadius: 9,
+      padding: "6px 10px",
+      minWidth: 0,
+      display: "flex",
+      alignItems: "baseline",
+      gap: 6,
+    }}>
+      <span style={{
+        fontSize: 9,
+        fontWeight: 800,
+        letterSpacing: "0.08em",
+        textTransform: "uppercase",
+        color: "var(--ink-500)",
+        flexShrink: 0,
+      }}>
         {label}
-      </div>
-      <div style={{ marginTop: 2, fontSize: 12, fontWeight: 900, color: c.fg, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      </span>
+      <span style={{
+        fontSize: 12,
+        fontWeight: 900,
+        color: c.fg,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        minWidth: 0,
+      }}>
         {value}
-      </div>
+      </span>
     </div>
   );
 }
@@ -2437,7 +2716,15 @@ function ReslotModal({ activityId, variationId, activityName, busy, onPick, onCl
 // small × that unbinds them from this ticket (without removing the participant
 // from the booking). After unbind, the row's HolderPicker reappears so the
 // cashier can pick a different person — that's the "replace" flow.
+//
+// Palette switches on waiver state so the cashier reads readiness at a glance:
+//   • valid waiver → green (ready to admit)
+//   • missing waiver → orange (still needs a signed waiver before redeem)
 function BoundHolderChip({ participant, onUnbind, busy }) {
+  const ready = !!participant?.hasValidWaiver;
+  const palette = ready
+    ? { bg: "#EAF8EF", border: "#8AD5A3", fg: "#137A35", xBg: "rgba(19,122,53,0.15)", xBgHover: "rgba(19,122,53,0.30)" }
+    : { bg: "var(--aero-orange-50, #FFF1E8)", border: "var(--aero-orange-500, #F45B0A)", fg: "var(--aero-orange-700, #B8400A)", xBg: "rgba(244,91,10,0.15)", xBgHover: "rgba(244,91,10,0.30)" };
   return (
     <div style={{ marginTop: 6, display: "inline-flex", alignItems: "center", gap: 4 }}>
       <span style={{ fontSize: 10, fontWeight: 800, color: "var(--ink-500)", textTransform: "uppercase", letterSpacing: "0.06em", marginRight: 4 }}>
@@ -2445,12 +2732,13 @@ function BoundHolderChip({ participant, onUnbind, busy }) {
       </span>
       <span style={{
         display: "inline-flex", alignItems: "center", gap: 5,
-        padding: "4px 4px 4px 10px",
+        padding: "4px 4px 4px 8px",
         borderRadius: 999,
-        background: "var(--aero-orange-50, #FFF1E8)",
-        border: "1.5px solid var(--aero-orange-500, #F45B0A)",
-        fontSize: 11, fontWeight: 700, color: "var(--aero-orange-700, #B8400A)",
+        background: palette.bg,
+        border: `1.5px solid ${palette.border}`,
+        fontSize: 11, fontWeight: 700, color: palette.fg,
       }}>
+        {ready && <Icon name="shield-check" size={11} stroke={2.5} />}
         {participant.isMinor && <span style={{ fontSize: 9, opacity: 0.7 }}>👶</span>}
         {displayText(participant.displayName, "Guest")}
         {onUnbind && (
@@ -2465,11 +2753,11 @@ function BoundHolderChip({ participant, onUnbind, busy }) {
               width: 16, height: 16, marginLeft: 2,
               display: "inline-flex", alignItems: "center", justifyContent: "center",
               borderRadius: 999,
-              background: "rgba(244,91,10,0.15)",
-              color: "var(--aero-orange-700)",
+              background: palette.xBg,
+              color: palette.fg,
             }}
-            onMouseEnter={(e) => { if (!busy) e.currentTarget.style.background = "rgba(244,91,10,0.30)"; }}
-            onMouseLeave={(e) => { if (!busy) e.currentTarget.style.background = "rgba(244,91,10,0.15)"; }}
+            onMouseEnter={(e) => { if (!busy) e.currentTarget.style.background = palette.xBgHover; }}
+            onMouseLeave={(e) => { if (!busy) e.currentTarget.style.background = palette.xBg; }}
           >
             <Icon name="x" size={9} stroke={3} />
           </button>

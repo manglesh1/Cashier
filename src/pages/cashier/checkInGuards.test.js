@@ -64,10 +64,30 @@ test("future-day booking is still too early to check in", () => {
   );
 });
 
-test("expired slot still blocks check-in", () => {
-  const past = new Date(now.getTime() - 3600 * 1000).toISOString();
+test("same-day past slot allows late check-in (no longer blocked)", () => {
+  // Slot ended an hour ago, but it's still TODAY — the capacity hold has
+  // released back into the pool, so the cashier can still admit a late
+  // guest. Mirrors the early-arrival policy on the validFrom side.
+  const oneHourAgo = new Date(now.getTime() - 3600 * 1000).toISOString();
   assert.equal(
-    getTicketBlocker(ticket({ validUntil: past }), { balanceDue: 0, now }),
+    getTicketBlocker(ticket({ validUntil: oneHourAgo }), { balanceDue: 0, now }),
+    null
+  );
+});
+
+test("previous-day expired slot still blocks check-in", () => {
+  // A genuinely-stale ticket from a previous day — the cashier should
+  // not be able to admit on this. Only the validity window protects
+  // against this; status-based expiry (cron sweep / void) is covered
+  // by the status check above.
+  const yesterday = (() => {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 1);
+    d.setHours(17, 0, 0, 0);
+    return d.toISOString();
+  })();
+  assert.equal(
+    getTicketBlocker(ticket({ validUntil: yesterday }), { balanceDue: 0, now }),
     "expired"
   );
 });

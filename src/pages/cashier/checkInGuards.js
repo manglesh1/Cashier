@@ -130,7 +130,18 @@ export const getTicketBlocker = (
   if (["voided", "refunded", "expired"].includes(ticket.status)) return ticket.status;
   if (balanceDue > 0) return "payment_required";
 
-  if (ticket.validUntil && new Date(ticket.validUntil) < now) return "expired";
+  // Late arrival: a slot that ENDED earlier today can still be checked in
+  // by the cashier (good will — capacity hold has released back into the
+  // pool by now, so admitting the late guest doesn't squeeze the venue).
+  // Only a slot whose validUntil is a PREVIOUS day is genuinely "expired"
+  // by the validity window. Status-based expiry (cron sweep / void) is
+  // handled by the earlier status check above.
+  if (ticket.validUntil) {
+    const validUntil = new Date(ticket.validUntil);
+    if (validUntil < now && validUntil.toDateString() !== now.toDateString()) {
+      return "expired";
+    }
+  }
   // Early arrival: a slot starting later TODAY can be checked in by the
   // cashier (good will — paid/waiver-ready guests aren't turned away). Only
   // a FUTURE-DAY slot is still "too early".

@@ -26,7 +26,7 @@ import { CartWaiverModal } from "./CartWaiverModal";
 import CashierPaymentDialog from "./CashierPaymentDialog";
 import SellPaymentOverlay from "./SellPaymentOverlay";
 import { CashierScreenBoundary } from "./CashierScreenBoundary";
-import { CatalogGrid } from "./CatalogGrid";
+import { CatalogGrid, VariantPickerDialog, buildChosenWithVariant } from "./CatalogGrid";
 import { ScheduleRequiredDialog } from "./ScheduleRequiredDialog";
 import { CheckIn } from "./CheckIn";
 import { GuestProfile } from "./GuestProfile";
@@ -64,6 +64,7 @@ import {
   setCartCustomer as setCartCustomerAction,
   setWaiversAttached as setWaiversAttachedAction,
   setTicketAssignments as setTicketAssignmentsAction,
+  setAppliedBenefits as setAppliedBenefitsAction,
   ensureCheckoutKey,
   rotateCheckoutKey,
   clearCart,
@@ -180,6 +181,17 @@ const NO_SCHEDULE_CHECKOUT_TYPES = new Set([
   "gift_card",
 ]);
 
+// Add-on / impulse items: surfaced in the top-floating "Add to order"
+// strip on the Sell screen as soon as the cart has at least one primary
+// item. Strip clears automatically when the cart empties (i.e. after
+// payment completes and clearCart() fires).
+const ADDON_PRODUCT_TYPES = new Set([
+  "addon",
+  "add_on",
+  "add_ons",
+  "stock_item",
+]);
+
 function productTypeKey(item) {
   return String(item?.productType || "").toLowerCase();
 }
@@ -190,6 +202,338 @@ function isVoucherPackItem(item) {
 
 function isNoScheduleSkuItem(item) {
   return NO_SCHEDULE_CHECKOUT_TYPES.has(productTypeKey(item));
+}
+
+function isAddOnItem(item) {
+  return ADDON_PRODUCT_TYPES.has(productTypeKey(item));
+}
+
+// Sell-screen mode toggle — segmented pill in the page header that
+// switches between the two operating contracts the user defined:
+//
+//   • Check-in: walk-in. Session products auto-pick the nearest open
+//               slot today; autoCheckIn fires on payment so participants
+//               are admitted in the same transaction.
+//   • Booking:  future visit. Session products ALWAYS open the schedule
+//               picker (cashier picks date + time). autoCheckIn stays
+//               off so the booking lands unredeemed.
+//
+// The active half is color-coded so the cashier reads the mode at a
+// glance without parsing labels: green for "do it now" check-in, blue
+// for "plan ahead" booking. Mode persists in localStorage (see the
+// useEffect next to the state declaration in CashierApp).
+function SellModeToggle({ mode, onChange }) {
+  const Half = ({ value, label, icon, activeBg, activeBorder, activeFg }) => {
+    const active = mode === value;
+    return (
+      <button
+        type="button"
+        onClick={() => onChange(value)}
+        title={
+          value === "checkin"
+            ? "Check-in mode — walk-ins for today's sessions"
+            : "Booking mode — future visits, pick the slot"
+        }
+        style={{
+          appearance: "none",
+          cursor: "pointer",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "5px 12px",
+          borderRadius: 999,
+          border: active ? `1.5px solid ${activeBorder}` : "1.5px solid transparent",
+          background: active ? activeBg : "transparent",
+          color: active ? activeFg : "var(--ink-500)",
+          fontSize: 12,
+          fontWeight: 900,
+          letterSpacing: "0.04em",
+          textTransform: "uppercase",
+        }}
+      >
+        <Icon name={icon} size={13} stroke={2.5} />
+        {label}
+      </button>
+    );
+  };
+  return (
+    <div
+      title={`Sell mode: ${mode === "booking" ? "Booking" : "Check-in"}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 2,
+        padding: 3,
+        background: "var(--ink-50)",
+        border: "1.5px solid var(--ink-200)",
+        borderRadius: 999,
+      }}
+    >
+      <Half
+        value="checkin"
+        label="Check-in"
+        icon="log-in"
+        activeBg="#EAF8EF"
+        activeBorder="#8AD5A3"
+        activeFg="#137A35"
+      />
+      <Half
+        value="booking"
+        label="Booking"
+        icon="calendar-clock"
+        activeBg="#EFF6FF"
+        activeBorder="#9DC4F0"
+        activeFg="#1D4ED8"
+      />
+    </div>
+  );
+}
+
+// Floating "Add to order" popup — closable + drag-to-move panel that
+// surfaces every add-on / stock-item in the catalog as a one-tap chip.
+// Anchored inside the catalog-column wrapper (position:relative), so the
+// drag bounds clamp naturally to that container instead of escaping into
+// the sidebar or cart panel.
+//
+// Lifecycle (no explicit teardown needed):
+//   • shows when cart has a non-add-on item AND not user-dismissed
+//   • close button hides it until cart clears (next sale)
+//   • clearCart() on completed payment resets the dismissed flag
+//
+// One tap routes through the same addItem path the catalog tiles use,
+// so multi-variation add-ons open the same VariantPickerDialog the cashier
+// already knows from the main grid.
+function AddOnSuggestionPopup({ suggestions, cartCounts, onAdd, position, onMove, onClose }) {
+  const panelRef = React.useRef(null);
+  const dragRef = React.useRef(null);
+
+  const onPointerDown = (e) => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    dragRef.current = {
+      pointerId: e.pointerId,
+      offsetX: e.clientX - rect.left,
+      offsetY: e.clientY - rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    e.preventDefault();
+  };
+  const onPointerMove = (e) => {
+    const drag = dragRef.current;
+    const panel = panelRef.current;
+    if (!drag || !panel || drag.pointerId !== e.pointerId) return;
+    const parent = panel.offsetParent;
+    if (!parent) return;
+    const parentRect = parent.getBoundingClientRect();
+    // Compute next top-left relative to the parent, clamp inside it.
+    let nextX = e.clientX - parentRect.left - drag.offsetX;
+    let nextY = e.clientY - parentRect.top - drag.offsetY;
+    nextX = Math.max(8, Math.min(nextX, parentRect.width - drag.width - 8));
+    nextY = Math.max(8, Math.min(nextY, parentRect.height - drag.height - 8));
+    onMove?.({ x: nextX, y: nextY });
+  };
+  const onPointerUp = (e) => {
+    if (dragRef.current?.pointerId !== e.pointerId) return;
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
+    dragRef.current = null;
+  };
+
+  // Default anchor: top-right corner of the catalog column.
+  const style = position
+    ? { left: position.x, top: position.y, right: "auto" }
+    : { right: 20, top: 70 };
+
+  return (
+    <div
+      ref={panelRef}
+      style={{
+        position: "absolute",
+        ...style,
+        width: 280,
+        maxHeight: "60vh",
+        background: "white",
+        border: "2px solid var(--ink-800)",
+        borderRadius: 14,
+        boxShadow: "0 8px 0 var(--ink-800)",
+        zIndex: 30,
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "8px 10px 8px 14px",
+          background: "#FFF8EE",
+          borderBottom: "1.5px solid #F2CA65",
+          cursor: "grab",
+          userSelect: "none",
+          touchAction: "none",
+          flexShrink: 0,
+        }}
+      >
+        <Icon name="plus-circle" size={14} stroke={2.5} style={{ color: "#8A5A00" }} />
+        <span style={{
+          fontSize: 11, fontWeight: 900, letterSpacing: "0.06em",
+          textTransform: "uppercase", color: "#8A5A00", flex: 1,
+        }}>
+          Add to order
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          title="Hide — re-open from the tab on the right"
+          style={{
+            all: "unset",
+            cursor: "pointer",
+            width: 24,
+            height: 24,
+            borderRadius: 6,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#8A5A00",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(138,90,0,0.12)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+        >
+          <Icon name="x" size={14} stroke={3} />
+        </button>
+      </div>
+      <div style={{
+        flex: 1,
+        minHeight: 0,
+        overflowY: "auto",
+        overscrollBehavior: "contain",
+        padding: "8px 10px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+      }}>
+        {suggestions.map(({ item, section }) => {
+          const countKey = String(item.activityId || item.id || "");
+          const inCart = cartCounts.get(countKey) || 0;
+          const hasChoices = (item.variationOptions || []).length > 1;
+          const lowestVariationPrice = hasChoices
+            ? (item.variationOptions || []).reduce(
+                (min, v) => Math.min(min, Number(v.price ?? Infinity)),
+                Infinity
+              )
+            : Number(item.price);
+          const priceLabel = Number.isFinite(lowestVariationPrice)
+            ? `${hasChoices ? "From " : ""}$${lowestVariationPrice.toFixed(lowestVariationPrice % 1 === 0 ? 0 : 2)}`
+            : "";
+          return (
+            <button
+              key={countKey + "::" + (item.id || "")}
+              type="button"
+              onClick={() => onAdd(item, section)}
+              title={item.name}
+              style={{
+                appearance: "none",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 10px",
+                border: inCart > 0 ? "1.5px solid var(--aero-orange-500)" : "1.5px solid var(--ink-200)",
+                background: inCart > 0 ? "var(--aero-orange-50, #FFF1E8)" : "white",
+                color: inCart > 0 ? "var(--aero-orange-700)" : "var(--ink-900)",
+                borderRadius: 10,
+                fontSize: 13,
+                fontWeight: 700,
+                textAlign: "left",
+                width: "100%",
+                boxSizing: "border-box",
+              }}
+            >
+              <Icon name="plus-circle" size={14} stroke={2.5} />
+              <span style={{
+                flex: 1, minWidth: 0,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}>
+                {item.name}
+              </span>
+              {priceLabel && (
+                <span style={{
+                  fontSize: 12,
+                  fontWeight: 800,
+                  color: inCart > 0 ? "var(--aero-orange-700)" : "var(--ink-600)",
+                  flexShrink: 0,
+                }}>
+                  {priceLabel}
+                </span>
+              )}
+              {inCart > 0 && (
+                <span style={{
+                  padding: "0 6px",
+                  fontSize: 11,
+                  fontWeight: 950,
+                  background: "var(--aero-orange-500)",
+                  color: "white",
+                  borderRadius: 999,
+                  lineHeight: "16px",
+                  flexShrink: 0,
+                }}>
+                  ×{inCart}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Collapsed re-open tab — small pill on the right edge of the catalog
+// column. Appears only when the cashier has dismissed the popup but
+// suggestions are still relevant; one tap restores the popup at its
+// last-known position.
+function AddOnReopenTab({ onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title="Show add-on suggestions"
+      style={{
+        position: "absolute",
+        right: 0,
+        top: 100,
+        zIndex: 25,
+        appearance: "none",
+        cursor: "pointer",
+        background: "#FFF8EE",
+        border: "1.5px solid #F2CA65",
+        borderRight: "none",
+        borderTopLeftRadius: 10,
+        borderBottomLeftRadius: 10,
+        padding: "8px 10px 8px 12px",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        fontSize: 11,
+        fontWeight: 900,
+        letterSpacing: "0.06em",
+        textTransform: "uppercase",
+        color: "#8A5A00",
+        boxShadow: "0 3px 0 var(--ink-800)",
+      }}
+    >
+      <Icon name="plus-circle" size={13} stroke={2.5} />
+      Add-ons
+    </button>
+  );
 }
 
 function getApiErrorMessage(err, fallback) {
@@ -298,6 +642,7 @@ export function CashierApp() {
   const [logoutCall] = useLogoutMutation();
   const handleEndShift = async () => {
     try { await logoutCall().unwrap(); } catch { /* noop */ }
+    dispatch(clearCart());
     dispatch(baseApi.util.resetApiState());
     dispatch(logoutAction());
     toast.success("Shift ended. Please clock in for the next cashier session.");
@@ -319,6 +664,7 @@ export function CashierApp() {
   const cartCustomer = cart.cartCustomer;
   const waiversAttached = cart.waiversAttached;
   const ticketAssignments = cart.ticketAssignments;
+  const appliedBenefits = cart.appliedBenefits || { promo: null, member: null, vouchers: [], payments: [] };
   const checkoutKey = cart.checkoutKey;
   const setItems = React.useCallback(
     (updater) => dispatch(setCartItems(typeof updater === "function" ? updater(items) : updater)),
@@ -335,6 +681,10 @@ export function CashierApp() {
   const setTicketAssignments = React.useCallback(
     (updater) => dispatch(setTicketAssignmentsAction(typeof updater === "function" ? updater(ticketAssignments) : updater)),
     [dispatch, ticketAssignments]
+  );
+  const setAppliedBenefits = React.useCallback(
+    (updater) => dispatch(setAppliedBenefitsAction(typeof updater === "function" ? updater(appliedBenefits) : updater)),
+    [dispatch, appliedBenefits]
   );
 
   const [createdBookingId, setCreatedBookingId] = useState(null);
@@ -356,6 +706,32 @@ export function CashierApp() {
 
   const [checkoutBlocker, setCheckoutBlocker] = useState(null);
   const [scheduleRequiredItem, setScheduleRequiredItem] = useState(null);
+  // Multi-variation add-on tapped from the "Add to order" strip — opens
+  // the same VariantPickerDialog the catalog tiles use.
+  const [addOnVariantPicker, setAddOnVariantPicker] = useState(null);
+  // Sell-screen operating mode (per-tablet, persisted so a reload keeps
+  // the cashier in the lane they were in):
+  //   "checkin"  → walk-in flow. Session products auto-pick the nearest
+  //               open slot today; only fall back to the schedule picker
+  //               when nothing's available. autoCheckIn fires on payment.
+  //   "booking"  → future-booking flow. Every session product opens the
+  //               schedule picker so the cashier can pick a date/time.
+  //               autoCheckIn stays off; the booking is created unredeemed.
+  const [sellMode, setSellMode] = useState(() => {
+    try {
+      const cached = localStorage.getItem("cashier:sellMode");
+      return cached === "booking" ? "booking" : "checkin";
+    } catch { return "checkin"; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("cashier:sellMode", sellMode); } catch {}
+  }, [sellMode]);
+  // Floating add-on popup state — position is draggable; dismissed flag
+  // hides the panel until the next sale (cleared in completeDraftCheckout
+  // when clearCart() runs). Position is held in CashierApp so it survives
+  // strip remount when cart-state derivations re-render.
+  const [addOnPopupPos, setAddOnPopupPos] = useState(null); // {x, y} or null = default anchor
+  const [addOnPopupDismissed, setAddOnPopupDismissed] = useState(false);
   const [member] = useState(null);
   const [waiverModalOpen, setWaiverModalOpen] = useState(false);
   const [waiverModalMode, setWaiverModalMode] = useState("customer");
@@ -704,6 +1080,15 @@ export function CashierApp() {
 
   const addItem = (productItem, section) => {
     if (needsScheduleSelection(productItem) && !hasScheduleSelection(productItem)) {
+      // Mode fork — see sellMode declaration for the contract.
+      //   check-in: walk-in. Auto-assign nearest slot today; fall back to
+      //             picker only when nothing's open.
+      //   booking : future visit. Always open the picker so the cashier
+      //             explicitly chooses date + time.
+      if (sellMode === "booking") {
+        setScheduleRequiredItem({ item: productItem, section });
+        return;
+      }
       autoAssignAndAdd(productItem, section);
       return;
     }
@@ -1060,13 +1445,22 @@ export function CashierApp() {
       // Backend's createBooking re-validates and recomputes; we just supply
       // the chosen discount so the booking record carries the right code.
       pricingSummary: regularAllocation,
+      voucherTokens: Array.isArray(cartPricing?.appliedBenefits?.voucherTokens)
+        ? cartPricing.appliedBenefits.voucherTokens
+        : [],
       // Walk-in flow: customer is paying NOW and walking in NOW. Tell
       // the backend to check in participants AND redeem their tickets
-      // in the same transaction as the booking + payment. Controlled
-      // by the per-device setting autoCheckInOnPurchase (true by
-      // default for POS terminals; can be turned off for a front-desk
-      // terminal that's selling tickets for a future visit).
-      autoCheckIn: posSettings.autoCheckInOnPurchase !== false,
+      // in the same transaction as the booking + payment.
+      //
+      // Sell-screen mode overrides the per-device default:
+      //   • "checkin" → autoCheckIn ON (matches the per-device default
+      //                 unless the device opts out)
+      //   • "booking" → autoCheckIn OFF (future visit; redemption happens
+      //                 at the gate later)
+      autoCheckIn:
+        sellMode === "booking"
+          ? false
+          : posSettings.autoCheckInOnPurchase !== false,
     };
 
     let validatedPricing = null;
@@ -1302,15 +1696,241 @@ export function CashierApp() {
     );
   };
 
+  const findCatalogProductForRedeemable = (redeemable) => {
+    const activityId = Number(redeemable?.activityId);
+    const variationId = Number(redeemable?.variationId);
+    if (!Number.isFinite(activityId)) return { product: null, section: null };
+    for (const section of sections || []) {
+      for (const item of section.items || []) {
+        if (Number(item.activityId) !== activityId) continue;
+        const matchesVariation =
+          !Number.isFinite(variationId) ||
+          Number(item.variationId) === variationId ||
+          (item.variationOptions || []).some((v) => Number(v.variationId) === variationId);
+        if (matchesVariation) return { product: item, section };
+      }
+    }
+    return { product: null, section: null };
+  };
+
+  const buildRedeemCartProduct = (redeemable, kind) => {
+    const { product, section } = findCatalogProductForRedeemable(redeemable);
+    const variationId = Number(redeemable?.variationId);
+    const chosenVariation = product && Number.isFinite(variationId)
+      ? (product.variationOptions || []).find((v) => Number(v.variationId) === variationId)
+      : null;
+    const base = product || {
+      id: `redeem-${kind}-${redeemable?.membershipId || redeemable?.bookingItemId || redeemable?.entitlementId || redeemable?.redemptionToken || Date.now()}`,
+      activityId: redeemable?.activityId || null,
+      variationId: redeemable?.variationId || null,
+      variationName: redeemable?.variationName || null,
+      productType: kind === "entitlement" ? "stock_item" : "session_pass",
+      name: redeemable?.activityName || redeemable?.variationName || "Redeem item",
+      sub: kind === "membership" ? "Membership benefit" : "Voucher redemption",
+      price: Number(redeemable?.price) || 0,
+      requiresWaiver: !!redeemable?.requiresWaiver,
+    };
+    return {
+      ...base,
+      ...(chosenVariation ? {
+        variationId: chosenVariation.variationId,
+        variationName: chosenVariation.name,
+        pricingMode: chosenVariation.pricingMode || chosenVariation.pricingType || base.pricingMode,
+        includedGuests: chosenVariation.includedGuests ?? base.includedGuests,
+        additionalPersonPrice: chosenVariation.additionalPersonPrice ?? base.additionalPersonPrice,
+        minGuests: chosenVariation.minGuests ?? chosenVariation.minimumGuests ?? base.minGuests,
+        maxGuests: chosenVariation.maxGuests ?? chosenVariation.maximumGuests ?? base.maxGuests,
+        price: Number(chosenVariation.price ?? base.price ?? 0),
+      } : {}),
+      id: `${base.id || base.activityId || kind}::redeem:${kind}:${redeemable?.membershipId || redeemable?.bookingItemId || redeemable?.entitlementId || redeemable?.redemptionToken || "x"}`,
+      qty: 1,
+      isRedeemCheckout: true,
+      redeemKind: kind,
+      membershipId: redeemable?.membershipId || null,
+      voucherToken: redeemable?.redemptionToken || null,
+      voucherBookingItemId: redeemable?.bookingItemId || null,
+      voucherEntitlementId: redeemable?.entitlementId || null,
+      sectionTitle: section?.title || base.sectionTitle || base.sub || "Redeem",
+    };
+  };
+
+  const firstMembershipBenefitTarget = (membership) => {
+    const benefits = Array.isArray(membership?.todaysBenefits) ? membership.todaysBenefits : [];
+    for (const benefit of benefits) {
+      if (benefit?.target?.activityId || benefit?.target?.variationId) {
+        return {
+          ...membership,
+          activityId: benefit.target.activityId || membership.activityId,
+          variationId: benefit.target.variationId || membership.variationId,
+          activityName: benefit.label || membership.activityName,
+        };
+      }
+    }
+    return membership;
+  };
+
+  const handleRedeemCheckout = ({ guest, items: redeemItems = [], autoFinish = false }) => {
+    if (!guest?.guestId || redeemItems.length === 0) return;
+    const memberships = redeemItems.filter((entry) => entry.kind === "membership").map((entry) => entry.item);
+    const vouchers = redeemItems.filter((entry) => entry.kind === "voucher").map((entry) => entry.item);
+    const entitlements = redeemItems.filter((entry) => entry.kind === "entitlement").map((entry) => entry.item);
+    const primaryMembership = memberships[0] || null;
+    const guestEmail = guest.guestEmail || guest.email || "";
+    const guestPhone = guest.guestPhone || guest.phone || "";
+
+    setCartCustomer({
+      guestId: guest.guestId,
+      name: guest.guestName || guest.name || "Guest",
+      contact: guestEmail || guestPhone || "",
+      contactEmail: guestEmail,
+      contactPhone: guestPhone,
+    });
+    setAppliedBenefits({
+      promo: null,
+      member: primaryMembership
+        ? {
+            membershipId: primaryMembership.membershipId,
+            activityName: primaryMembership.activityName,
+            guestName: guest.guestName || guest.name || primaryMembership.guestName,
+            todaysBenefits: primaryMembership.todaysBenefits || [],
+          }
+        : null,
+      vouchers: [
+        ...vouchers.map((v) => ({
+          token: v.redemptionToken,
+          kind: "voucher",
+          bookingItemId: v.bookingItemId || null,
+          entitlementId: null,
+          activityId: v.activityId || null,
+          variationId: v.variationId || null,
+          price: Number(v.price) || 0,
+          expiresAt: v.expiresAt || null,
+        })),
+        ...entitlements.map((e) => ({
+          token: e.redemptionToken,
+          kind: "entitlement",
+          bookingItemId: null,
+          entitlementId: e.entitlementId || null,
+          activityId: e.activityId || null,
+          variationId: e.variationId || null,
+          price: Number(e.price) || 0,
+          remainingQty: e.remainingQty || null,
+          expiresAt: e.expiresAt || null,
+        })),
+      ],
+      payments: [],
+    });
+
+    const products = [
+      ...memberships.map((m) => buildRedeemCartProduct(firstMembershipBenefitTarget(m), "membership")),
+      ...vouchers.map((v) => buildRedeemCartProduct(v, "voucher")),
+      ...entitlements.map((e) => buildRedeemCartProduct(e, "entitlement")),
+    ];
+    setItems(products.map((product) => buildCartLine(product, { title: product.sectionTitle || "Redeem" })));
+    setScreen("sell");
+    toast.success(
+      autoFinish
+        ? "Redeem items loaded. Complete the zero-balance booking from the cart."
+        : "Redeem items loaded in Sell. Add extras, then complete payment."
+    );
+  };
+
+  // ── Top-floating "Add to order" strip ─────────────────────────────
+  // Flat list of every add-on / stock-item across all catalog sections,
+  // de-duplicated by activityId+variationId. Pre-computed once per
+  // preset change so the strip render is just a map.
+  const addOnSuggestions = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const section of sections || []) {
+      for (const item of section.items || []) {
+        if (!isAddOnItem(item)) continue;
+        const key = `${item.activityId || item.id}::${item.variationId || ""}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ item, section });
+      }
+    }
+    return out;
+  }, [sections]);
+
+  // The strip should show ONLY when there's a primary (non-addon) item
+  // in the cart. Otherwise an empty cart or an all-addon cart shouldn't
+  // surface more upsell — the cashier is mid-checkout for a single line.
+  const cartHasPrimaryItem = useMemo(
+    () => items.some((line) => !isAddOnItem(line)),
+    [items]
+  );
+
+  // Aggregate cart qty per parent activity (sum across variations) so a
+  // multi-variation add-on chip can badge "×3" regardless of whether the
+  // 3 are 2 Child socks + 1 Adult or any other split. Cashier sees total
+  // committed; per-variation breakdown lives in the cart panel.
+  const cartAddOnCounts = useMemo(() => {
+    const map = new Map();
+    for (const line of items) {
+      if (!isAddOnItem(line)) continue;
+      const key = String(line.activityId || line.id || "");
+      map.set(key, (map.get(key) || 0) + Number(line.qty || 1));
+    }
+    return map;
+  }, [items]);
+
+  // The popup shows when there's a primary item in cart AND suggestions
+  // exist AND the cashier hasn't dismissed it this sale.
+  const showAddOnPopup =
+    cartHasPrimaryItem && addOnSuggestions.length > 0 && !addOnPopupDismissed;
+  // Re-show tab (collapsed pill on the right edge) appears only when the
+  // cashier dismissed the popup but suggestions are still relevant.
+  const showAddOnReopenTab =
+    cartHasPrimaryItem && addOnSuggestions.length > 0 && addOnPopupDismissed;
+
+  // Reset dismissal whenever the cart empties — next sale starts fresh.
+  React.useEffect(() => {
+    if (items.length === 0 && addOnPopupDismissed) {
+      setAddOnPopupDismissed(false);
+    }
+  }, [items.length, addOnPopupDismissed]);
+
+  // Tap handler for an add-on chip. Matches catalog-tile behavior:
+  //   • single-variation → straight to cart via addItem
+  //   • multi-variation → open the same VariantPickerDialog the catalog uses
+  const handleAddOnTap = (item, section) => {
+    const options = item.variationOptions || [];
+    if (options.length > 1) {
+      setAddOnVariantPicker({ item, section });
+      return;
+    }
+    addItem(item, section);
+  };
+
   const catalogMain = (
-    <CatalogGrid
-      sections={sections}
-      loading={presetLoading}
-      error={presetError}
-      onAdd={addItem}
-      onAddVoucherInclusion={handleAddVoucherInclusion}
-      busyItemId={autoSchedulingId}
-    />
+    // Position-relative wrapper so the floating add-on popup can anchor
+    // to the catalog column with `position: absolute`. The popup floats
+    // ABOVE the catalog content; it does not steal layout space.
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, position: "relative" }}>
+      <CatalogGrid
+        sections={sections}
+        loading={presetLoading}
+        error={presetError}
+        onAdd={addItem}
+        onAddVoucherInclusion={handleAddVoucherInclusion}
+        busyItemId={autoSchedulingId}
+      />
+      {showAddOnPopup && (
+        <AddOnSuggestionPopup
+          suggestions={addOnSuggestions}
+          cartCounts={cartAddOnCounts}
+          onAdd={handleAddOnTap}
+          position={addOnPopupPos}
+          onMove={setAddOnPopupPos}
+          onClose={() => setAddOnPopupDismissed(true)}
+        />
+      )}
+      {showAddOnReopenTab && (
+        <AddOnReopenTab onClick={() => setAddOnPopupDismissed(false)} />
+      )}
+    </div>
   );
 
   // Visible sidebar tabs. "payment" (legacy visual stub — the real Take
@@ -1368,6 +1988,8 @@ export function CashierApp() {
           onEditItem={editCartItem}
           onCheckout={handleCheckout}
           onPricingChange={setCartPricing}
+          appliedBenefits={appliedBenefits}
+          onAppliedBenefitsChange={setAppliedBenefits}
             variant="default"
             isSubmitting={isCreating || isValidatingCart}
             checkoutBlocker={checkoutBlocker}
@@ -1419,6 +2041,17 @@ export function CashierApp() {
             onClose={() => setScheduleRequiredItem(null)}
           />
         )}
+        {addOnVariantPicker && (
+          <VariantPickerDialog
+            item={addOnVariantPicker.item}
+            section={addOnVariantPicker.section}
+            onClose={() => setAddOnVariantPicker(null)}
+            onPick={(item, section, option) => {
+              addItem(buildChosenWithVariant(item, option), section);
+              setAddOnVariantPicker(null);
+            }}
+          />
+        )}
       </>
     );
     header = (
@@ -1426,7 +2059,12 @@ export function CashierApp() {
         breadcrumb={(myDevice?.deviceName || myDevice?.name || "TERMINAL").toUpperCase()}
         title="Sell"
         subtitle={new Date().toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric" })}
-        right={<StatusPill tone="success" pulse>Drawer open</StatusPill>}
+        right={
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <SellModeToggle mode={sellMode} onChange={setSellMode} />
+            <StatusPill tone="success" pulse>Drawer open</StatusPill>
+          </div>
+        }
       />
     );
   } else if (screen === "find") {
@@ -1439,7 +2077,7 @@ export function CashierApp() {
       />
     );
   } else if (screen === "redeem") {
-    body = <Redeem />;
+    body = <Redeem onRedeemCheckout={handleRedeemCheckout} />;
     header = (
       <Header
         breadcrumb="GATE · REDEMPTION"
@@ -1458,13 +2096,10 @@ export function CashierApp() {
     );
   } else if (screen === "checkin") {
     body = <CheckIn />;
-    header = (
-      <Header
-        breadcrumb="OPERATIONS"
-        title="Check-in"
-        subtitle="Today's arrivals"
-      />
-    );
+    // Check-in owns its own integrated top bar (combined title + search +
+    // location chip) for event-volume density. The shared Header would
+    // burn ~150px on chrome we don't need at the gate.
+    header = null;
   } else if (screen === "guest") {
     body = <GuestProfile />;
     header = <Header breadcrumb="GUESTS" title="Guest lookup" />;

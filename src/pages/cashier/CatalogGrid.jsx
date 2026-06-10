@@ -151,20 +151,7 @@ export function CatalogGrid({
   const isVoucherMode = !!(voucherPack || voucherSearching || voucherError);
 
   const addWithVariant = (item, section, option = null) => {
-    const chosen = option
-      ? {
-          ...item,
-          variationId: option.variationId,
-          variationName: option.name,
-          price: Number(option.price ?? item.price ?? 0),
-          pricingMode: option.pricingMode || option.pricingType || item.pricingMode || item.pricingType || null,
-          includedGuests: option.includedGuests ?? item.includedGuests ?? null,
-          additionalPersonPrice: option.additionalPersonPrice ?? item.additionalPersonPrice ?? null,
-          minGuests: option.minGuests ?? option.minimumGuests ?? item.minGuests ?? item.minimumGuests ?? null,
-          maxGuests: option.maxGuests ?? option.maximumGuests ?? item.maxGuests ?? item.maximumGuests ?? null,
-        }
-      : item;
-    onAdd?.(chosen, section);
+    onAdd?.(buildChosenWithVariant(item, option), section);
     setVariantPicker(null);
   };
 
@@ -345,7 +332,27 @@ function ProductCard({ item, tone = "orange", onClick, busy = false }) {
   );
 }
 
-function VariantPickerDialog({ item, section, onClose, onPick }) {
+// Merges a chosen variation option onto a parent catalog item so the
+// resulting cart line carries the variation's pricing, guest caps, etc.
+// Pulled to module scope so other surfaces (e.g. the add-on suggestion
+// strip in CashierApp) can reuse the same picker behavior as a catalog
+// tile, end-to-end identical.
+export function buildChosenWithVariant(item, option) {
+  if (!option) return item;
+  return {
+    ...item,
+    variationId: option.variationId,
+    variationName: option.name,
+    price: Number(option.price ?? item.price ?? 0),
+    pricingMode: option.pricingMode || option.pricingType || item.pricingMode || item.pricingType || null,
+    includedGuests: option.includedGuests ?? item.includedGuests ?? null,
+    additionalPersonPrice: option.additionalPersonPrice ?? item.additionalPersonPrice ?? null,
+    minGuests: option.minGuests ?? option.minimumGuests ?? item.minGuests ?? item.minimumGuests ?? null,
+    maxGuests: option.maxGuests ?? option.maximumGuests ?? item.maxGuests ?? item.maximumGuests ?? null,
+  };
+}
+
+export function VariantPickerDialog({ item, section, onClose, onPick }) {
   const options = item.variationOptions || [];
   return (
     <div
