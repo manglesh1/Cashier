@@ -6,6 +6,10 @@
   "scripts": {
     "dev": "vite",
     "test": "node --test \"src/**/*.test.js\"",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:debug": "playwright test --debug",
+    "test:e2e:report": "playwright show-report",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -23,6 +27,7 @@
     "sonner": "^2.0.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",

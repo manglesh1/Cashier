@@ -4,3 +4,12 @@ dist
 .env.local
 .DS_Store
 *.log
+
+# Playwright artifacts
+test-results/
+playwright-report/
+
+# Dev screenshot helpers (local-only)
+tmp-*.mjs
+checkin-*.png
+sell-*.png
