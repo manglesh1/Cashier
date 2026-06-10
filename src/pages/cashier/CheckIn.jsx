@@ -34,6 +34,11 @@ import {
 } from "../../features/tickets/ticketApi";
 import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discountApi";
 import {
+  useBindWristbandMutation,
+  useUnbindWristbandMutation,
+  useLookupWristbandMutation,
+} from "../../features/wristbands/wristbandBindApi";
+import {
   useLazyLookupGiftCardQuery,
   useRedeemGiftCardMutation,
 } from "../../features/vouchers/voucherApi";
@@ -161,6 +166,56 @@ export function CheckIn() {
   // so other rows stay tappable while one is in flight.
   const [rowCheckingInId, setRowCheckingInId] = useState(null);
   const [rowCheckInAll] = useCheckInAllTicketsMutation();
+
+  // Gate-side RFID scan listener. Any `cashier:scan` with source="rfid"
+  // that isn't consumed by a child component (e.g. the Bind affordance
+  // in GuestWorkflowPanel arms a participant and binds the scan
+  // synchronously) hits this lookup → the resolved booking gets
+  // auto-selected so the cashier can check the guest in. Unrecognised
+  // UIDs surface a "Wristband not recognised" toast.
+  const [lookupWristbandMutation] = useLookupWristbandMutation();
+  React.useEffect(() => {
+    const onScan = async (e) => {
+      const detail = e?.detail || {};
+      if (detail.source !== "rfid") return;
+      // If a child component just bound this UID to a participant,
+      // it'll handle the scan itself; we still run the lookup but
+      // it'll succeed and surface the now-bound booking — which is
+      // what we want (auto-jump to that booking's detail pane).
+      const uid = String(detail.code || "").trim();
+      if (!uid) return;
+      try {
+        const res = await lookupWristbandMutation({ rfidUid: uid }).unwrap();
+        const booking = res?.data?.booking;
+        if (booking?.bookingId) {
+          // Find or hydrate the booking row, then select it so the
+          // detail pane opens. setSelected expects the same shape the
+          // booking list provides; the lookup gives us enough fields
+          // (bookingId/bookingNumber/locationId/paymentStatus) for the
+          // detail-pane query to take over.
+          setSelected({
+            bookingId: booking.bookingId,
+            bookingNumber: booking.bookingNumber,
+            bookingName: booking.bookingName,
+          });
+          toast.success(
+            `Wristband · ${res?.data?.participantName || "guest"} → #${booking.bookingNumber}`
+          );
+        }
+      } catch (err) {
+        if (err?.status === 404 || err?.data?.statusCode === 404) {
+          toast.error(`Wristband ${uid} not recognised`);
+        } else {
+          // 403 / 500 / etc — let the cashier know without details.
+          toast.error(
+            err?.data?.message || err?.data?.error || "Wristband lookup failed"
+          );
+        }
+      }
+    };
+    window.addEventListener("cashier:scan", onScan);
+    return () => window.removeEventListener("cashier:scan", onScan);
+  }, [lookupWristbandMutation]);
 
   const { data, isLoading, refetch } = useGetAllBookingQuery({
     page: 1,
@@ -2014,6 +2069,66 @@ function GuestWorkflowPanel({
   const assignedCount = tickets.filter((ticket) => ticket.participantId).length;
   const sampleParticipants = participants.slice(0, 10);
 
+  // ── RFID bind flow ──
+  // Cashier "arms" one participant; the next `cashier:scan` with
+  // source="rfid" binds that UID to them. Disarms on success or
+  // when the cashier picks a different participant (or 30s timeout).
+  const [armedBindParticipantId, setArmedBindParticipantId] = React.useState(null);
+  const [bindWristbandMutation, { isLoading: binding }] = useBindWristbandMutation();
+  const [unbindWristbandMutation] = useUnbindWristbandMutation();
+
+  React.useEffect(() => {
+    if (!armedBindParticipantId) return undefined;
+    const onScan = (e) => {
+      const detail = e?.detail || {};
+      if (detail.source !== "rfid") return;
+      const uid = String(detail.code || "").trim();
+      if (!uid) return;
+      // Fire-and-forget; toast surfaces success/failure
+      bindWristbandMutation({
+        bookingId,
+        participantId: armedBindParticipantId,
+        rfidUid: uid,
+      })
+        .unwrap()
+        .then((res) => {
+          toast.success(
+            `Bound ${res?.data?.rfidUid || uid} → ${res?.data?.participantName || "guest"}`
+          );
+          setArmedBindParticipantId(null);
+          onSaved?.();
+        })
+        .catch((err) => {
+          toast.error(
+            err?.data?.message ||
+              err?.data?.error ||
+              "Could not bind wristband"
+          );
+        });
+    };
+    window.addEventListener("cashier:scan", onScan);
+    // Auto-disarm after 30s so a forgotten arm doesn't trap the next scan.
+    const timer = setTimeout(() => setArmedBindParticipantId(null), 30_000);
+    return () => {
+      window.removeEventListener("cashier:scan", onScan);
+      clearTimeout(timer);
+    };
+  }, [armedBindParticipantId, bookingId, bindWristbandMutation, onSaved]);
+
+  const handleUnbindWristband = (participantId) => {
+    unbindWristbandMutation({ bookingId, participantId })
+      .unwrap()
+      .then(() => {
+        toast.success("Wristband unbound");
+        onSaved?.();
+      })
+      .catch((err) =>
+        toast.error(
+          err?.data?.message || err?.data?.error || "Could not unbind"
+        )
+      );
+  };
+
   return (
     <div
       style={{
@@ -2090,6 +2205,8 @@ function GuestWorkflowPanel({
           {sampleParticipants.map((participant) => {
             const id = Number(participant.bookingParticipantId);
             const isBound = boundIds.has(id);
+            const wristbandUid = participant.wristbandNumber || null;
+            const isArmed = armedBindParticipantId === id;
             return (
               <span
                 key={participant.bookingParticipantId}
@@ -2098,11 +2215,19 @@ function GuestWorkflowPanel({
                   display: "inline-flex",
                   alignItems: "center",
                   gap: 4,
-                  maxWidth: 170,
+                  maxWidth: 220,
                   padding: "4px 8px",
                   borderRadius: 999,
-                  border: `1.5px solid ${participant.hasValidWaiver ? "#8AD5A3" : "var(--ink-200)"}`,
-                  background: isBound ? "var(--aero-orange-50)" : participant.hasValidWaiver ? "#EAF8EF" : "var(--ink-50)",
+                  border: isArmed
+                    ? "1.5px solid #1D4ED8"
+                    : `1.5px solid ${participant.hasValidWaiver ? "#8AD5A3" : "var(--ink-200)"}`,
+                  background: isArmed
+                    ? "#EFF6FF"
+                    : isBound
+                      ? "var(--aero-orange-50)"
+                      : participant.hasValidWaiver
+                        ? "#EAF8EF"
+                        : "var(--ink-50)",
                   color: participant.hasValidWaiver ? "#137A35" : "var(--ink-600)",
                   fontSize: 11,
                   fontWeight: 750,
@@ -2112,6 +2237,90 @@ function GuestWorkflowPanel({
                 <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {displayText(participant.displayName, "Guest")}
                 </span>
+                {/* RFID wristband state. Three visual states:
+                    • UID present → small monospace chip + unbind ×
+                    • Armed for bind → blue "Scan now…" pill
+                    • Otherwise → "Bind" mini-button */}
+                {wristbandUid ? (
+                  <span
+                    title={`Wristband ${wristbandUid}`}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      marginLeft: 4,
+                      padding: "1px 6px",
+                      borderRadius: 999,
+                      background: "#1D4ED8",
+                      color: "white",
+                      fontSize: 9,
+                      fontWeight: 950,
+                      fontFamily: "var(--font-mono)",
+                      letterSpacing: "0.04em",
+                    }}
+                  >
+                    <Icon name="radio" size={9} stroke={3} />
+                    {wristbandUid.length > 8 ? wristbandUid.slice(-6) : wristbandUid}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleUnbindWristband(id);
+                      }}
+                      title="Unbind wristband"
+                      style={{
+                        all: "unset",
+                        cursor: "pointer",
+                        marginLeft: 2,
+                        opacity: 0.85,
+                      }}
+                    >
+                      <Icon name="x" size={9} stroke={3} />
+                    </button>
+                  </span>
+                ) : isArmed ? (
+                  <span
+                    style={{
+                      marginLeft: 4,
+                      padding: "1px 6px",
+                      borderRadius: 999,
+                      background: "#1D4ED8",
+                      color: "white",
+                      fontSize: 9,
+                      fontWeight: 900,
+                      letterSpacing: "0.04em",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    Scan now…
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setArmedBindParticipantId(id);
+                    }}
+                    title="Bind RFID wristband"
+                    disabled={binding}
+                    style={{
+                      all: "unset",
+                      cursor: "pointer",
+                      marginLeft: 4,
+                      padding: "1px 6px",
+                      borderRadius: 999,
+                      border: "1px solid var(--ink-300)",
+                      background: "white",
+                      color: "var(--ink-700)",
+                      fontSize: 9,
+                      fontWeight: 800,
+                      letterSpacing: "0.04em",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    Bind
+                  </button>
+                )}
               </span>
             );
           })}
