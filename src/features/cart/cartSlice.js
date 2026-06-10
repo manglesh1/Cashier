@@ -14,6 +14,7 @@ const initialState = {
   cartCustomer: null,
   waiversAttached: [],
   ticketAssignments: {},
+  appliedBenefits: { promo: null, member: null, vouchers: [], payments: [] },
   // Stable key for the current checkout attempt. Reused across retries
   // (so a duplicate createBooking on flaky wifi is deduped by the backend),
   // rotated on success or when the cashier explicitly clears the cart.
@@ -36,6 +37,9 @@ const cartSlice = createSlice({
     setTicketAssignments: (state, action) => {
       state.ticketAssignments = action.payload;
     },
+    setAppliedBenefits: (state, action) => {
+      state.appliedBenefits = action.payload;
+    },
     // Generate a key if we don't have one yet. Called at the start of every
     // checkout so the same payload retried twice carries the same key.
     ensureCheckoutKey: (state) => {
@@ -56,6 +60,7 @@ export const {
   setCartCustomer,
   setWaiversAttached,
   setTicketAssignments,
+  setAppliedBenefits,
   ensureCheckoutKey,
   rotateCheckoutKey,
   clearCart,
