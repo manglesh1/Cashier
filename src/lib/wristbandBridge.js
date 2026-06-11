@@ -163,3 +163,25 @@ export function getWristbandBridgeStatus() {
     scanCount,
   };
 }
+
+// Expose a debug helper on window so cashiers / devs can verify the
+// bridge state in DevTools without imports. Prints once per session.
+// Usage in console:
+//   movira.wristband.status()         → live snapshot
+//   movira.wristband.simulateScan()   → fire a fake scan locally
+//   movira.wristband.restart()        → reset the WS connection
+if (typeof window !== "undefined" && !window.movira?.wristband) {
+  window.movira = window.movira || {};
+  window.movira.wristband = {
+    status: getWristbandBridgeStatus,
+    restart: ({ port } = {}) => startWristbandBridge({ port: port || currentPort }),
+    stop: stopWristbandBridge,
+    simulateScan: (uid = "DEADBEEF") => {
+      window.dispatchEvent(
+        new CustomEvent("cashier:scan", {
+          detail: { code: uid, source: "rfid", reader: "debug-simulate", at: Date.now() },
+        })
+      );
+    },
+  };
+}

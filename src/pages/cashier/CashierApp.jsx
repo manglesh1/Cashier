@@ -1043,18 +1043,25 @@ export function CashierApp() {
   // the `cashier:scan` window event (see Redeem.jsx).
   React.useEffect(() => attachScannerListener(), []);
 
-  // Wristband Sidecar bridge (RFID mode only). Reads bridgePort from
-  // the terminal's locally-cached wristbandConfig.rfid; falls back to
-  // 7777 if the terminal hasn't synced its venue settings yet. Auto-
-  // reconnects with backoff if the sidecar restarts or the tablet
-  // wakes from sleep. Idempotent — safe across re-renders.
+  // Wristband Sidecar bridge.
+  //
+  // Previously gated on terminal.wristbandMode === 'rfid', but the
+  // terminal-pair snapshot doesn't include the venue's wristband
+  // config — only deviceId/locationId/templateId. Venues set to RFID
+  // in admin would still see wristbandMode='none' here, so the bridge
+  // never started and scans from the sidecar never reached the
+  // Cashier UI.
+  //
+  // Fix: always start the bridge. The wristbandBridge client uses an
+  // exponential backoff WebSocket connect — when there's no sidecar
+  // running (paper/none venues, dev machines), it retries quietly and
+  // never throws. Cost is one connection attempt every 1-30s; cheap
+  // for the resilience win.
   React.useEffect(() => {
     let cached;
     try {
       cached = JSON.parse(localStorage.getItem("cashier:terminal") || "null");
     } catch { cached = null; }
-    const mode = cached?.settings?.wristbandMode || cached?.wristbandMode || "none";
-    if (mode !== "rfid") return;
     const port =
       Number(cached?.settings?.wristbandConfig?.rfid?.bridgePort) ||
       Number(cached?.wristbandConfig?.rfid?.bridgePort) ||
