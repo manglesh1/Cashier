@@ -495,9 +495,12 @@ function GiftCardPanel({ outstanding, onApply, payments, onRemove, onClose }) {
   const [redeem, { isLoading: redeeming }] = useRedeemGiftCardMutation();
 
   const handleLookup = async () => {
-    if (!code.trim() || !pin.trim()) return toast.error("Code and PIN required");
+    if (!code.trim()) return toast.error("Enter gift card code");
     try {
-      const res = await lookup({ code: code.trim().toUpperCase(), pin: pin.trim() }).unwrap();
+      const res = await lookup({
+        code: code.trim().toUpperCase(),
+        ...(pin.trim() ? { pin: pin.trim() } : {}),
+      }).unwrap();
       const c = res?.data;
       if (!c) return toast.error("Card not found");
       if (c.status !== "active") return toast.error(`Card is ${c.status}`);
@@ -518,7 +521,7 @@ function GiftCardPanel({ outstanding, onApply, payments, onRemove, onClose }) {
     try {
       const res = await redeem({
         code: card.code,
-        pin: pin.trim(),
+        ...(pin.trim() ? { pin: pin.trim() } : {}),
         amount: amt,
         note: "Cashier cart-led apply",
       }).unwrap();
@@ -607,7 +610,7 @@ function GiftCardPanel({ outstanding, onApply, payments, onRemove, onClose }) {
           <input
             value={pin}
             onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
-            placeholder="PIN"
+            placeholder="PIN optional"
             maxLength={4}
             type="password"
             inputMode="numeric"

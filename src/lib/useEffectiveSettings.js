@@ -24,6 +24,12 @@ const FALLBACKS = {
   enableTipping: false,
   predefinedTipPercentages: [5, 10, 15],
   allowCustomTipAmount: false,
+  // Tip % base + default recipient (now emitted by mergeSettings).
+  // calculateTipsOnBookingTotal: false → suggested % is on the amount
+  // being paid; true → on the full booking total. defaultTipAllocation
+  // preselects the Tip step's allocation radio.
+  calculateTipsOnBookingTotal: false,
+  defaultTipAllocation: "booking_host",
   // Per-device hardware
   hasCashDrawer: true,
   openDrawerForCashOnly: true,

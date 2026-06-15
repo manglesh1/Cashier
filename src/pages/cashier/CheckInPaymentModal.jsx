@@ -11,7 +11,7 @@
 //   • Receipt print / email post-payment also live in-modal — they
 //     share the "complete" state.
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discountApi";
@@ -19,6 +19,11 @@ import { useLazyLookupGiftCardQuery } from "../../features/vouchers/voucherApi";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 import { moneyFmt, roundMoney } from "../../lib/money";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
+import TipStep from "../../features/tips/TipStep";
+import AddTipModal from "../../features/tips/AddTipModal";
+import { useTipDefaults } from "../../features/tips/useTipDefaults";
+import { useStandaloneTipMutation } from "../../features/tips/tipsApi";
+import { computeTipBase, TIP_ALLOCATIONS } from "../../features/tips/tipMath";
 
 // Small inline helper, duplicated from CheckIn.jsx to avoid a cross-file
 // circular import. It exists to coerce anything (string, number, nested
@@ -80,23 +85,42 @@ function CheckInPaymentModal({
   onEmailReceipt,
   isSendingReceipt,
   onClose,
+  // Sell flow only: the card path runs through TerminalPaymentModal, which
+  // can collect an on-glass tip. When true, show the "who gets the card tip"
+  // chooser here and report it via onCardTip so the reader uses it.
+  cardTipEnabled = false,
+  onCardTip,
 }) {
   const [couponCode, setCouponCode] = useState("");
   const [manualDiscount, setManualDiscount] = useState("");
   const [managerOpen, setManagerOpen] = useState(false);
   const [receiptEmail, setReceiptEmail] = useState("");
   const [gcCode, setGcCode] = useState("");
-  const [gcPin, setGcPin] = useState("");
   const [gcCard, setGcCard] = useState(null);
   const [cashTenders, setCashTenders] = useState([]);
   const [validateDiscountCode, { isFetching: validatingCoupon }] = useLazyValidateDiscountCodeQuery();
   const [lookupGiftCard, { isFetching: gcLooking }] = useLazyLookupGiftCardQuery();
   const settings = useEffectiveSettings();
+  const tipDefaults = useTipDefaults();
+  const [standaloneTip] = useStandaloneTipMutation();
+  // Tip (gratuity), recorded as a dedicated tip-only transaction once the
+  // payment lands. { amount, allocation, selectedPct, managerOverrideAuditId }
+  const [tip, setTip] = useState({ amount: 0, allocation: "booking_host", selectedPct: null, managerOverrideAuditId: null });
+  const [recordedTip, setRecordedTip] = useState(0);
+  const tipGuardRef = useRef(null);
+  // Card on-glass tip allocation (Sell flow) + the "add tip later" modal.
+  const [cardAllocation, setCardAllocation] = useState("booking_host");
+  const [addTipOpen, setAddTipOpen] = useState(false);
   // Pre-fill the receipt email from any address on the booking; for a
   // walk-in with none, the cashier types one on the complete view.
   useEffect(() => {
     setReceiptEmail(booking?.guestEmail || booking?.guest?.guestEmail || "");
     setCashTenders([]);
+    setTip({ amount: 0, allocation: tipDefaults.defaultAllocation || "booking_host", selectedPct: null, managerOverrideAuditId: null });
+    setCardAllocation(tipDefaults.defaultAllocation || "booking_host");
+    setRecordedTip(0);
+    setAddTipOpen(false);
+    tipGuardRef.current = null;
   }, [booking?.bookingId, booking?.guestEmail, booking?.guest?.guestEmail]);
   const discountAmount = roundMoney(Math.min(Number(discount?.amount || 0), balanceDue));
   const payableBalance = roundMoney(Math.max(0, balanceDue - discountAmount));
@@ -108,6 +132,59 @@ function CheckInPaymentModal({
   const recordAmount = isCash ? Math.min(payableBalance, tendered) : isGiftCard ? gcApply : tendered;
   const remaining = Math.max(0, payableBalance - recordAmount);
   const changeDue = isCash ? Math.max(0, tendered - payableBalance) : 0;
+  const isCheck = method === "check";
+  const isCard = method === "card";
+
+  // Cash/check tip is entered here. Card tip is collected on the reader, so
+  // for card we only show a note + (Sell flow) the "who gets it" chooser.
+  const showTip = tipDefaults.enabled && (isCash || isCheck);
+  const showCardTip = tipDefaults.enabled && isCard;
+  // Report the chosen card-tip allocation to the parent so the terminal uses it.
+  useEffect(() => {
+    if (showCardTip && cardTipEnabled && typeof onCardTip === "function") {
+      onCardTip(cardAllocation);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showCardTip, cardTipEnabled, cardAllocation]);
+  const tipBase = computeTipBase({
+    subtotal: payableBalance,
+    bookingTotal: Number(booking?.totalAmount ?? balanceDue),
+    calcOnTotal: tipDefaults.calcOnBookingTotal,
+  });
+
+  // Record the tip once the parent flips `complete` (payment succeeded).
+  // Self-contained so CheckIn's payment handler needs no change. The ref +
+  // server idempotency (keyed on the booking + payment reference) guard
+  // against React StrictMode double-invocation and accidental re-fires.
+  useEffect(() => {
+    if (!complete) return;
+    const bid = booking?.bookingId;
+    const amt = roundMoney(tip.amount || 0);
+    if (!bid || amt <= 0 || !(isCash || isCheck)) return;
+    const key = `tip-checkin:${bid}:${complete.referenceNumber || complete.transactionId || amt}`;
+    if (tipGuardRef.current === key) return;
+    tipGuardRef.current = key;
+    (async () => {
+      try {
+        await standaloneTip({
+          bookingId: bid,
+          tipAmount: amt,
+          method: isCheck ? "check" : "cash",
+          allocation: tip.allocation,
+          defaultAllocation: tipDefaults.defaultAllocation,
+          managerOverrideAuditId: tip.managerOverrideAuditId || undefined,
+          source: "checkout",
+          idempotencyKey: key,
+        }).unwrap();
+        setRecordedTip(amt);
+      } catch (err) {
+        toast.error(
+          `Payment recorded, but the tip didn't save (${err?.data?.message || err?.data?.error || "use Add tip on the booking"}).`
+        );
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [complete]);
 
   const handleGcLookup = async () => {
     const code = gcCode.trim();
@@ -268,6 +345,12 @@ function CheckInPaymentModal({
               <Icon name="check-circle-2" size={20} />
               {moneyFmt(complete.amountPaid)} paid
             </div>
+            {recordedTip > 0 && (
+              <div style={{ marginTop: 12, border: "1.5px solid #8AD5A3", background: "#EAF8EF",
+                borderRadius: 10, padding: 10, fontSize: 13, fontWeight: 800, color: "#137A35" }}>
+                + {moneyFmt(recordedTip)} tip · {moneyFmt(roundMoney(complete.amountPaid + recordedTip))} charged
+              </div>
+            )}
             {complete.discountAmount > 0 && (
               <div style={{ marginTop: 12, border: "1.5px solid var(--ink-200)", borderRadius: 10, padding: 10, fontSize: 13, fontWeight: 800, color: "var(--ink-700)" }}>
                 Discount applied: {moneyFmt(complete.discountAmount)} {complete.discountLabel ? `(${complete.discountLabel})` : ""}
@@ -320,6 +403,15 @@ function CheckInPaymentModal({
                 <Icon name="printer" size={15} /> Print
               </button>
             </div>
+            {/* Tip-only: guest already paid the full amount and now wants to
+                leave (more) gratuity. Opens the standalone Add-tip flow. */}
+            {tipDefaults.enabled && (booking?.bookingId || complete?.bookingId) && (
+              <div style={{ marginTop: 12 }}>
+                <button type="button" className="a-btn a-btn--secondary" onClick={() => setAddTipOpen(true)} style={{ width: "100%", justifyContent: "center" }}>
+                  <Icon name="hand-coins" size={15} /> Add tip
+                </button>
+              </div>
+            )}
             <button type="button" className="a-btn a-btn--primary" onClick={onClose} style={{ width: "100%", justifyContent: "center", marginTop: 18 }}>
               Done
             </button>
@@ -390,6 +482,40 @@ function CheckInPaymentModal({
                   Clear Payments
                 </button>
               </div>
+              {showTip && (
+                <TipStep
+                  base={tipBase}
+                  bookingId={booking?.bookingId || null}
+                  defaults={tipDefaults}
+                  value={tip}
+                  onChange={setTip}
+                />
+              )}
+              {showCardTip && (
+                <div style={{ marginTop: 8, padding: "10px 12px", background: "#EEF6FF", border: "1.5px solid #9DC8F5", borderRadius: 8 }}>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0A5FB4", display: "flex", alignItems: "center", gap: 6 }}>
+                    <Icon name="credit-card" size={14} /> Tip is added on the card reader
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--ink-600)", marginTop: 2 }}>
+                    The guest enters the tip on the device after you tap Complete.
+                  </div>
+                  {cardTipEnabled && (
+                    <div style={{ marginTop: 8 }}>
+                      <div style={{ fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".06em", color: "var(--ink-500)", marginBottom: 4 }}>
+                        Tip goes to
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                        {TIP_ALLOCATIONS.map((opt) => (
+                          <label key={opt.value} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, cursor: "pointer" }}>
+                            <input type="radio" name="cardTipAlloc" checked={cardAllocation === opt.value} onChange={() => setCardAllocation(opt.value)} />
+                            {opt.label}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               {/* Coupon / discount inputs removed — applied via cart's
                   Apply-benefit flyout. */}
             </div>
@@ -401,7 +527,6 @@ function CheckInPaymentModal({
                   {!gcCard ? (
                     <>
                       <input value={gcCode} onChange={(e) => setGcCode(e.target.value.toUpperCase())} onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }} placeholder="Card code" autoComplete="off" style={{ fontSize: 15, padding: "12px 14px", border: "1.5px solid var(--ink-300)", borderRadius: 8, fontFamily: "var(--font-mono)", fontWeight: 800 }} />
-                      {/* PIN input removed — venue policy doesn't issue PINs. */}
                       <button type="button" className="a-btn a-btn--secondary" onClick={handleGcLookup} disabled={gcLooking || !gcCode.trim()} style={{ justifyContent: "center", minHeight: 48 }}>
                         <Icon name="search" size={16} /> {gcLooking ? "Looking…" : "Look up card"}
                       </button>
@@ -495,6 +620,17 @@ function CheckInPaymentModal({
           setManagerOpen(false);
         }}
       />
+      {addTipOpen && (booking?.bookingId || complete?.bookingId) && (
+        <AddTipModal
+          booking={{
+            bookingId: booking?.bookingId || complete?.bookingId,
+            bookingNumber: booking?.bookingNumber || complete?.bookingNumber,
+            totalAmount: booking?.totalAmount,
+            amountPaid: booking?.amountPaid,
+          }}
+          onClose={() => setAddTipOpen(false)}
+        />
+      )}
     </div>
   );
 }

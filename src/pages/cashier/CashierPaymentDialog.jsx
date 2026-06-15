@@ -20,6 +20,10 @@ import {
 } from "../../features/vouchers/voucherApi";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import TerminalProgressModal from "./TerminalProgressModal";
+import TipStep from "../../features/tips/TipStep";
+import { useTipDefaults } from "../../features/tips/useTipDefaults";
+import { useStandaloneTipMutation } from "../../features/tips/tipsApi";
+import { computeTipBase } from "../../features/tips/tipMath";
 import { getTerminal } from "../../lib/terminal";
 import { openCashDrawer, printReceipt } from "../../lib/hardware";
 import { moneyFmt, roundMoney } from "../../lib/money";
@@ -85,6 +89,8 @@ export default function CashierPaymentDialog({
   const [validateDiscountCode] = useLazyValidateDiscountCodeQuery();
   const [lookupGiftCard, { isFetching: gcLooking }] = useLazyLookupGiftCardQuery();
   const [redeemGiftCard, { isLoading: gcRedeeming }] = useRedeemGiftCardMutation();
+  const tipDefaults = useTipDefaults();
+  const [standaloneTip] = useStandaloneTipMutation();
 
   const [method, setMethod] = useState("card");
   const [amount, setAmount] = useState("");
@@ -96,15 +102,18 @@ export default function CashierPaymentDialog({
   const [manualDiscount, setManualDiscount] = useState("");
   const [managerOpen, setManagerOpen] = useState(false);
   const [draftSubmitting, setDraftSubmitting] = useState(false);
-  // Gift card tender: looked-up card + its code/PIN (needed again at redeem).
+  // Gift card tender: looked-up card + its code.
   const [gcCode, setGcCode] = useState("");
-  const [gcPin, setGcPin] = useState("");
   const [gcCard, setGcCard] = useState(null);
-  // Applied gift-card credit: { code, pin, amount }. When set, the gift card
+  // Applied gift-card credit: { code, amount }. When set, the gift card
   // covers up to its balance and the method below settles the remainder.
   const [gcApplied, setGcApplied] = useState(null);
   // Check tender: capture the check number (stored as the payment reference).
   const [checkNumber, setCheckNumber] = useState("");
+  // Tip (gratuity). Recorded as a dedicated tip-only transaction after the
+  // payment succeeds, so the booking total/balance never include it.
+  // { amount, allocation, selectedPct, managerOverrideAuditId }
+  const [tip, setTip] = useState({ amount: 0, allocation: "booking_host", selectedPct: null, managerOverrideAuditId: null });
   // Idempotency: one base key per opened dialog (per booking attempt).
   // Sub-scoped (":discount", ":payment") when used so the two recordPayment
   // calls have independent dedupe identities. Retrying after a failed
@@ -134,10 +143,10 @@ export default function CashierPaymentDialog({
     setManualDiscount("");
     setDraftSubmitting(false);
     setGcCode("");
-    setGcPin("");
     setGcCard(null);
     setGcApplied(null);
     setCheckNumber("");
+    setTip({ amount: 0, allocation: tipDefaults.defaultAllocation || "booking_host", selectedPct: null, managerOverrideAuditId: null });
     setReceiptEmail(
       booking?.guestEmail ||
         booking?.guest?.guestEmail ||
@@ -190,6 +199,45 @@ export default function CashierPaymentDialog({
   const changeDue = isCash && remainingAfterGift > 0 ? Math.max(0, tendered - remainingAfterGift) : 0;
   const isDraftSale = booking?.draftSale === true;
   const isBusy = isSubmitting || draftSubmitting || gcLooking || gcRedeeming;
+
+  // Tip is offered for the cash/check settle step (card tips are collected
+  // on the pin-pad). A tip is its own `tips`-table record now (decoupled
+  // from the tender), so it's offered EVEN when a gift card is applied —
+  // i.e. gift-card + cash/check split tender can still leave a tip.
+  const showTip = tipDefaults.enabled && (isCash || isCheck);
+  // Base the % buttons compute on: the amount being paid now, or the full
+  // booking total, per the location's calculateTipsOnBookingTotal setting.
+  const tipBase = computeTipBase({
+    subtotal: remainingAfterGift > 0 ? remainingAfterGift : payableBalance,
+    bookingTotal: Number(booking.totalAmount ?? balanceDue),
+    calcOnTotal: tipDefaults.calcOnBookingTotal,
+  });
+  const tipAmount = showTip ? roundMoney(tip.amount || 0) : 0;
+
+  // Record the tip as a dedicated `tips`-table row (no PaymentTransaction)
+  // once the booking exists and is paid. Non-fatal: the sale is complete
+  // regardless, so a failure just nudges the cashier to use "Add tip" later.
+  const recordTipIfAny = async (bid) => {
+    if (!bid || tipAmount <= 0 || !(isCash || isCheck)) return null;
+    try {
+      const res = await standaloneTip({
+        bookingId: bid,
+        tipAmount,
+        method: isCheck ? "check" : "cash",
+        allocation: tip.allocation,
+        defaultAllocation: tipDefaults.defaultAllocation,
+        managerOverrideAuditId: tip.managerOverrideAuditId || undefined,
+        source: "checkout",
+        idempotencyKey: sessionKey ? `${sessionKey}:tip` : `tip_${bid}`,
+      }).unwrap();
+      return res?.data || null;
+    } catch (err) {
+      toast.error(
+        `Payment recorded, but the tip didn't save (${err?.data?.message || err?.data?.error || "use Add tip on the booking"}).`
+      );
+      return null;
+    }
+  };
 
   const addTender = (v) => {
     const value = Number(v) || 0;
@@ -263,7 +311,6 @@ export default function CashierPaymentDialog({
     setGcApplied(null);
     setGcCard(null);
     setGcCode("");
-    setGcPin("");
     setAmount(method === "cash" ? "" : payableBalance.toFixed(2));
   };
 
@@ -393,7 +440,7 @@ export default function CashierPaymentDialog({
         // Redeem the gift-card portion (records its own payment on the booking).
         const gc = await redeemGiftCard({
           code: gcApplied.code,
-          pin: gcApplied.pin,
+          ...(gcApplied.pin ? { pin: gcApplied.pin } : {}),
           amount: giftApplied,
           bookingId,
           note: note || "POS gift card payment",
@@ -414,6 +461,9 @@ export default function CashierPaymentDialog({
           }).unwrap();
           if (isCash) openCashDrawer({ bookingId, terminal });
         }
+        // Tip rides on the cash/check remainder (gift-card + cash/check split).
+        // Decoupled from the tender — recorded as its own tips-table row.
+        await recordTipIfAny(bookingId);
         setComplete({
           ...(receiptInfo || {}),
           bookingId,
@@ -457,6 +507,7 @@ export default function CashierPaymentDialog({
         if (isCash && finalRecord > 0) {
           openCashDrawer({ bookingId: result?.bookingId || null, terminal });
         }
+        await recordTipIfAny(result?.bookingId);
         setComplete({
           ...(result || {}),
           amountPaid: roundMoney(finalRecord),
@@ -467,6 +518,7 @@ export default function CashierPaymentDialog({
           tenderedAmount: tendered,
           changeDue,
           checkNumber: isCheck ? checkNumber.trim() : null,
+          tipAmount,
           drawerOpened: isCash && finalRecord > 0,
         });
         toast.success(isCash ? `${moneyFmt(finalRecord)} recorded · drawer opened` : `${moneyFmt(finalRecord)} recorded`);
@@ -519,6 +571,7 @@ export default function CashierPaymentDialog({
       if (isCash && finalRecord > 0) {
         openCashDrawer({ bookingId: booking.bookingId, terminal });
       }
+      await recordTipIfAny(booking.bookingId);
       setComplete({
         ...(res?.data || {}),
         amountPaid: roundMoney(finalRecord + discountAmount),
@@ -529,6 +582,7 @@ export default function CashierPaymentDialog({
         tenderedAmount: tendered,
         changeDue,
         checkNumber: isCheck ? checkNumber.trim() : null,
+        tipAmount,
         drawerOpened: isCash && finalRecord > 0,
       });
       toast.success(isCash ? `${moneyFmt(finalRecord)} recorded · drawer opened` : `${moneyFmt(finalRecord)} recorded`);
@@ -673,6 +727,11 @@ export default function CashierPaymentDialog({
                 {complete.checkNumber ? ` · Check #${complete.checkNumber}` : ""}
                 {complete.discountAmount > 0 ? ` · ${moneyFmt(complete.discountAmount)} discount applied` : ""}
               </div>
+              {complete.tipAmount > 0 && (
+                <div style={{ fontSize: 13, fontWeight: 800, color: "#137A35", marginTop: 6 }}>
+                  + {moneyFmt(complete.tipAmount)} tip · {moneyFmt(roundMoney(complete.amountPaid + complete.tipAmount))} charged
+                </div>
+              )}
             </div>
             {/* Email receipt — type any address (walk-ins have none on file). */}
             {(booking?.bookingId || complete?.bookingId) && (
@@ -791,7 +850,6 @@ export default function CashierPaymentDialog({
                       onKeyDown={(e) => { if (e.key === "Enter") handleGcLookup(); }}
                       placeholder="Card code" autoComplete="off"
                       style={{ flex: 1, fontSize: 13, padding: "6px 8px", border: "1.5px solid var(--ink-200)", borderRadius: 6, fontFamily: "var(--font-mono)", fontWeight: 700 }} />
-                    {/* PIN input removed — venue policy doesn't issue PINs. */}
                     <button type="button" className="a-btn a-btn--secondary a-btn--sm" onClick={handleGcLookup}
                       disabled={gcLooking || !gcCode.trim()}>
                       {gcLooking ? "…" : "Look up"}
@@ -838,6 +896,16 @@ export default function CashierPaymentDialog({
                   })}
                 </div>
               </div>
+
+              {showTip && (
+                <TipStep
+                  base={tipBase}
+                  bookingId={booking?.bookingId || null}
+                  defaults={tipDefaults}
+                  value={tip}
+                  onChange={setTip}
+                />
+              )}
 
               <div style={{ marginTop: 14 }}>
                 <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: ".06em",

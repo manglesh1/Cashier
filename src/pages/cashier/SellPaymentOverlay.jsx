@@ -36,6 +36,7 @@ import { buildPaidCheckoutPricingSummary } from "./cartPricing";
 import CheckInPaymentModal from "./CheckInPaymentModal";
 import TerminalPaymentModal from "./TerminalPaymentModal";
 import TerminalProgressModal from "./TerminalProgressModal";
+import { useTipDefaults } from "../../features/tips/useTipDefaults";
 
 export default function SellPaymentOverlay({
   open,
@@ -54,6 +55,10 @@ export default function SellPaymentOverlay({
   // After atomic create+pay we know the real bookingId — store it so
   // receipt actions (print / email) can target the right booking.
   const [paidBooking, setPaidBooking] = useState(null);
+  // On-glass card tip: the allocation the cashier picked on the payment
+  // screen, handed to the card reader so the guest's tip is recorded to it.
+  const tipDefaults = useTipDefaults();
+  const [cardTipAllocation, setCardTipAllocation] = useState("booking_host");
 
   // ── Mutations ─────────────────────────────────────────────────────
   const [createBooking, { isLoading: creating }] = useCreateBookingMutation();
@@ -586,7 +591,7 @@ export default function SellPaymentOverlay({
       }
       const gc = await redeemGiftCard({
         code: String(code).trim(),
-        pin: String(pin).trim(),
+        ...(pin ? { pin: String(pin).trim() } : {}),
         amount: apply,
         bookingId: primary.bookingId,
         note: paymentNote || "POS gift card payment",
@@ -695,6 +700,8 @@ export default function SellPaymentOverlay({
         onEmailReceipt={handleEmailReceipt}
         isSendingReceipt={sendingReceipt}
         onClose={handleClose}
+        cardTipEnabled={tipDefaults.enabled}
+        onCardTip={setCardTipAllocation}
       />
       {terminalPayment && (
         <TerminalPaymentModal
@@ -710,6 +717,7 @@ export default function SellPaymentOverlay({
           readerId={getTerminal()?.settings?.terminalReaderId || undefined}
           sourceType="booking"
           sourceId={terminalPayment.bookingId}
+          tip={tipDefaults.enabled ? { allocation: cardTipAllocation, defaultAllocation: tipDefaults.defaultAllocation } : null}
           onApproved={(result) => {
             const data = result?.transaction || result?.data || result || {};
             setPaymentComplete({
