@@ -21,6 +21,8 @@ import { useGetBookingTicketsQuery } from "../../features/tickets/ticketApi";
 import { moneyFmt } from "../../lib/money";
 import { printReceipt } from "../../lib/hardware";
 import { getTerminal } from "../../lib/terminal";
+import { useTipDefaults } from "../../features/tips/useTipDefaults";
+import AddTipModal from "../../features/tips/AddTipModal";
 
 // ── Status helpers ────────────────────────────────────────────────
 const sinceLabel = (iso) => {
@@ -434,10 +436,11 @@ function BookingSummary({ booking }) {
 }
 
 // ── Status header — the "next action" strip ───────────────────────
-function StatusHeader({ booking, ticketSummary }) {
+function StatusHeader({ booking, ticketSummary, onAddTip }) {
   const total = ticketSummary?.total || 0;
   const redeemed = ticketSummary?.redeemed || 0;
   const owing = Math.max(0, Number(booking?.totalAmount || 0) - Number(booking?.amountPaid || 0));
+  const tipDefaults = useTipDefaults();
 
   return (
     <div style={{
@@ -481,6 +484,13 @@ function StatusHeader({ booking, ticketSummary }) {
           style={{ justifyContent: "center", padding: "12px 16px", fontSize: 14 }}>
           <Icon name="printer" size={16} /> Reprint
         </button>
+        {tipDefaults.enabled && (
+          <button type="button" className="a-btn a-btn--ghost"
+            onClick={onAddTip}
+            style={{ justifyContent: "center", padding: "12px 16px", fontSize: 14 }}>
+            <Icon name="hand-coins" size={16} /> Add tip
+          </button>
+        )}
       </div>
     </div>
   );
@@ -489,6 +499,7 @@ function StatusHeader({ booking, ticketSummary }) {
 // ── Main screen ───────────────────────────────────────────────────
 export default function BookingDetail() {
   const [bookingId, setBookingId] = useState(null);
+  const [tipOpen, setTipOpen] = useState(false);
 
   const { data: bookingData, isFetching: isLoadingBooking } =
     useGetBookingByIdQuery(bookingId, { skip: !bookingId });
@@ -534,10 +545,14 @@ export default function BookingDetail() {
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
         <BookingSummary booking={booking} />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <StatusHeader booking={booking} ticketSummary={summary} />
+          <StatusHeader booking={booking} ticketSummary={summary} onAddTip={() => setTipOpen(true)} />
           <ItemsList tickets={tickets} />
         </div>
       </div>
+
+      {tipOpen && booking && (
+        <AddTipModal booking={booking} onClose={() => setTipOpen(false)} />
+      )}
     </div>
   );
 }

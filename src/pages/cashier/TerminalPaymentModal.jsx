@@ -15,6 +15,7 @@
 // account currency (a US account needs USD even for a CAD venue).
 
 import React, { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { moneyFmt } from "../../lib/money";
 import {
@@ -22,6 +23,10 @@ import {
   useLazyGetTerminalStatusQuery,
   useCancelTerminalPaymentMutation,
 } from "../../features/payments/terminalApi";
+import { useTipDefaults } from "../../features/tips/useTipDefaults";
+import { useCheckTipOverrideMutation } from "../../features/tips/tipsApi";
+import { TIP_ALLOCATIONS } from "../../features/tips/tipMath";
+import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 
 const POLL_MS = 2500;
 const TIMEOUT_MS = 90000; // give up waiting for the tap after 90s
@@ -41,9 +46,16 @@ export default function TerminalPaymentModal({
   readerId, // optional legacy override; backend prefers the till's default reader
   sourceType = "booking",
   sourceId = null,
+  // Optional on-glass tip context. When present (e.g. { allocation,
+  // defaultAllocation, recordedByUserId, managerOverrideAuditId }), the
+  // backend creates a 'held' tip placeholder and the pin-pad prompts the
+  // guest; the capture write-back records the tip against the chosen
+  // recipient. The guest enters the amount on the device, so we don't
+  // send one here.
+  tip = null,
   onApproved,
 }) {
-  // starting | waiting | approved | declined | error | cancelled
+  // tip | starting | waiting | approved | declined | error | cancelled
   const [phase, setPhase] = useState("starting");
   const [transactionId, setTransactionId] = useState(null);
   const [message, setMessage] = useState("");
@@ -58,6 +70,17 @@ export default function TerminalPaymentModal({
   const [triggerStatus] = useLazyGetTerminalStatusQuery();
   const [cancelPayment] = useCancelTerminalPaymentMutation();
 
+  // On-glass tip. When the location enables tipping AND the caller didn't
+  // already pass a fixed `tip`, we show a quick "who gets the tip" step
+  // before starting the sale; the guest enters the AMOUNT on the reader.
+  const tipDefaults = useTipDefaults();
+  const [checkTipOverride] = useCheckTipOverrideMutation();
+  const [tipAllocation, setTipAllocation] = useState(tipDefaults.defaultAllocation || "booking_host");
+  const [tipManagerAuditId, setTipManagerAuditId] = useState(null);
+  const [tipManagerOpen, setTipManagerOpen] = useState(false);
+  const [pendingAlloc, setPendingAlloc] = useState(null);
+  const collectTip = !!tipDefaults.enabled && !(tip && tip.allocation);
+
   function clearTimers() {
     if (pollRef.current) clearInterval(pollRef.current);
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
@@ -65,7 +88,37 @@ export default function TerminalPaymentModal({
     timeoutRef.current = null;
   }
 
-  // Kick off the payment when the modal opens.
+  // Start the terminal sale. `tipContext` is the on-glass tip allocation
+  // (no amount — the guest enters it on the reader), or null for no tip.
+  const beginStart = async (tipContext) => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    setPhase("starting");
+    try {
+      const res = await startPayment({
+        locationId,
+        amount: Number(amount),
+        currency: currency || undefined,
+        posDeviceId: posDeviceId || undefined,
+        readerId: readerId || undefined,
+        sourceType,
+        sourceId,
+        // On-glass tip: forwarded only when an allocation was chosen
+        // (either passed by the caller or collected in the tip step).
+        ...(tipContext && tipContext.allocation ? { tip: tipContext } : {}),
+        idempotencyKey: newIdempotencyKey(sourceType, sourceId),
+      }).unwrap();
+      setTransactionId(res.transaction?.transactionId || res.transactionId);
+      setPhase("waiting");
+      setMessage(res.instructions || "Ask the customer to tap their card on the reader.");
+    } catch (err) {
+      setPhase("error");
+      setMessage(err?.data?.message || err?.data?.error || err?.error || "Could not start the terminal payment.");
+    }
+  };
+
+  // When the modal opens: collect the tip allocation first if tipping is
+  // on (and the caller didn't pre-set one); otherwise start immediately.
   useEffect(() => {
     if (!open) {
       // reset for next open
@@ -75,35 +128,49 @@ export default function TerminalPaymentModal({
       setPhase("starting");
       setTransactionId(null);
       setMessage("");
+      setTipAllocation(tipDefaults.defaultAllocation || "booking_host");
+      setTipManagerAuditId(null);
       return;
     }
-    if (startedRef.current) return;
-    startedRef.current = true;
-
-    (async () => {
-      try {
-        const res = await startPayment({
-          locationId,
-          amount: Number(amount),
-          currency: currency || undefined,
-          posDeviceId: posDeviceId || undefined,
-          readerId: readerId || undefined,
-          sourceType,
-          sourceId,
-          idempotencyKey: newIdempotencyKey(sourceType, sourceId),
-        }).unwrap();
-        setTransactionId(res.transaction?.transactionId || res.transactionId);
-        setPhase("waiting");
-        setMessage(res.instructions || "Ask the customer to tap their card on the reader.");
-      } catch (err) {
-        setPhase("error");
-        setMessage(err?.data?.message || err?.data?.error || err?.error || "Could not start the terminal payment.");
-      }
-    })();
-
+    if (startedRef.current || phase === "tip") return;
+    if (collectTip) {
+      setPhase("tip");
+    } else {
+      beginStart(tip && tip.allocation ? tip : null);
+    }
     return () => clearTimers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Tip-step allocation change — manager-PIN gate for self-assigning a
+  // host tip (§5.1), mirroring TipStep.
+  const selectTipAllocation = async (next) => {
+    if (next === tipAllocation) return;
+    try {
+      const r = await checkTipOverride({
+        defaultAllocation: tipDefaults.defaultAllocation,
+        toAllocation: next,
+        bookingId: sourceType === "booking" ? sourceId : null,
+      }).unwrap();
+      if (r?.data?.requiresManagerCode) {
+        setPendingAlloc(next);
+        setTipManagerOpen(true);
+        return;
+      }
+      setTipAllocation(next);
+      setTipManagerAuditId(null);
+    } catch (err) {
+      toast.error(err?.data?.message || "Could not validate tip allocation.");
+    }
+  };
+
+  const startWithTip = () =>
+    beginStart({
+      allocation: tipAllocation,
+      defaultAllocation: tipDefaults.defaultAllocation,
+      managerOverrideAuditId: tipManagerAuditId || undefined,
+    });
+  const startWithoutTip = () => beginStart(null);
 
   // Poll for status while waiting.
   useEffect(() => {
@@ -237,6 +304,45 @@ export default function TerminalPaymentModal({
           {moneyFmt(amount)}{currency ? ` ${String(currency).toUpperCase()}` : ""}
         </div>
 
+        {phase === "tip" ? (
+          // ── Tip allocation step (the guest enters the amount on the reader) ──
+          <div style={{ textAlign: "left" }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "var(--ink-700,#334155)", marginBottom: 8, textAlign: "center" }}>
+              Add a tip on the card reader?
+            </div>
+            <div style={{ fontSize: 12, color: "var(--ink-500,#64748B)", marginBottom: 12, textAlign: "center" }}>
+              The guest enters the tip amount on the device. Choose who it goes to:
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+              {TIP_ALLOCATIONS.map((opt) => (
+                <label key={opt.value} style={{
+                  display: "flex", alignItems: "center", gap: 8, fontSize: 14,
+                  cursor: "pointer", padding: "8px 10px", borderRadius: 10,
+                  border: `1.5px solid ${tipAllocation === opt.value ? "#16A34A" : "var(--ink-200,#e2e8f0)"}`,
+                  background: tipAllocation === opt.value ? "#16A34A14" : "white",
+                }}>
+                  <input type="radio" name="terminalTipAllocation"
+                    checked={tipAllocation === opt.value}
+                    onChange={() => selectTipAllocation(opt.value)} />
+                  {opt.label}
+                </label>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" className="a-btn"
+                onClick={startWithoutTip}
+                style={{ flex: 1, justifyContent: "center", minHeight: 48, border: "1px solid var(--ink-200,#e2e8f0)", background: "white" }}>
+                No tip
+              </button>
+              <button type="button" className="a-btn a-btn--primary"
+                onClick={startWithTip}
+                style={{ flex: 1, justifyContent: "center", minHeight: 48 }}>
+                <Icon name="credit-card" size={16} /> Start
+              </button>
+            </div>
+          </div>
+        ) : (
+        <>
         <div style={{
           width: 76, height: 76, borderRadius: "50%", margin: "0 auto 14px",
           display: "flex", alignItems: "center", justifyContent: "center",
@@ -274,6 +380,26 @@ export default function TerminalPaymentModal({
             </button>
           )}
         </div>
+        </>
+        )}
+
+        <ManagerOverridePrompt
+          open={tipManagerOpen}
+          title="Manager approval — reassign host tip"
+          description="Sending the booking host's tip to yourself needs a manager PIN."
+          action="tip_allocation_override"
+          targetType="booking"
+          targetId={sourceId || "sale"}
+          payload={{ from: tipDefaults.defaultAllocation, to: pendingAlloc }}
+          defaultReason="Cashier self-assigned a host tip (card)"
+          onCancel={() => { setTipManagerOpen(false); setPendingAlloc(null); }}
+          onApprove={(audit) => {
+            setTipAllocation(pendingAlloc);
+            setTipManagerAuditId(audit?.auditId || null);
+            setTipManagerOpen(false);
+            setPendingAlloc(null);
+          }}
+        />
         {/* Card-present approval happens ON THE DEVICE (the Terminal Simulator
             app or a real reader) — the cashier just waits for the result. No
             in-cashier "simulate tap" shortcut. */}

@@ -6,6 +6,7 @@ import { usePreviewVoucherCoverageMutation } from "../../features/benefits/benef
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 import ApplyBenefitFlyout from "./ApplyBenefitFlyout";
+import AddTipModal from "../../features/tips/AddTipModal";
 
 // Compute a member benefit discount amount from applied member benefits.
 // Reads the todaysBenefits[] array on the applied member and walks each
@@ -195,6 +196,7 @@ export function CartPanel({
   // surfaces a flat 10% as a fallback when no benefits[] are loaded
   // (during the transition before the scan flow is the default).
   const [benefitFlyoutOpen, setBenefitFlyoutOpen] = useState(false);
+  const [takeTipOpen, setTakeTipOpen] = useState(false);
   const [appliedBenefits, setAppliedBenefits] = useState({
     promo: null,
     member: null,
@@ -1069,6 +1071,25 @@ export function CartPanel({
             </button>
           )}
         </div>
+
+        {/* Walk-in / no-booking tip: a guest hands over a tip with no sale. */}
+        {settings.enableTipping && (
+          <div style={{ marginTop: 8 }}>
+            <button
+              type="button"
+              onClick={() => setTakeTipOpen(true)}
+              className="a-btn a-btn--ghost a-btn--sm"
+              style={{ width: "100%", justifyContent: "center" }}
+              title="Record a tip with no booking"
+            >
+              <Icon name="hand-coins" size={16} /> Take a tip
+            </button>
+          </div>
+        )}
+
+        {takeTipOpen && (
+          <AddTipModal booking={null} onClose={() => setTakeTipOpen(false)} />
+        )}
 
         <ApplyBenefitFlyout
           open={benefitFlyoutOpen}

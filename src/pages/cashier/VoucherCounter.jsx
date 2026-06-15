@@ -375,14 +375,14 @@ export function VoucherCounter() {
   };
 
   const handleGcLookup = async () => {
-    if (!gcCode.trim() || !gcPin.trim()) {
-      toast.error("Code and PIN required");
+    if (!gcCode.trim()) {
+      toast.error("Enter gift card code");
       return;
     }
     try {
       const res = await gcLookup({
         code: gcCode.trim().toUpperCase(),
-        pin: gcPin.trim(),
+        ...(gcPin.trim() ? { pin: gcPin.trim() } : {}),
       }).unwrap();
       const card = res?.data;
       if (!card) {
@@ -428,7 +428,7 @@ export function VoucherCounter() {
     try {
       const res = await gcRedeem({
         code: gcCard.code,
-        pin: gcPin.trim(),
+        ...(gcPin.trim() ? { pin: gcPin.trim() } : {}),
         amount,
       }).unwrap();
       const data = res?.data || {};
@@ -813,7 +813,7 @@ function GiftCardLookup({
           <input
             value={gcPin}
             onChange={(event) => setGcPin(event.target.value.replace(/\D/g, ""))}
-            placeholder="PIN"
+            placeholder="PIN optional"
             inputMode="numeric"
             maxLength={4}
             autoComplete="off"
@@ -824,7 +824,7 @@ function GiftCardLookup({
             type="button"
             className="a-btn a-btn--primary"
             onClick={handleGcLookup}
-            disabled={gcLooking || !gcCode.trim() || !gcPin.trim()}
+            disabled={gcLooking || !gcCode.trim()}
           >
             <Icon name="search" size={18} />
             {gcLooking ? "Looking" : "Look up"}

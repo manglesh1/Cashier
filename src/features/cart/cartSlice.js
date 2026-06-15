@@ -9,12 +9,18 @@ import { createSlice, nanoid } from "@reduxjs/toolkit";
 // stays in component useState — we explicitly do NOT want a half-open payment
 // dialog or in-progress schedule picker to survive a refresh.
 
+const EMPTY_BENEFITS = { promo: null, member: null, vouchers: [], payments: [] };
+
 const initialState = {
   items: [],
   cartCustomer: null,
   waiversAttached: [],
   ticketAssignments: {},
-  appliedBenefits: { promo: null, member: null, vouchers: [], payments: [] },
+  // Benefits/tenders staged in the cart before checkout (coupon/member
+  // discount, applied vouchers, partial payments). Shape:
+  // { promo, member, vouchers: [], payments: [] }. Read in CashierApp with
+  // a default fallback, so an older persisted cart without it still works.
+  appliedBenefits: EMPTY_BENEFITS,
   // Stable key for the current checkout attempt. Reused across retries
   // (so a duplicate createBooking on flaky wifi is deduped by the backend),
   // rotated on success or when the cashier explicitly clears the cart.
@@ -37,8 +43,10 @@ const cartSlice = createSlice({
     setTicketAssignments: (state, action) => {
       state.ticketAssignments = action.payload;
     },
+    // Replace the staged benefits/tenders. CashierApp resolves any
+    // functional updater before dispatch, so the payload is the final object.
     setAppliedBenefits: (state, action) => {
-      state.appliedBenefits = action.payload;
+      state.appliedBenefits = action.payload || EMPTY_BENEFITS;
     },
     // Generate a key if we don't have one yet. Called at the start of every
     // checkout so the same payload retried twice carries the same key.

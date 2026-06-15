@@ -1408,7 +1408,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       }
       const gc = await redeemGiftCard({
         code: String(code).trim(),
-        pin: String(pin).trim(),
+        ...(pin ? { pin: String(pin).trim() } : {}),
         amount: apply,
         bookingId: booking.bookingId,
         note: paymentNote || "POS gift card payment",

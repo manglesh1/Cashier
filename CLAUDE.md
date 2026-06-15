@@ -339,6 +339,43 @@ Any scanned code flows through **one** pipeline: `scan → resolve → [redeemab
   from prepending the previous meta onto the new one — which used to compound
   the label on every edit (e.g. three time ranges stacked on one line).
 
+## Tips (gratuity)
+- **Module:** `src/features/tips/` — `TipStep.jsx` (the in-checkout selector),
+  `tipsApi.js` (`standaloneTip`, `checkTipOverride`), `useTipDefaults.js`
+  (reads `useEffectiveSettings`), `tipMath.js` (client mirror of backend math).
+- **Tip never changes the booking total.** The checkout tip is recorded as a
+  **dedicated `tips`-table row** (NOT a PaymentTransaction; `source:'checkout'`)
+  via `POST /api/tips/standalone` AFTER the payment succeeds — so the payment hot
+  path (`recordPayment`) is untouched and balance/paidAmount exclude tip. (Walk-in
+  tips have no booking — `booking_id` is null on the tips row, never on a
+  booking/payment. Backend design doc §18.)
+- **Where:** `<TipStep>` (cash + check) is wired into THREE surfaces:
+  - `CashierPaymentDialog` (sell + find take-payment) — records tip after the
+    payment succeeds.
+  - `CheckInPaymentModal` — a controlled/dumb modal, so the tip records itself
+    in a `useEffect` that fires when the parent flips `complete` (ref +
+    idempotency guard `tip-checkin:<bookingId>:<ref>`); no change to
+    `CheckIn.jsx`'s payment handler.
+  - `BookingDetail` "Add tip" button → `features/tips/AddTipModal.jsx` (the
+    §6.7 "added later" flow, `source='added_later'`).
+  Gated `enableTipping && (cash||check)`. **Card tips are on the pin-pad
+  (on-glass):** `TerminalPaymentModal` collects the allocation (who gets it),
+  the guest enters the amount on the reader; the backend holds a placeholder
+  and fills it in on capture. **Tip on any tender:** the Tip step now shows
+  even when a gift card is applied (gift-card + cash/check split tender can
+  leave a tip — it's a decoupled `tips` row, not part of the tender), and the
+  gift-card completion path records it. Receipt shows "+ $X tip · $Y charged".
+- **Allocation + PIN:** `booking_host` | `logged_in_staff` | `general_pool`,
+  default from `defaultTipAllocation`. Self-assigning a host's tip needs a
+  manager PIN — `TipStep` pre-checks via `/tips/override-allowed` and reuses
+  `ManagerOverridePrompt` (passes the returned `auditId` as
+  `managerOverrideAuditId`). Backend spec: `aeroSportsAdmin/docs/design-tip-handling.md`.
+- **Tip settings now reach the till:** `mergeSettings` emits all 5 fields incl.
+  `calculateTipsOnBookingTotal` + `defaultTipAllocation` (were dropped before).
+- **Pending:** pure-gift-card-covers-all + tip (no cash/check remainder to ride
+  on — use the cart "Take a tip" button or BookingDetail "Add tip"); refund →
+  auto-void tip (backend 1F, owner-deferred).
+
 ## Known gaps / TODO
 - **Check** payment method has no check-number capture (records a "check"
   payment only). Gift card is now fully implemented (see Key flows).
