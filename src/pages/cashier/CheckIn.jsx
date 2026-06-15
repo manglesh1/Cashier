@@ -213,7 +213,21 @@ export function CheckIn() {
         }
       } catch (err) {
         if (err?.status === 404 || err?.data?.statusCode === 404) {
-          toast.error(`Wristband ${uid} not recognised`);
+          // Unbound scan is a soft state, not an error — the cashier
+          // tapped a fresh wristband, the system just hasn't been told
+          // which guest it belongs to yet. Use toast.message (neutral
+          // tone) with last 6 chars of the UID so it doesn't read as
+          // "the system rejected your scan". The actionable hint
+          // points at the bind affordance on the ticket row.
+          const shortUid = uid.length > 6 ? uid.slice(-6) : uid;
+          toast.message(
+            `Wristband ${shortUid} not bound yet`,
+            {
+              description:
+                "Open a booking and tap Bind wristband on a ticket row to register this band.",
+              duration: 4000,
+            }
+          );
         } else {
           // 403 / 500 / etc — let the cashier know without details.
           toast.error(
@@ -2865,6 +2879,13 @@ function TicketWristbandBind({
   onChanged,
 }) {
   const [armed, setArmed] = React.useState(false);
+  // Optimistic UID — set the instant a scan lands so the pill flips
+  // to bound BEFORE the network round-trip + booking-tickets refetch
+  // (which can be 300–500ms on a big party). Cleared on bind failure,
+  // confirmed by the server-pushed wristbandNumber prop once the
+  // refetch lands.
+  const [optimisticUid, setOptimisticUid] = React.useState(null);
+  const effectiveUid = wristbandNumber || optimisticUid;
   const [bind, { isLoading: binding }] = useBindWristbandMutation();
   const [unbind] = useUnbindWristbandMutation();
 
@@ -2878,6 +2899,14 @@ function TicketWristbandBind({
     return () => disarmParticipant(participantId);
   }, [armed, participantId]);
 
+  // Once the server-trusted wristbandNumber catches up to our optimistic
+  // value, clear the optimistic copy so re-renders don't keep both.
+  React.useEffect(() => {
+    if (wristbandNumber && optimisticUid && wristbandNumber.toUpperCase() === optimisticUid.toUpperCase()) {
+      setOptimisticUid(null);
+    }
+  }, [wristbandNumber, optimisticUid]);
+
   // Listen for the next RFID scan when armed; bind it to this
   // ticket's participant.
   React.useEffect(() => {
@@ -2887,22 +2916,28 @@ function TicketWristbandBind({
       if (detail.source !== "rfid") return;
       const uid = String(detail.code || "").trim();
       if (!uid) return;
+      // Flip the UI immediately. If the bind fails downstream we'll
+      // revert; in the common-case happy path the cashier sees a
+      // bound pill within a frame of the tap.
+      setOptimisticUid(uid.toUpperCase());
+      setArmed(false);
       bind({ bookingId, participantId, rfidUid: uid })
         .unwrap()
         .then((res) => {
           toast.success(
             `Bound ${res?.data?.rfidUid || uid} → ${participantName || "guest"}`
           );
-          setArmed(false);
           onChanged?.();
         })
         .catch((err) => {
+          // Revert the optimistic flip and re-arm so the cashier can
+          // either retry or take corrective action (e.g. wristband
+          // already bound elsewhere → ask previous holder).
+          setOptimisticUid(null);
+          setArmed(true);
           toast.error(
             err?.data?.message || err?.data?.error || "Could not bind wristband"
           );
-          // Stay armed so the cashier can re-tap once they resolve
-          // the issue (e.g. wristband already bound, ask previous
-          // holder to return it).
         });
     };
     window.addEventListener("cashier:scan", onScan);
@@ -2926,13 +2961,13 @@ function TicketWristbandBind({
   };
 
   // BOUND
-  if (wristbandNumber) {
+  if (effectiveUid) {
     const shortUid =
-      wristbandNumber.length > 8 ? wristbandNumber.slice(-6) : wristbandNumber;
+      effectiveUid.length > 8 ? effectiveUid.slice(-6) : effectiveUid;
     return (
       <div style={{ marginTop: 6, marginLeft: 8, display: "inline-flex", alignItems: "center", gap: 4 }}>
         <span
-          title={`Wristband · ${wristbandNumber}`}
+          title={`Wristband · ${effectiveUid}`}
           style={{
             display: "inline-flex", alignItems: "center", gap: 4,
             padding: "2px 8px",

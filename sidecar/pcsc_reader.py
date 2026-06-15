@@ -27,7 +27,7 @@ import time
 
 try:
     from smartcard.System import readers
-    from smartcard.util import toHexString
+    from smartcard.CardMonitoring import CardMonitor, CardObserver
     from smartcard.CardConnection import CardConnection
     from smartcard.Exceptions import (
         NoCardException,
@@ -44,6 +44,11 @@ except ImportError:
 
 
 GET_DATA_UID = [0xFF, 0xCA, 0x00, 0x00, 0x00]
+# Hold-down debounce: if the same UID fires twice within this window,
+# the second emit is dropped. 250 ms is long enough to coalesce the
+# inevitable double-fire when a tag jiggles on the reader, short
+# enough that lift-and-retap (~400 ms human cadence) still emits.
+HOLD_DEBOUNCE_MS = 250
 
 
 def emit(obj):
@@ -53,82 +58,85 @@ def emit(obj):
     sys.stdout.flush()
 
 
-def pick_picc_reader(reader_list):
-    """ACR122U typically exposes two readers — pick the PICC one.
-    Other PC/SC readers expose just one; the regex falls through."""
-    for r in reader_list:
-        name = str(r)
-        if "PICC" in name.upper() or "ACR122" in name.upper():
-            return r
-    return reader_list[0] if reader_list else None
+def read_uid(card):
+    """Connect to the card, transmit GET DATA UID, return the UID as
+    uppercase hex or None on failure. Always disconnects."""
+    connection = card.createConnection()
+    try:
+        connection.connect(CardConnection.T0_protocol | CardConnection.T1_protocol)
+        data, sw1, sw2 = connection.transmit(GET_DATA_UID)
+        if (sw1, sw2) == (0x90, 0x00) and data:
+            return "".join(f"{b:02X}" for b in data)
+        return None
+    except (NoCardException, CardConnectionException, SmartcardException):
+        return None
+    finally:
+        try:
+            connection.disconnect()
+        except Exception:
+            pass
+
+
+class TagObserver(CardObserver):
+    """Event-driven card observer. pyscard fires `update` the instant a
+    card is inserted into ANY connected reader — no polling, no per-cycle
+    reconnect. This trims ~100ms of perceived latency off every tap
+    versus the previous poll-based implementation."""
+
+    def __init__(self):
+        self.last_uid = None
+        self.last_uid_at_ms = 0
+
+    def update(self, observable, actions):
+        added, _removed = actions
+        for card in added:
+            uid = read_uid(card)
+            if not uid:
+                continue
+            now_ms = int(time.time() * 1000)
+            # Debounce same-UID double-emit (tag jiggle, OS-level
+            # spurious insert events).
+            if uid == self.last_uid and (now_ms - self.last_uid_at_ms) < HOLD_DEBOUNCE_MS:
+                continue
+            self.last_uid = uid
+            self.last_uid_at_ms = now_ms
+            emit({"type": "scan", "uid": uid})
 
 
 def main():
-    last_uid = None
-    last_uid_at = 0.0
-    current_reader_name = None
+    # Surface initial reader-status so the sidecar status panel reflects
+    # whether the ACS driver is installed and the reader is plugged in.
+    reader_list = readers()
+    if not reader_list:
+        emit({"type": "status", "state": "no_readers"})
+    else:
+        emit({"type": "status", "state": "ready", "reader": str(reader_list[0])})
 
-    while True:
+    monitor = CardMonitor()
+    observer = TagObserver()
+    monitor.addObserver(observer)
+
+    try:
+        # Park the main thread; the CardMonitor runs on its own thread
+        # and calls observer.update on tag events. We only wake to surface
+        # status changes if the reader population shifts.
+        last_reader_count = len(reader_list)
+        while True:
+            time.sleep(2.0)
+            current = readers()
+            if len(current) != last_reader_count:
+                last_reader_count = len(current)
+                if not current:
+                    emit({"type": "status", "state": "no_readers"})
+                else:
+                    emit({"type": "status", "state": "ready", "reader": str(current[0])})
+    except KeyboardInterrupt:
+        emit({"type": "status", "state": "stopping"})
+    finally:
         try:
-            reader_list = readers()
-            if not reader_list:
-                emit({"type": "status", "state": "no_readers"})
-                time.sleep(2)
-                continue
-
-            reader = pick_picc_reader(reader_list)
-            if reader is None:
-                emit({"type": "status", "state": "no_picc_reader"})
-                time.sleep(2)
-                continue
-
-            reader_name = str(reader)
-            if reader_name != current_reader_name:
-                current_reader_name = reader_name
-                emit({"type": "status", "state": "ready", "reader": reader_name})
-
-            # Open connection on each poll loop. The ACR122U doesn't
-            # support persistent connections without a card present;
-            # connect-on-demand is the documented approach.
-            connection = reader.createConnection()
-            try:
-                connection.connect(CardConnection.T0_protocol | CardConnection.T1_protocol)
-                data, sw1, sw2 = connection.transmit(GET_DATA_UID)
-                if (sw1, sw2) == (0x90, 0x00) and data:
-                    uid = "".join(f"{b:02X}" for b in data)
-                    now = time.time()
-                    # Debounce: if the same UID was just emitted in the
-                    # last second, treat it as a held card and skip the
-                    # duplicate. The user lifting and re-tapping starts
-                    # a fresh emit.
-                    if uid != last_uid or (now - last_uid_at) > 1.0:
-                        emit({"type": "scan", "uid": uid})
-                        last_uid = uid
-                        last_uid_at = now
-            except NoCardException:
-                # No card present this poll cycle — perfectly normal.
-                last_uid = None
-            except (CardConnectionException, SmartcardException) as e:
-                # Card pulled mid-read, comms glitch, etc. Reset and try again.
-                last_uid = None
-                # Don't spam status; only emit if persistent.
-            finally:
-                try:
-                    connection.disconnect()
-                except Exception:
-                    pass
-
-            # Tight loop — 100 ms is responsive without busy-waiting.
-            time.sleep(0.1)
-
-        except KeyboardInterrupt:
-            emit({"type": "status", "state": "stopping"})
-            return
-        except Exception as e:
-            # Top-level safety net: surface to stderr, keep running.
-            sys.stderr.write(f"[pcsc_reader] {type(e).__name__}: {e}\n")
-            emit({"type": "error", "msg": str(e)})
-            time.sleep(1)
+            monitor.deleteObserver(observer)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
