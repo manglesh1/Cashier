@@ -53,6 +53,11 @@ export default function ManagerOverridePrompt({
         method: "POST",
         headers: {
           "content-type": "application/json",
+          // Mark this as the Cashier (plaintext) client so the backend skips
+          // encryption — without it the response is AES-encrypted in prod and
+          // body.success is unreadable, so every override is read as rejected.
+          // Same header the RTK baseApi sets on every request.
+          "x-client-app": "cashier",
           ...(token ? { authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({ pin, action, targetType, targetId, reason, payload }),

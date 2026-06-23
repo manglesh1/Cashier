@@ -1074,12 +1074,55 @@ export function CashierApp() {
     data: presetData,
     isLoading: presetLoading,
     error: presetError,
-  } = useGetPresetFullQuery(templateId, { skip: !templateId });
+  } = useGetPresetFullQuery(templateId, {
+    skip: !templateId,
+    refetchOnFocus: true,
+    refetchOnReconnect: true,
+    refetchOnMountOrArgChange: true,
+  });
 
   const sections = useMemo(
     () => normalizePresetSections(presetData?.data || presetData),
     [presetData]
   );
+
+  const sellableGiftCardActivityIds = useMemo(() => {
+    const ids = new Set();
+    for (const section of sections || []) {
+      for (const item of section.items || []) {
+        if (String(item?.productType || "").toLowerCase() === "gift_card") {
+          const id = Number(item.activityId);
+          if (Number.isFinite(id)) ids.add(id);
+        }
+      }
+    }
+    return ids;
+  }, [sections]);
+
+  useEffect(() => {
+    if (!templateId || presetLoading || presetError) return;
+    const staleGiftCards = items.filter((item) => {
+      if (String(item?.productType || "").toLowerCase() !== "gift_card") return false;
+      const id = Number(item.activityId);
+      return !Number.isFinite(id) || !sellableGiftCardActivityIds.has(id);
+    });
+    if (!staleGiftCards.length) return;
+    setItems((prev) =>
+      prev.filter((item) => {
+        if (String(item?.productType || "").toLowerCase() !== "gift_card") return true;
+        const id = Number(item.activityId);
+        return Number.isFinite(id) && sellableGiftCardActivityIds.has(id);
+      })
+    );
+    toast.error("Removed inactive gift card from cart.");
+  }, [
+    items,
+    presetError,
+    presetLoading,
+    sellableGiftCardActivityIds,
+    setItems,
+    templateId,
+  ]);
 
   // ── Cart actions ──────────────────────────────────────────────────
   const buildCartLine = (productItem, section) => {
