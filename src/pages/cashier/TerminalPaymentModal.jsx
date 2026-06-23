@@ -53,6 +53,12 @@ export default function TerminalPaymentModal({
   // recipient. The guest enters the amount on the device, so we don't
   // send one here.
   tip = null,
+  // Optional TIP-ONLY card charge (a standalone gratuity, no sale). When set
+  // (e.g. { allocation, defaultAllocation, bookingId?, managerOverrideAuditId? }),
+  // the whole `amount` IS the tip: we skip the on-glass step and send
+  // sourceType:'tip' + metadata.tip so the backend tip finalizer records it on
+  // capture. Never affects a booking balance.
+  tipOnly = null,
   onApproved,
 }) {
   // tip | starting | waiting | approved | declined | error | cancelled
@@ -79,7 +85,9 @@ export default function TerminalPaymentModal({
   const [tipManagerAuditId, setTipManagerAuditId] = useState(null);
   const [tipManagerOpen, setTipManagerOpen] = useState(false);
   const [pendingAlloc, setPendingAlloc] = useState(null);
-  const collectTip = !!tipDefaults.enabled && !(tip && tip.allocation);
+  // A tip-only charge never shows the on-glass "who gets it" step (the cashier
+  // already chose the recipient + amount in the Take-a-tip modal).
+  const collectTip = !tipOnly && !!tipDefaults.enabled && !(tip && tip.allocation);
 
   function clearTimers() {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -106,6 +114,9 @@ export default function TerminalPaymentModal({
         // On-glass tip: forwarded only when an allocation was chosen
         // (either passed by the caller or collected in the tip step).
         ...(tipContext && tipContext.allocation ? { tip: tipContext } : {}),
+        // Tip-only card charge: the whole amount is the gratuity. Carries the
+        // recipient on metadata.tip; the backend tip finalizer records it.
+        ...(tipOnly ? { metadata: { tip: tipOnly } } : {}),
         idempotencyKey: newIdempotencyKey(sourceType, sourceId),
       }).unwrap();
       setTransactionId(res.transaction?.transactionId || res.transactionId);

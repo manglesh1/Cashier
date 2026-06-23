@@ -9,14 +9,17 @@ export const discountApi = baseApi.injectEndpoints({
       query: (request) => {
         const payload = typeof request === "string" ? { code: request } : request || {};
         const code = String(payload.code || "").trim();
+        // override=1 → manager-approved apply: backend returns the discount
+        // bypassing the normal eligibility check.
+        const override = payload.override ? "&override=1" : "";
         const hasPricingContext =
           Number(payload.subtotalAmount || 0) > 0 ||
           (Array.isArray(payload.cartLines) && payload.cartLines.length > 0);
         if (!hasPricingContext) {
-          return `/promos/validate/${encodeURIComponent(code)}?channel=POS`;
+          return `/promos/validate/${encodeURIComponent(code)}?channel=POS${override}`;
         }
         return {
-          url: `/promos/validate/${encodeURIComponent(code)}?channel=POS`,
+          url: `/promos/validate/${encodeURIComponent(code)}?channel=POS${override}`,
           method: "POST",
           body: {
             subtotalAmount: payload.subtotalAmount || 0,

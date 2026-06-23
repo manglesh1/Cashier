@@ -60,6 +60,10 @@ function computeDiscountAmount(discount, subtotal) {
   return Math.min(value, subtotal);
 }
 
+function isGiftCardSaleLine(item) {
+  return String(item?.productType || item?.activityTypeKey || "").toLowerCase() === "gift_card";
+}
+
 // Fallback only — paired terminal/location settings should provide the
 // real tax rate. St. Catharines uses Ontario HST, so falling back to 13%
 // is safer than undercharging at the old 5% placeholder.
@@ -221,6 +225,11 @@ export function CartPanel({
   }, [items.length]);
 
   const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
+  const taxableSubtotal = items.reduce((sum, it) => {
+    const lineSubtotal = (Number(it.price) || 0) * (Number(it.qty) || 1);
+    if (isGiftCardSaleLine(it) && it.taxAtSale !== true) return sum;
+    return sum + lineSubtotal;
+  }, 0);
   // Promo can come from the inline input (legacy) OR the flyout.
   // Flyout takes precedence when both set.
   const effectivePromo = appliedBenefits.promo || promo;
@@ -233,14 +242,18 @@ export function CartPanel({
       ? subtotal * 0.1
       : 0;
   const afterDiscount = Math.max(0, subtotal - discountAmount - memberDiscount);
+  const taxableAfterDiscount =
+    subtotal > 0
+      ? afterDiscount * Math.min(1, Math.max(0, taxableSubtotal / subtotal))
+      : 0;
   const taxRate = resolveTaxRate(settings);
   const taxConfigMissing = taxRate === null;
   const taxInclusive = String(settings?.taxCalculation || "add_to_price") === "include_in_price";
   const tax = taxConfigMissing
     ? 0
     : taxInclusive
-    ? afterDiscount - afterDiscount / (1 + taxRate)
-    : afterDiscount * taxRate;
+    ? taxableAfterDiscount - taxableAfterDiscount / (1 + taxRate)
+    : taxableAfterDiscount * taxRate;
   const total = taxConfigMissing ? afterDiscount : taxInclusive ? afterDiscount : afterDiscount + tax;
 
   // Voucher coverage comes from the backend — see
@@ -471,11 +484,20 @@ export function CartPanel({
         });
         toast.success(`Override applied — $${payload.value.toFixed(2)} off`);
       } else {
-        // Code override — re-fetch to get the discount details
-        const apiBase = import.meta.env.VITE_API_BASE_URL || "/api";
-        const r = await fetch(`${apiBase}/promos/validate/${encodeURIComponent(code)}?override=1`);
-        const body = await r.json();
-        const discount = body?.data || {
+        // Code override — re-validate via the RTK query (goes through baseApi,
+        // so it carries the cashier header + Bearer token AND decrypts the
+        // response) with override=1, so the backend returns the discount details
+        // bypassing the eligibility check the manager just overrode. (The old
+        // raw fetch sent neither header nor token → encrypted/unauthorized
+        // response → silent $0 discount.)
+        let discount = null;
+        try {
+          const res = await validate({ code, override: true }).unwrap();
+          discount = res?.data || null;
+        } catch (_) {
+          discount = null;
+        }
+        discount = discount || {
           discountId: null,
           name: `Override · ${code}`,
           code,
