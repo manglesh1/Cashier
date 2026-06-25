@@ -20,6 +20,7 @@ import {
 } from "../../features/discount/discountApi";
 import {
   useLazyLookupVoucherByTokenQuery,
+  useLazyLookupMembershipByTokenQuery,
   useLazyLookupGiftCardQuery,
   useRedeemGiftCardMutation,
 } from "../../features/vouchers/voucherApi";
@@ -31,6 +32,30 @@ const ACCENT = {
   gift: "#EC4899",     // pink
   comp: "#94A3B8",     // grey for placeholders
 };
+
+function isMembershipPassRecord(record) {
+  if (!record) return false;
+  if (record.kind === "membership") return true;
+  if (record.type === "membership") return true;
+  if (record.isMembership === true) return true;
+  if (record.membershipId && String(record.productType || "").toLowerCase().includes("membership")) {
+    return true;
+  }
+  return false;
+}
+
+function normalizeMembershipPass(record) {
+  if (!isMembershipPassRecord(record)) return null;
+  const guest = record.guest || {};
+  return {
+    membershipId: record.membershipId,
+    activityName: record.activityName || record.membershipName || record.name || "Membership",
+    guestName: record.guestName || guest.guestName || guest.name || "",
+    todaysBenefits: Array.isArray(record.todaysBenefits) ? record.todaysBenefits : [],
+    status: record.status || "active",
+    usable: record.usable,
+  };
+}
 
 function GroupLabel({ children }) {
   return (
@@ -260,24 +285,45 @@ function PromoPanel({ value, onApply, onRemove, onClose }) {
 function MemberPanel({ value, onApply, onRemove, onClose }) {
   const [token, setToken] = useState("");
   const [lookup, { isFetching }] = useLazyLookupVoucherByTokenQuery();
+  const [lookupMembership, { isFetching: isFetchingMembership }] =
+    useLazyLookupMembershipByTokenQuery();
 
   const submit = async () => {
     const t = token.trim();
     if (!t) return toast.error("Scan or paste the member's pass token");
     try {
-      const res = await lookup(t).unwrap();
-      const data = res?.data;
-      if (data?.kind !== "membership") {
+      let lookupError = null;
+      const res = await lookup(t).unwrap().catch((err) => {
+        lookupError = err;
+        return null;
+      });
+      let memberPass = normalizeMembershipPass(res?.data);
+      if (!memberPass) {
+        const membershipRes = await lookupMembership(t).unwrap().catch(() => null);
+        memberPass = normalizeMembershipPass(membershipRes?.data);
+      }
+      if (!memberPass) {
+        const data = res?.data;
+        const productType = String(data?.productType || "").toLowerCase();
+        if (data?.kind === "ticket" && productType.includes("membership")) {
+          return toast.error("Membership pass found, but the linked membership could not be resolved");
+        }
+        if (lookupError && !res?.data) {
+          return toast.error(lookupError?.data?.message || "That token is not a membership pass");
+        }
         return toast.error("That token is not a membership pass");
       }
-      if (data.status !== "active") {
-        return toast.error(`Membership is ${data.status}`);
+      if (memberPass.usable === false) {
+        return toast.error("Membership payment is not complete");
+      }
+      if (memberPass.status !== "active") {
+        return toast.error(`Membership is ${memberPass.status}`);
       }
       onApply({
-        membershipId: data.membershipId,
-        activityName: data.activityName,
-        guestName: data.guestName,
-        todaysBenefits: data.todaysBenefits || [],
+        membershipId: memberPass.membershipId,
+        activityName: memberPass.activityName,
+        guestName: memberPass.guestName,
+        todaysBenefits: memberPass.todaysBenefits,
       });
       setToken("");
       onClose();
@@ -357,11 +403,11 @@ function MemberPanel({ value, onApply, onRemove, onClose }) {
         <button
           type="button"
           onClick={submit}
-          disabled={isFetching}
+          disabled={isFetching || isFetchingMembership}
           className="a-btn a-btn--primary a-btn--sm"
           style={{ justifyContent: "center", padding: "0 14px", background: ACCENT.member, borderColor: ACCENT.member }}
         >
-          {isFetching ? "…" : "Apply"}
+          {isFetching || isFetchingMembership ? "…" : "Apply"}
         </button>
       </div>
     </PanelShell>

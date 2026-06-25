@@ -43,6 +43,7 @@ export default function SellPaymentOverlay({
   draftPayment,      // shape produced by CashierApp.handleCheckout
   onClose,           // () => void — cashier dismissed without paying
   onComplete,        // (paymentComplete) => void — payment recorded; cart can be cleared
+  onVoid,            // () => void — cashier voided the pre-payment transaction
 }) {
   // ── Payment-form state (mirrors CheckIn.jsx's parent-owned state) ─
   const [paymentMethod, setPaymentMethod] = useState("card");
@@ -300,13 +301,26 @@ export default function SellPaymentOverlay({
       // When there are no regular items, we still go through this path —
       // backend treats memberships/giftCards as the artifacts on a
       // booking with no schedule items, same flow.
+      const noRegular = (draft.regularItems || []).length === 0;
+      const artifactAllocationIndexes = [
+        ...membershipUnits,
+        ...giftCardUnits,
+        ...voucherPackUnits,
+      ].map((unit) => unit.allocationIndex);
+      const artifactGrandTotal = artifactAllocationIndexes.reduce((sum, allocationIndex) => {
+        const allocation = voucherAllocations[allocationIndex] || {};
+        return sum + (Number(allocation.totalAmount || allocation.grandTotal) || 0);
+      }, 0);
+      const mainPaymentAmount =
+        noRegular && nonMembershipItems.length > 0 && artifactGrandTotal > 0
+          ? artifactGrandTotal
+          : cartGrandTotal;
       const fullPayment = payByGiftCard || payByTerminal
         ? {}
         : {
             ...paymentPayload,
-            amountPaid: cartGrandTotal,
+            amountPaid: mainPaymentAmount,
           };
-      const noRegular = (draft.regularItems || []).length === 0;
       const res = await createBooking({
         ...draft.payload,
         ...(noRegular ? { sessions: undefined, waiverSignatureIds: undefined, deferWaiverEnforcement: true } : { pricingSummary: paidPricingSummary }),
@@ -405,10 +419,6 @@ export default function SellPaymentOverlay({
       toast.error(paymentMethod === "cash" ? "Enter cash received." : "Enter a payment amount.");
       return;
     }
-    if (paymentMethod === "cash" && tenderedAmount < payableBalance) {
-      toast.error(`Cash received must cover ${moneyFmt(payableBalance)}.`);
-      return;
-    }
     if (paymentMethod !== "cash" && tenderedAmount > payableBalance) {
       toast.error(`Amount cannot exceed ${moneyFmt(payableBalance)}.`);
       return;
@@ -416,7 +426,7 @@ export default function SellPaymentOverlay({
 
     paymentLockRef.current = true;
     let keepLock = false;
-    const recordAmount = paymentMethod === "cash" ? payableBalance : tenderedAmount;
+    const recordAmount = paymentMethod === "cash" ? Math.min(payableBalance, tenderedAmount) : tenderedAmount;
     const changeDue = paymentMethod === "cash"
       ? Math.max(0, Number((tenderedAmount - payableBalance).toFixed(2)))
       : 0;
@@ -496,6 +506,7 @@ export default function SellPaymentOverlay({
           amount: recordAmount,
           discountAmount,
           discountLabel: paymentDiscount?.label || null,
+          balanceRemaining: roundMoney(Math.max(0, payableBalance - recordAmount)),
         });
         keepLock = true;
         return;
@@ -518,6 +529,29 @@ export default function SellPaymentOverlay({
 
       if (paymentMethod === "cash" && recordAmount > 0) {
         openCashDrawer({ bookingId: primary?.bookingId, terminal });
+      }
+      const balanceRemaining = roundMoney(Math.max(0, payableBalance - recordAmount));
+      if (balanceRemaining > 0) {
+        setPaidBooking({
+          ...(syntheticBooking || {}),
+          bookingId: primary?.bookingId || null,
+          bookingNumber: primary?.bookingNumber || "",
+          guestEmail: syntheticBooking?.guestEmail || null,
+          guest: { guestEmail: syntheticBooking?.guestEmail || null },
+          totalAmount: balanceRemaining,
+          balanceDue: balanceRemaining,
+          subtotalAmount: balanceRemaining,
+          voucherCoveredAmount: 0,
+          taxAmount: 0,
+          discountAmount: 0,
+        });
+        setPaymentComplete(null);
+        setPaymentDiscount(null);
+        setPaymentMethod("card");
+        setPaymentAmount(balanceRemaining.toFixed(2));
+        paymentSessionRef.current = `sell-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        toast.success(`${moneyFmt(recordAmount + discountAmount)} recorded - ${moneyFmt(balanceRemaining)} still due`);
+        return;
       }
       setPaidBooking({
         ...(syntheticBooking || {}),
@@ -658,6 +692,8 @@ export default function SellPaymentOverlay({
     const promise = sendBookingConfirmation({
       bookingId: paidBooking.bookingId,
       email: clean,
+      intent: "receipt",
+      actor: "cashier",
     }).unwrap();
     toast.promise(promise, {
       loading: "Sending receipt...",
@@ -674,6 +710,14 @@ export default function SellPaymentOverlay({
       setTerminalPayment(null);
       onClose?.();
     }
+  };
+  const handleVoid = () => {
+    setPendingTerminal(null);
+    setTerminalPayment(null);
+    setPaymentComplete(null);
+    setPaidBooking(null);
+    paymentLockRef.current = false;
+    onVoid?.();
   };
 
   if (!open || !displayBooking) return null;
@@ -700,6 +744,7 @@ export default function SellPaymentOverlay({
         onEmailReceipt={handleEmailReceipt}
         isSendingReceipt={sendingReceipt}
         onClose={handleClose}
+        onVoid={handleVoid}
         cardTipEnabled={tipDefaults.enabled}
         onCardTip={setCardTipAllocation}
       />
@@ -720,6 +765,31 @@ export default function SellPaymentOverlay({
           tip={tipDefaults.enabled ? { allocation: cardTipAllocation, defaultAllocation: tipDefaults.defaultAllocation } : null}
           onApproved={(result) => {
             const data = result?.transaction || result?.data || result || {};
+            const balanceRemaining = roundMoney(Number(terminalPayment.balanceRemaining || 0));
+            if (balanceRemaining > 0) {
+              setPaidBooking({
+                ...(syntheticBooking || {}),
+                bookingId: terminalPayment.bookingId,
+                bookingNumber: terminalPayment.bookingNumber || "",
+                guestEmail: syntheticBooking?.guestEmail || null,
+                guest: { guestEmail: syntheticBooking?.guestEmail || null },
+                totalAmount: balanceRemaining,
+                balanceDue: balanceRemaining,
+                subtotalAmount: balanceRemaining,
+                voucherCoveredAmount: 0,
+                taxAmount: 0,
+                discountAmount: 0,
+              });
+              setPaymentComplete(null);
+              setPaymentDiscount(null);
+              setPaymentMethod("cash");
+              setPaymentAmount("");
+              setTerminalPayment(null);
+              paymentLockRef.current = false;
+              paymentSessionRef.current = `sell-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+              toast.success(`${moneyFmt(terminalPayment.amount)} approved - ${moneyFmt(balanceRemaining)} still due`);
+              return;
+            }
             setPaymentComplete({
               bookingId: terminalPayment.bookingId,
               bookingNumber: terminalPayment.bookingNumber || "",

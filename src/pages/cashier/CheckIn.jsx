@@ -858,6 +858,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const [paymentNote, setPaymentNote] = useState("");
   const [paymentComplete, setPaymentComplete] = useState(null);
   const [paymentDiscount, setPaymentDiscount] = useState(null);
+  const [paymentBalanceDue, setPaymentBalanceDue] = useState(null);
   const [pendingTerminal, setPendingTerminal] = useState(null);
   const [addItemOpen, setAddItemOpen] = useState(false);
   const [waiverTargetCode, setWaiverTargetCode] = useState(null);
@@ -871,7 +872,10 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const redeemedCount = (summary.redeemed ?? 0);
   const totalCount = summary.total ?? tickets.length;
   const remaining = Math.max(0, totalCount - redeemedCount);
-  const balanceDue = getBookingBalanceDue(booking);
+  const bookingBalanceDue = getBookingBalanceDue(booking);
+  const balanceDue = paymentOpen && paymentBalanceDue != null
+    ? paymentBalanceDue
+    : bookingBalanceDue;
   const isFullyCheckedIn = totalCount > 0 && redeemedCount >= totalCount;
 
   // Partial-arrival default: when the operator opens a booking that's
@@ -1281,7 +1285,8 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
   const paymentLockRef = useRef(false);
 
   const openPayment = () => {
-    setPaymentAmount(balanceDue.toFixed(2));
+    setPaymentBalanceDue(bookingBalanceDue);
+    setPaymentAmount(bookingBalanceDue.toFixed(2));
     setPaymentMethod("card");
     setPaymentNote("");
     setPaymentDiscount(null);
@@ -1303,17 +1308,13 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       toast.error(paymentMethod === "cash" ? "Enter cash received." : "Enter a payment amount.");
       return;
     }
-    if (paymentMethod === "cash" && tenderedAmount < payableBalance) {
-      toast.error(`Cash received must cover ${moneyFmt(payableBalance)}.`);
-      return;
-    }
     if (paymentMethod !== "cash" && tenderedAmount > payableBalance) {
       toast.error(`Amount cannot exceed ${moneyFmt(payableBalance)}.`);
       return;
     }
 
     paymentLockRef.current = true;
-    const recordAmount = paymentMethod === "cash" ? payableBalance : tenderedAmount;
+    const recordAmount = paymentMethod === "cash" ? Math.min(payableBalance, tenderedAmount) : tenderedAmount;
     const changeDue = paymentMethod === "cash"
       ? Math.max(0, Number((tenderedAmount - payableBalance).toFixed(2)))
       : 0;
@@ -1363,12 +1364,31 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           instructions: res.data.instructions,
           discountAmount,
           discountLabel: paymentDiscount?.label || null,
+          balanceRemaining: roundMoney(Math.max(0, payableBalance - recordAmount)),
         });
         return;
       }
       if (paymentMethod === "cash" && recordAmount > 0) {
         openCashDrawer({ bookingId: booking.bookingId, terminal });
       }
+      const balanceRemaining = roundMoney(
+        Number(res?.data?.balance ?? Math.max(0, payableBalance - recordAmount))
+      );
+      if (balanceRemaining > 0) {
+        setPaymentBalanceDue(balanceRemaining);
+        setPaymentComplete(null);
+        setPaymentDiscount(null);
+        setPaymentMethod("card");
+        setPaymentAmount(balanceRemaining.toFixed(2));
+        paymentSessionRef.current =
+          (typeof crypto !== "undefined" && crypto.randomUUID)
+            ? `pay_${crypto.randomUUID()}`
+            : `pay_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        refresh();
+        toast.success(`${moneyFmt(recordAmount + discountAmount)} recorded - ${moneyFmt(balanceRemaining)} still due`);
+        return;
+      }
+      setPaymentBalanceDue(0);
       setPaymentComplete({
         ...(res?.data || {}),
         amountPaid: roundMoney(recordAmount + discountAmount),
@@ -1428,6 +1448,21 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         note: paymentNote || "POS gift card payment",
       }).unwrap();
       const balanceRemaining = roundMoney(Math.max(0, payable - apply));
+      refresh();
+      if (balanceRemaining > 0) {
+        setPaymentBalanceDue(balanceRemaining);
+        setPaymentComplete(null);
+        setPaymentDiscount(null);
+        setPaymentMethod("card");
+        setPaymentAmount(balanceRemaining.toFixed(2));
+        paymentSessionRef.current =
+          (typeof crypto !== "undefined" && crypto.randomUUID)
+            ? `pay_${crypto.randomUUID()}`
+            : `pay_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        toast.success(`${moneyFmt(apply + discountAmount)} recorded - ${moneyFmt(balanceRemaining)} still due`);
+        return;
+      }
+      setPaymentBalanceDue(0);
       setPaymentComplete({
         amountPaid: roundMoney(apply + discountAmount),
         discountAmount,
@@ -1438,7 +1473,6 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         balanceRemaining,
         changeDue: 0,
       });
-      refresh();
       toast.success(
         balanceRemaining > 0
           ? `${moneyFmt(apply)} on gift card · ${moneyFmt(balanceRemaining)} still due`
@@ -1466,7 +1500,12 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       toast.error("Enter a valid email address.");
       return;
     }
-    const promise = sendBookingConfirmation({ bookingId: booking.bookingId, email: clean }).unwrap();
+    const promise = sendBookingConfirmation({
+      bookingId: booking.bookingId,
+      email: clean,
+      intent: "receipt",
+      actor: "cashier",
+    }).unwrap();
     toast.promise(promise, {
       loading: "Sending receipt...",
       success: `Receipt emailed to ${clean}`,
@@ -1572,7 +1611,17 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           onPrintReceipt={handlePrintReceipt}
           onEmailReceipt={handleEmailReceipt}
           isSendingReceipt={sendingReceipt}
-          onClose={() => { setPaymentOpen(false); setPaymentComplete(null); setPendingTerminal(null); refresh(); }}
+          onClose={() => { setPaymentOpen(false); setPaymentComplete(null); setPendingTerminal(null); setPaymentBalanceDue(null); refresh(); }}
+          onVoid={() => {
+            setPaymentOpen(false);
+            setPaymentComplete(null);
+            setPendingTerminal(null);
+            setPaymentDiscount(null);
+            setPaymentAmount("");
+            setPaymentBalanceDue(null);
+            toast.info("Payment transaction voided. No payment was recorded.");
+            refresh();
+          }}
         />
       )}
 
@@ -1583,6 +1632,23 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           bookingId={booking.bookingId}
           instructions={pendingTerminal.instructions}
           onComplete={() => {
+            const balanceRemaining = roundMoney(Number(pendingTerminal.balanceRemaining || 0));
+            if (balanceRemaining > 0) {
+              setPendingTerminal(null);
+              setPaymentBalanceDue(balanceRemaining);
+              setPaymentComplete(null);
+              setPaymentDiscount(null);
+              setPaymentMethod("cash");
+              setPaymentAmount("");
+              paymentSessionRef.current =
+                (typeof crypto !== "undefined" && crypto.randomUUID)
+                  ? `pay_${crypto.randomUUID()}`
+                  : `pay_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+              refresh();
+              toast.success(`${moneyFmt(pendingTerminal.amount)} on card - ${moneyFmt(balanceRemaining)} still due`);
+              return;
+            }
+            setPaymentBalanceDue(0);
             setPaymentComplete({
               amountPaid: roundMoney(pendingTerminal.amount + (pendingTerminal.discountAmount || 0)),
               discountAmount: pendingTerminal.discountAmount || 0,
