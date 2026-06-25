@@ -453,6 +453,51 @@ export const pickNearestSession = (
   return null;
 };
 
+export const getCurrentSessionBlocker = (
+  sessions,
+  nowMinutes,
+  { graceMinutes = 15, minRemainingMinutes = 0 } = {}
+) => {
+  const grace = Number.isFinite(graceMinutes) ? graceMinutes : 15;
+  const minRemaining = Number.isFinite(minRemainingMinutes) ? minRemainingMinutes : 0;
+  const currentCandidates = (sessions || [])
+    .map((session) => ({
+      session,
+      start: sessionStartMinutes(session),
+      end: sessionEndMinutes(session),
+    }))
+    .filter(
+      (entry) =>
+        entry.start <= nowMinutes &&
+        nowMinutes - entry.start <= grace &&
+        (minRemaining <= 0 || entry.end - nowMinutes >= minRemaining)
+    )
+    .sort((a, b) => b.start - a.start);
+
+  if (!currentCandidates.length) return null;
+  const current = currentCandidates[0].session;
+  if (isSessionBookable(current)) return null;
+
+  const hasCapacity = Number(current?.capacityRemaining || 0) > 0;
+  const hasAvailableVariation = (current?.variations || []).some(
+    (variation) => !isVariationUnavailable(variation)
+  );
+  const reason =
+    current?.isBooked || !hasCapacity
+      ? "sold_out"
+      : !hasAvailableVariation
+        ? "unavailable"
+        : "blocked";
+  return {
+    session: current,
+    reason,
+    message:
+      reason === "sold_out"
+        ? "Current session is sold out. Pick another time before booking."
+        : "Current session is unavailable. Pick another time before booking.",
+  };
+};
+
 // Whether a session can still be sold/selected at `nowMinutes` for TODAY:
 //   • future start                → always selectable
 //   • currently running           → within graceMinutes of its start, AND
@@ -511,6 +556,9 @@ export const autoScheduleLine = ({
   graceMinutes,
   minRemainingMinutes,
 }) => {
+  if (getCurrentSessionBlocker(sessions, nowMinutes, { graceMinutes, minRemainingMinutes })) {
+    return null;
+  }
   const session = pickNearestSession(sessions, nowMinutes, { graceMinutes, minRemainingMinutes });
   if (!session) return null;
 

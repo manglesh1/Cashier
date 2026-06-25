@@ -164,19 +164,34 @@ export function CatalogGrid({
     addWithVariant(item, section, options[0] || null);
   };
 
+  const matchesCatalogSearch = (item, rawQuery) => {
+    if (!rawQuery) return true;
+    const q = rawQuery.toLowerCase();
+    const fields = [
+      item.name,
+      item.sub,
+      item.id,
+      item.sku,
+      item.productSku,
+      item.raw?.sku,
+      item.raw?.SKU,
+    ];
+    const optionFields = (item.variationOptions || []).flatMap((option) => [
+      option.sku,
+      option.productSku,
+      option.SKU,
+      option.name,
+    ]);
+    return [...fields, ...optionFields].some((value) =>
+      String(value || "").toLowerCase().includes(q)
+    );
+  };
+
   const visibleSections = sections
     .filter((s) => activeChip === "all" || s.title === activeChip)
     .map((s) => ({
       ...s,
-      items: s.items.filter((it) => {
-        if (!search) return true;
-        const q = search.toLowerCase();
-        return (
-          (it.name || "").toLowerCase().includes(q) ||
-          (it.sub || "").toLowerCase().includes(q) ||
-          String(it.id || "").toLowerCase().includes(q)
-        );
-      }),
+      items: s.items.filter((it) => matchesCatalogSearch(it, search)),
     }))
     .filter((s) => s.items.length > 0);
 
@@ -349,6 +364,16 @@ export function buildChosenWithVariant(item, option) {
     additionalPersonPrice: option.additionalPersonPrice ?? item.additionalPersonPrice ?? null,
     minGuests: option.minGuests ?? option.minimumGuests ?? item.minGuests ?? item.minimumGuests ?? null,
     maxGuests: option.maxGuests ?? option.maximumGuests ?? item.maxGuests ?? item.maximumGuests ?? null,
+    sku: option.sku || option.SKU || item.sku || item.SKU || null,
+    taxOverride: option.taxOverride || item.taxOverride || null,
+    taxInclusive: option.taxInclusive === true || item.taxInclusive === true,
+    taxAtSale: option.taxAtSale === true || item.taxAtSale === true,
+    activityTaxOverride: option.activityTaxOverride || item.activityTaxOverride || null,
+    activityTaxOverrideEnabled:
+      option.activityTaxOverrideEnabled === true ||
+      item.activityTaxOverrideEnabled === true,
+    activityTaxOverrideRate:
+      option.activityTaxOverrideRate ?? item.activityTaxOverrideRate ?? null,
   };
 }
 

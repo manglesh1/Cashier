@@ -59,7 +59,7 @@ import {
   useLazySearchWaiversQuery,
   useLazySearchGuestsQuery,
 } from "../../features/bookings/bookingApi";
-import { autoScheduleLine, formatDateValue } from "./scheduleHelpers";
+import { autoScheduleLine, formatDateValue, getCurrentSessionBlocker } from "./scheduleHelpers";
 import {
   setCartItems,
   setCartCustomer as setCartCustomerAction,
@@ -157,9 +157,20 @@ function normalizePresetSections(preset) {
           additionalPersonPrice: v.additionalPersonPrice ?? p.additionalPersonPrice ?? null,
           minGuests: v.minGuests ?? v.minimumGuests ?? p.minGuests ?? p.minimumGuests ?? null,
           maxGuests: v.maxGuests ?? v.maximumGuests ?? p.maxGuests ?? p.maximumGuests ?? null,
+          sku: v.sku || v.SKU || null,
+          taxOverride: v.taxOverride || null,
+          taxInclusive: v.taxInclusive === true,
+          taxAtSale: v.taxAtSale === true,
+          activityTaxOverride: v.activityTaxOverride || p.activityTaxOverride || null,
+          activityTaxOverrideEnabled:
+            v.activityTaxOverrideEnabled === true ||
+            p.activityTaxOverrideEnabled === true,
+          activityTaxOverrideRate:
+            v.activityTaxOverrideRate ?? p.activityTaxOverrideRate ?? null,
         })).filter((v) => v.variationId),
         productItemId: p.productItemId,
         productType,
+        sku: p.sku || p.SKU || null,
         name: p.displayName || p.activityName || p.productName || p.name || "Untitled",
         sub,
         price: Number(p.price ?? p.unitPrice ?? p.basePrice ?? NaN),
@@ -176,6 +187,12 @@ function normalizePresetSections(preset) {
         // Voucher pack hint: cart logic skips date/slot picker for these.
         isVoucherPack,
         voucherMeta,
+        taxOverride: p.taxOverride || null,
+        taxInclusive: p.taxInclusive === true,
+        activityTaxOverride: p.activityTaxOverride || null,
+        activityTaxOverrideEnabled: p.activityTaxOverrideEnabled === true,
+        activityTaxOverrideRate: p.activityTaxOverrideRate ?? null,
+        taxAtSale: p.taxAtSale === true || p.giftCardMeta?.taxAtSale === true,
         raw: p,
       };
     }),
@@ -1142,6 +1159,7 @@ export function CashierApp() {
       variationName: productItem.variationName,
       variationOptions: productItem.variationOptions || [],
       productType: productItem.productType,
+      sku: productItem.sku || productItem.SKU || null,
       name: productItem.name,
       meta,
       sectionTitle,
@@ -1162,6 +1180,29 @@ export function CashierApp() {
       featured: productItem.featured,
       requiresWaiver: !!productItem.requiresWaiver,
       isVoucherPack: isVoucherPackItem(productItem),
+      taxOverride:
+        productItem.taxOverride ||
+        productItem.raw?.taxOverride ||
+        null,
+      taxInclusive:
+        productItem.taxInclusive === true ||
+        productItem.raw?.taxInclusive === true,
+      activityTaxOverride:
+        productItem.activityTaxOverride ||
+        productItem.raw?.activityTaxOverride ||
+        null,
+      activityTaxOverrideEnabled:
+        productItem.activityTaxOverrideEnabled === true ||
+        productItem.raw?.activityTaxOverrideEnabled === true,
+      activityTaxOverrideRate:
+        productItem.activityTaxOverrideRate ??
+        productItem.raw?.activityTaxOverrideRate ??
+        null,
+      taxAtSale:
+        productItem.taxAtSale === true ||
+        productItem.giftCardMeta?.taxAtSale === true ||
+        productItem.raw?.taxAtSale === true ||
+        productItem.raw?.giftCardMeta?.taxAtSale === true,
     };
   };
 
@@ -1205,6 +1246,15 @@ export function CashierApp() {
       const minRemainingMinutes = Number.isFinite(Number(posSettings.minRemainingMinutes))
         ? Number(posSettings.minRemainingMinutes)
         : 0; // 0 = remaining-time rule off (join window only)
+      const currentBlocker = getCurrentSessionBlocker(sessions, nowMinutes, {
+        graceMinutes,
+        minRemainingMinutes,
+      });
+      if (currentBlocker) {
+        toast.error(currentBlocker.message);
+        setScheduleRequiredItem({ item: productItem, section });
+        return;
+      }
       const line = autoScheduleLine({
         item: productItem,
         section,
@@ -1628,19 +1678,29 @@ export function CashierApp() {
 
     let validatedPricing = null;
     try {
+      const pricingSummaryForValidation = {
+        discountAmount: Number(cartPricing?.discount?.amount || 0),
+        discountCode: cartPricing?.discount?.code || null,
+        discountName: cartPricing?.discount?.name || null,
+        discountType: cartPricing?.discount?.type || null,
+        discountValue: cartPricing?.discount?.value || 0,
+        discountMaxValue: cartPricing?.discount?.maxValue || 0,
+        membershipRedemptions: Array.isArray(cartPricing?.membershipRedemptions)
+          ? cartPricing.membershipRedemptions
+          : [],
+      };
       const validateRes = await validateCart({
         locationId,
         guestInfo: payload.guestInfo,
-        // Send the chosen discount so the backend prices the same basis.
-        pricingSummary: {
-          discountAmount: Number(
-            (cartPricing?.discount?.amount || 0) + (cartPricing?.memberDiscount || 0)
-          ),
-        },
+        // Send promo/manual discount separately from member redemptions.
+        // The backend recomputes member benefits from membershipRedemptions.
+        pricingSummary: pricingSummaryForValidation,
         items: items.map((item, idx) => ({
           activityId: item.activityId,
           variationId: item.variationId,
           productType: item.productType,
+          activityTypeKey: item.activityTypeKey || item.productType || null,
+          taxAtSale: item.taxAtSale === true,
           name: item.name,
           quantity: item.qty,
           // Line subtotal lets the backend price authoritatively without
@@ -1691,6 +1751,14 @@ export function CashierApp() {
       ? Number(validatedPricing.voucherCoveredAmount) || 0
       : 0;
     const balanceDue = Math.max(0, chargeTotal - voucherCoveredAmount);
+    payload.pricingSummary = {
+      ...payload.pricingSummary,
+      subtotalAmount: chargeSubtotal,
+      discountAmount: chargeDiscount,
+      taxAmount: chargeTax,
+      grandTotal: chargeTotal,
+      totalAmount: chargeTotal,
+    };
 
     const draftPayment = {
       draftSale: true,
@@ -2415,17 +2483,20 @@ export function CashierApp() {
         }}
         label="payment dialog"
       >
-        {/* Sell-flow payment overlay. Pre-creates the booking(s) from
-            the cart draft, then renders the same CheckInPaymentModal
-            used on the Check-in screen so both flows share one
-            payment UI. The booking lives in the backend the moment
-            the cashier taps Take payment; if they close before
-            completing payment, the booking remains unpaid and can be
-            finished from Check-in later. */}
+        {/* Sell-flow payment overlay. It renders the same CheckInPaymentModal
+            used on the Check-in screen, but keeps the sale as a client-side
+            draft until the cashier completes payment. */}
         <SellPaymentOverlay
           open={!!paymentBooking}
           draftPayment={paymentBooking}
           onClose={() => setPaymentBooking(null)}
+          onVoid={() => {
+            dispatch(clearCart());
+            setPaymentBooking(null);
+            setCreatedBookingId(null);
+            setRecipientAssignments({});
+            toast.info("Transaction voided. No payment was recorded.");
+          }}
           onComplete={() => {
             // Wipe everything cart-related and rotate the idempotency
             // key so the next checkout gets a fresh one. clearCart() also

@@ -85,6 +85,7 @@ function CheckInPaymentModal({
   onEmailReceipt,
   isSendingReceipt,
   onClose,
+  onVoid,
   // Sell flow only: the card path runs through TerminalPaymentModal, which
   // can collect an on-glass tip. When true, show the "who gets the card tip"
   // chooser here and report it via onCardTip so the reader uses it.
@@ -132,6 +133,7 @@ function CheckInPaymentModal({
   const recordAmount = isCash ? Math.min(payableBalance, tendered) : isGiftCard ? gcApply : tendered;
   const remaining = Math.max(0, payableBalance - recordAmount);
   const changeDue = isCash ? Math.max(0, tendered - payableBalance) : 0;
+  const cashCoversBalance = isCash && tendered >= payableBalance;
   const isCheck = method === "check";
   const isCard = method === "card";
 
@@ -309,6 +311,16 @@ function CheckInPaymentModal({
     }
     setManagerOpen(true);
   };
+  const handleVoid = () => {
+    if (isSubmitting || gcRedeeming || complete) return;
+    const ok = window.confirm("Void this transaction? No payment will be recorded.");
+    if (!ok) return;
+    if (typeof onVoid === "function") {
+      onVoid();
+    } else {
+      onClose?.();
+    }
+  };
 
   return (
     <div role="dialog" aria-modal="true" style={{
@@ -330,9 +342,22 @@ function CheckInPaymentModal({
               {complete ? "Payment complete" : "Take payment"}
             </div>
           </div>
-          <button type="button" className="a-btn a-btn--ghost a-btn--sm" onClick={onClose}>
-            <Icon name="x" size={14} /> Close
-          </button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            {!complete && (
+              <button
+                type="button"
+                className="a-btn a-btn--ghost a-btn--sm"
+                onClick={handleVoid}
+                disabled={isSubmitting || gcRedeeming}
+                style={{ color: "#B83210", borderColor: "#F2B8A6" }}
+              >
+                <Icon name="ban" size={14} /> Void Transaction
+              </button>
+            )}
+            <button type="button" className="a-btn a-btn--ghost a-btn--sm" onClick={onClose}>
+              <Icon name="x" size={14} /> Close
+            </button>
+          </div>
         </div>
 
         {complete ? (
@@ -461,7 +486,11 @@ function CheckInPaymentModal({
                 <TotalLine label="Grand Total" value={moneyFmt(balanceDue)} tone="#08A5E8" />
                 <TotalLine label="Tender Due" value={moneyFmt(payableBalance)} tone="#F45B0A" />
                 <TotalLine label="Tendered" value={moneyFmt(tendered)} />
-                <TotalLine label={isCash ? "Change" : "Balance Remaining"} value={moneyFmt(isCash ? changeDue : remaining)} tone={isCash && changeDue > 0 ? "#B83210" : "#08A5E8"} />
+                <TotalLine
+                  label={cashCoversBalance ? "Change" : "Balance Remaining"}
+                  value={moneyFmt(cashCoversBalance ? changeDue : remaining)}
+                  tone={cashCoversBalance && changeDue > 0 ? "#B83210" : "#08A5E8"}
+                />
                 {discount?.label && (
                   <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", fontSize: 12 }}>
                     <span>{discount.label}</span>
@@ -597,7 +626,13 @@ function CheckInPaymentModal({
                 disabled={isSubmitting || gcRedeeming || (isGiftCard && !gcCard)}
                 style={{ width: "100%", justifyContent: "center", minHeight: 52, marginTop: 8, fontSize: 16 }}>
                 <Icon name="check" size={16} />
-                {(isSubmitting || gcRedeeming) ? "Recording..." : isGiftCard ? `Pay ${moneyFmt(gcApply)} by gift card` : "Complete The Order"}
+                {(isSubmitting || gcRedeeming)
+                  ? "Recording..."
+                  : isGiftCard
+                    ? `Pay ${moneyFmt(gcApply)} by gift card`
+                    : remaining > 0 && recordAmount > 0
+                      ? `Record ${moneyFmt(recordAmount)}`
+                      : "Complete The Order"}
               </button>
             </div>
           </div>

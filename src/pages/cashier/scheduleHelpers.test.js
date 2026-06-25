@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { pickNearestSession, isSessionSelectableNow, isSessionNotEnded, buildScheduledLine } from "./scheduleHelpers.js";
+import {
+  pickNearestSession,
+  getCurrentSessionBlocker,
+  isSessionSelectableNow,
+  isSessionNotEnded,
+  buildScheduledLine,
+} from "./scheduleHelpers.js";
 
 // Build a session whose name encodes the time range "HH:MM - HH:MM" (the
 // shape getStartTime/getEndTime parse). cap = remaining capacity.
@@ -90,6 +96,19 @@ test("skips a full running slot and takes the next (6:10pm)", () => {
   const sessions = [slot("18:00 - 19:00", 0), slot("18:30 - 19:30")];
   const pick = pickNearestSession(sessions, at(6, 10), OPTS);
   assert.equal(pick.name, "18:30 - 19:30");
+});
+
+test("flags a full current slot so auto-booking does not jump to a later session", () => {
+  const sessions = [slot("18:00 - 19:00", 0), slot("18:30 - 19:30")];
+  const blocker = getCurrentSessionBlocker(sessions, at(6, 10), OPTS);
+  assert.equal(blocker?.reason, "sold_out");
+  assert.equal(blocker?.session.name, "18:00 - 19:00");
+  assert.match(blocker?.message || "", /sold out/i);
+});
+
+test("does not block future auto-pick when current slot is outside the join window", () => {
+  const sessions = [slot("18:00 - 19:00", 0), slot("18:30 - 19:30")];
+  assert.equal(getCurrentSessionBlocker(sessions, at(6, 25), OPTS), null);
 });
 
 test("before any slot starts, picks the soonest upcoming (5:50pm)", () => {

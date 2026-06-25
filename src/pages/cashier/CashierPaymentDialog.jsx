@@ -612,7 +612,12 @@ export default function CashierPaymentDialog({
       toast.error("Enter a valid email address.");
       return;
     }
-    const promise = sendBookingConfirmation({ bookingId: receiptBookingId, email }).unwrap();
+    const promise = sendBookingConfirmation({
+      bookingId: receiptBookingId,
+      email,
+      intent: "receipt",
+      actor: "cashier",
+    }).unwrap();
     toast.promise(promise, {
       loading: "Sending receipt...",
       success: `Receipt emailed to ${email}`,

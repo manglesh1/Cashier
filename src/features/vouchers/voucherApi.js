@@ -12,6 +12,13 @@ export const voucherApi = baseApi.injectEndpoints({
       query: (token) => ({ url: `/vouchers/by-token/${token}` }),
     }),
 
+    // Direct membership-pass lookup. Used as a fallback when an older or
+    // differently shaped /vouchers/by-token response does not classify the
+    // scanned token as a membership pass.
+    lookupMembershipByToken: builder.query({
+      query: (token) => ({ url: `/memberships/by-token/${token}` }),
+    }),
+
     // Resolve any constituent token to the WHOLE pack's inclusions
     // (schedulable vouchers + stock entitlements) for the one-screen flow.
     // Returns { kind: "pack", pack, vouchers[], entitlements[] }.
@@ -80,6 +87,7 @@ export const voucherApi = baseApi.injectEndpoints({
 export const {
   useLookupVoucherByTokenQuery,
   useLazyLookupVoucherByTokenQuery,
+  useLazyLookupMembershipByTokenQuery,
   useLazyLookupVoucherPackByTokenQuery,
   useScheduleVoucherMutation,
   useRedeemEntitlementMutation,

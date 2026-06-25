@@ -83,6 +83,64 @@ function resolveTaxRate(settings) {
   return null;
 }
 
+function getNumberOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? numeric : null;
+}
+
+function getTaxOverridePercent(taxOverride, fallbackPercent = 0) {
+  if (!taxOverride || taxOverride.enabled === false) return null;
+  const direct =
+    getNumberOrNull(taxOverride.amount) ??
+    getNumberOrNull(taxOverride.taxPercent) ??
+    getNumberOrNull(taxOverride.percent) ??
+    getNumberOrNull(taxOverride.rate);
+  if (direct !== null) return direct;
+
+  if (taxOverride.option != null) {
+    const option = String(taxOverride.option);
+    if (option === "2") return 0;
+    if (option === "1") return Number(fallbackPercent) || 0;
+  }
+  return null;
+}
+
+function getActivityTaxPercent(item, fallbackPercent = 0) {
+  const direct =
+    item?.activityTaxOverrideEnabled === true
+      ? getNumberOrNull(item.activityTaxOverrideRate)
+      : null;
+  if (direct !== null) return direct;
+  return getTaxOverridePercent(item?.activityTaxOverride, fallbackPercent);
+}
+
+function getLineTaxPercent(item, fallbackPercent = 0) {
+  if (isGiftCardSaleLine(item) && item.taxAtSale !== true) return 0;
+
+  const activityOverride = getActivityTaxPercent(item, fallbackPercent);
+  if (activityOverride !== null) return activityOverride;
+
+  const variationOverride = getTaxOverridePercent(item?.taxOverride, fallbackPercent);
+  if (variationOverride !== null) return variationOverride;
+
+  return Number(fallbackPercent) || 0;
+}
+
+function calculateLineTax(baseAmount, percent, taxInclusive) {
+  const base = Number(baseAmount) || 0;
+  const taxPercent = Number(percent) || 0;
+  if (base <= 0 || taxPercent <= 0) return 0;
+  if (taxInclusive) {
+    return base - base / (1 + taxPercent / 100);
+  }
+  return base * (taxPercent / 100);
+}
+
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 100) / 100;
+}
+
 export function CartPanel({
   items = [],
   onRemove,
@@ -225,11 +283,6 @@ export function CartPanel({
   }, [items.length]);
 
   const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
-  const taxableSubtotal = items.reduce((sum, it) => {
-    const lineSubtotal = (Number(it.price) || 0) * (Number(it.qty) || 1);
-    if (isGiftCardSaleLine(it) && it.taxAtSale !== true) return sum;
-    return sum + lineSubtotal;
-  }, 0);
   // Promo can come from the inline input (legacy) OR the flyout.
   // Flyout takes precedence when both set.
   const effectivePromo = appliedBenefits.promo || promo;
@@ -242,19 +295,30 @@ export function CartPanel({
       ? subtotal * 0.1
       : 0;
   const afterDiscount = Math.max(0, subtotal - discountAmount - memberDiscount);
-  const taxableAfterDiscount =
-    subtotal > 0
-      ? afterDiscount * Math.min(1, Math.max(0, taxableSubtotal / subtotal))
-      : 0;
   const taxRate = resolveTaxRate(settings);
   const taxConfigMissing = taxRate === null;
   const taxInclusive = String(settings?.taxCalculation || "add_to_price") === "include_in_price";
+  const fallbackTaxPercent = taxConfigMissing ? 0 : taxRate * 100;
   const tax = taxConfigMissing
     ? 0
-    : taxInclusive
-    ? taxableAfterDiscount - taxableAfterDiscount / (1 + taxRate)
-    : taxableAfterDiscount * taxRate;
-  const total = taxConfigMissing ? afterDiscount : taxInclusive ? afterDiscount : afterDiscount + tax;
+    : roundMoney(items.reduce((sum, it) => {
+        const lineSubtotal = (Number(it.price) || 0) * (Number(it.qty) || 1);
+        if (lineSubtotal <= 0 || subtotal <= 0) return sum;
+        const lineDiscountShare =
+          (discountAmount + memberDiscount) * Math.min(1, Math.max(0, lineSubtotal / subtotal));
+        const lineAfterDiscount = Math.max(0, lineSubtotal - lineDiscountShare);
+        return (
+          sum +
+          calculateLineTax(
+            lineAfterDiscount,
+            getLineTaxPercent(it, fallbackTaxPercent),
+            taxInclusive
+          )
+        );
+      }, 0));
+  const total = roundMoney(
+    taxConfigMissing ? afterDiscount : taxInclusive ? afterDiscount : afterDiscount + tax
+  );
 
   // Voucher coverage comes from the backend — see
   // POST /api/benefits/preview-voucher-coverage. The cashier sends
@@ -276,7 +340,17 @@ export function CartPanel({
       itemKey: `line-${idx}`,
       variationId: Number(it.variationId) || null,
       activityId: Number(it.activityId) || null,
+      productType: it.productType || it.activityTypeKey || null,
+      taxAtSale: it.taxAtSale === true,
       subtotal: Number(it.price || 0) * Number(it.qty || 1),
+      taxOverride:
+        isGiftCardSaleLine(it) && it.taxAtSale !== true
+          ? { enabled: true, amount: 0, name: "No tax" }
+          : it.taxOverride || null,
+      taxInclusive: it.taxInclusive === true,
+      activityTaxOverride: it.activityTaxOverride || null,
+      activityTaxOverrideEnabled: it.activityTaxOverrideEnabled === true,
+      activityTaxOverrideRate: it.activityTaxOverrideRate ?? null,
     }));
     let cancelled = false;
     (async () => {
