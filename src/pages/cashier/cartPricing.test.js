@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 
 import {
   buildPaidCheckoutPricingSummary,
+  canMergeCartLines,
   clampCartQuantity,
+  getCreateBookingPaymentAmount,
   getCheckoutRequirements,
   getCartLineSubtotal,
   getDefaultCartQuantity,
@@ -63,6 +65,35 @@ test("per-package party subtotal charges configured extra guests", () => {
 
 test("non-party subtotal remains unit price times quantity", () => {
   assert.equal(getCartLineSubtotal({ productType: "stock_item", price: 6, qty: 3 }), 18);
+});
+
+test("cart line merge keeps different variations separate", () => {
+  const base = {
+    id: "jump-pass",
+    meta: "Walk-in Passes - Jun 27 - 09:00 - 10:00",
+  };
+
+  assert.equal(
+    canMergeCartLines(
+      { ...base, variationId: 101, price: 18 },
+      { ...base, variationId: "101", price: 18 }
+    ),
+    true
+  );
+  assert.equal(
+    canMergeCartLines(
+      { ...base, variationId: 101, price: 18 },
+      { ...base, variationId: 102, price: 14 }
+    ),
+    false
+  );
+  assert.equal(
+    canMergeCartLines(
+      { ...base, price: 6 },
+      { ...base, variationId: null, price: 6 }
+    ),
+    true
+  );
 });
 
 test("session and party products require a schedule selection", () => {
@@ -208,4 +239,19 @@ test("phase 8: payment discount is merged into final booking pricing payload", (
   assert.equal(merged.discountName, "Manager discount");
   assert.equal(merged.discountType, "manual");
   assert.equal(merged.subtotalAmount, 100);
+});
+
+test("create-booking payment amount preserves partial split tender", () => {
+  assert.equal(
+    getCreateBookingPaymentAmount({ amountPaid: 10, paymentMethod: "cash" }, 19.8),
+    10
+  );
+  assert.equal(
+    getCreateBookingPaymentAmount({ amountPaid: 25, paymentMethod: "cash" }, 19.8),
+    19.8
+  );
+  assert.equal(
+    getCreateBookingPaymentAmount({ giftCard: true, amountPaid: 19.8 }, 19.8),
+    0
+  );
 });

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icon";
 import { needsScheduleSelection } from "./cartPricing";
 import {
@@ -444,6 +444,13 @@ export function VariantPickerDialog({ item, section, onClose, onPick }) {
 }
 
 function SearchBar({ value, onChange }) {
+  const inputRef = useRef(null);
+  const hasValue = String(value || "").length > 0;
+  const clearSearch = () => {
+    onChange?.("");
+    inputRef.current?.focus();
+  };
+
   return (
     <div style={{
       display: "inline-flex", alignItems: "center", gap: 10,
@@ -453,12 +460,36 @@ function SearchBar({ value, onChange }) {
     }}>
       <Icon name="search" size={18} stroke={2} style={{ color: "var(--ink-500)" }} />
       <input
+        ref={inputRef}
         value={value}
         onChange={(e) => onChange?.(e.target.value)}
         placeholder="Scan or search SKU, member, party..."
         style={{ all: "unset", flex: 1, fontSize: 14, color: "var(--ink-800)" }}
       />
-      <kbd style={{ fontSize: 10, color: "var(--ink-500)", fontFamily: "var(--font-mono)", padding: "2px 6px", background: "var(--ink-50)", borderRadius: 4 }}>K</kbd>
+      {hasValue ? (
+        <button
+          type="button"
+          onClick={clearSearch}
+          aria-label="Clear search"
+          title="Clear search"
+          style={{
+            all: "unset",
+            width: 24,
+            height: 24,
+            borderRadius: 999,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "var(--ink-500)",
+            cursor: "pointer",
+            flexShrink: 0,
+          }}
+        >
+          <Icon name="x" size={16} stroke={2.5} />
+        </button>
+      ) : (
+        <kbd style={{ fontSize: 10, color: "var(--ink-500)", fontFamily: "var(--font-mono)", padding: "2px 6px", background: "var(--ink-50)", borderRadius: 4 }}>K</kbd>
+      )}
     </div>
   );
 }

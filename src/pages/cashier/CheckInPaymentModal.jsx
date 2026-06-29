@@ -20,7 +20,6 @@ import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 import { moneyFmt, roundMoney } from "../../lib/money";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import TipStep from "../../features/tips/TipStep";
-import AddTipModal from "../../features/tips/AddTipModal";
 import { useTipDefaults } from "../../features/tips/useTipDefaults";
 import { useStandaloneTipMutation } from "../../features/tips/tipsApi";
 import { computeTipBase, TIP_ALLOCATIONS } from "../../features/tips/tipMath";
@@ -109,9 +108,8 @@ function CheckInPaymentModal({
   const [tip, setTip] = useState({ amount: 0, allocation: "booking_host", selectedPct: null, managerOverrideAuditId: null });
   const [recordedTip, setRecordedTip] = useState(0);
   const tipGuardRef = useRef(null);
-  // Card on-glass tip allocation (Sell flow) + the "add tip later" modal.
+  // Card on-glass tip allocation.
   const [cardAllocation, setCardAllocation] = useState("booking_host");
-  const [addTipOpen, setAddTipOpen] = useState(false);
   // Pre-fill the receipt email from any address on the booking; for a
   // walk-in with none, the cashier types one on the complete view.
   useEffect(() => {
@@ -120,7 +118,6 @@ function CheckInPaymentModal({
     setTip({ amount: 0, allocation: tipDefaults.defaultAllocation || "booking_host", selectedPct: null, managerOverrideAuditId: null });
     setCardAllocation(tipDefaults.defaultAllocation || "booking_host");
     setRecordedTip(0);
-    setAddTipOpen(false);
     tipGuardRef.current = null;
   }, [booking?.bookingId, booking?.guestEmail, booking?.guest?.guestEmail]);
   const discountAmount = roundMoney(Math.min(Number(discount?.amount || 0), balanceDue));
@@ -428,15 +425,6 @@ function CheckInPaymentModal({
                 <Icon name="printer" size={15} /> Print
               </button>
             </div>
-            {/* Tip-only: guest already paid the full amount and now wants to
-                leave (more) gratuity. Opens the standalone Add-tip flow. */}
-            {tipDefaults.enabled && (booking?.bookingId || complete?.bookingId) && (
-              <div style={{ marginTop: 12 }}>
-                <button type="button" className="a-btn a-btn--secondary" onClick={() => setAddTipOpen(true)} style={{ width: "100%", justifyContent: "center" }}>
-                  <Icon name="hand-coins" size={15} /> Add tip
-                </button>
-              </div>
-            )}
             <button type="button" className="a-btn a-btn--primary" onClick={onClose} style={{ width: "100%", justifyContent: "center", marginTop: 18 }}>
               Done
             </button>
@@ -655,17 +643,6 @@ function CheckInPaymentModal({
           setManagerOpen(false);
         }}
       />
-      {addTipOpen && (booking?.bookingId || complete?.bookingId) && (
-        <AddTipModal
-          booking={{
-            bookingId: booking?.bookingId || complete?.bookingId,
-            bookingNumber: booking?.bookingNumber || complete?.bookingNumber,
-            totalAmount: booking?.totalAmount,
-            amountPaid: booking?.amountPaid,
-          }}
-          onClose={() => setAddTipOpen(false)}
-        />
-      )}
     </div>
   );
 }

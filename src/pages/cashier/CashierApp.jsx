@@ -40,7 +40,9 @@ import { Redeem } from "./Redeem";
 import BookingDetail from "./BookingDetail";
 import {
   buildPaidCheckoutPricingSummary,
+  canMergeCartLines,
   clampCartQuantity,
+  getCreateBookingPaymentAmount,
   getCartLineSubtotal,
   getCheckoutRequirements,
   getDefaultCartQuantity,
@@ -244,8 +246,7 @@ function isAddOnItem(item) {
 //
 // The active half is color-coded so the cashier reads the mode at a
 // glance without parsing labels: green for "do it now" check-in, blue
-// for "plan ahead" booking. Mode persists in localStorage (see the
-// useEffect next to the state declaration in CashierApp).
+// for "plan ahead" booking.
 function SellModeToggle({ mode, onChange }) {
   const Half = ({ value, label, icon, activeBg, activeBorder, activeFg }) => {
     const active = mode === value;
@@ -807,23 +808,15 @@ export function CashierApp() {
   // Multi-variation add-on tapped from the "Add to order" strip — opens
   // the same VariantPickerDialog the catalog tiles use.
   const [addOnVariantPicker, setAddOnVariantPicker] = useState(null);
-  // Sell-screen operating mode (per-tablet, persisted so a reload keeps
-  // the cashier in the lane they were in):
+  // Sell-screen operating mode. A fresh cashier session starts in Check-in;
+  // toggling Booking is intentionally limited to the current app session.
   //   "checkin"  → walk-in flow. Session products auto-pick the nearest
   //               open slot today; only fall back to the schedule picker
   //               when nothing's available. autoCheckIn fires on payment.
   //   "booking"  → future-booking flow. Every session product opens the
   //               schedule picker so the cashier can pick a date/time.
   //               autoCheckIn stays off; the booking is created unredeemed.
-  const [sellMode, setSellMode] = useState(() => {
-    try {
-      const cached = localStorage.getItem("cashier:sellMode");
-      return cached === "booking" ? "booking" : "checkin";
-    } catch { return "checkin"; }
-  });
-  useEffect(() => {
-    try { localStorage.setItem("cashier:sellMode", sellMode); } catch {}
-  }, [sellMode]);
+  const [sellMode, setSellMode] = useState("checkin");
   // Floating add-on popup state — position is draggable; dismissed flag
   // hides the panel until the next sale (cleared in completeDraftCheckout
   // when clearCart() runs). Position is held in CashierApp so it survives
@@ -1210,7 +1203,7 @@ export function CashierApp() {
   // (same product + same scheduled slot) by bumping its quantity.
   const pushCartLine = (cartLine) => {
     setItems((prev) => {
-      const idx = prev.findIndex((x) => x.id === cartLine.id && x.meta === cartLine.meta);
+      const idx = prev.findIndex((x) => canMergeCartLines(x, cartLine));
       if (idx >= 0) {
         const next = [...prev];
         next[idx] = { ...next[idx], qty: clampCartQuantity(next[idx], next[idx].qty + 1) };
@@ -1347,7 +1340,7 @@ export function CashierApp() {
     const paymentPayload = (payByGiftCard || payByTerminal)
       ? {}
       : {
-          amountPaid: Number(payment?.amountPaid || 0),
+          amountPaid: getCreateBookingPaymentAmount(payment, paymentBooking?.totalAmount),
           paymentMethod: payment?.paymentMethod,
           // Reference (e.g. check number) recorded on the initial payment.
           referenceNumber: payment?.referenceNumber || null,

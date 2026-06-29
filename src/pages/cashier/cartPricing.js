@@ -178,6 +178,17 @@ export const clampCartQuantity = (item, quantity) => {
   return maxQty ? Math.min(maxQty, nextQty) : nextQty;
 };
 
+const normalizeCartVariationId = (value) => {
+  if (value === null || value === undefined || value === "") return "";
+  const number = Number(value);
+  return Number.isFinite(number) ? String(number) : String(value);
+};
+
+export const canMergeCartLines = (left, right) =>
+  left?.id === right?.id &&
+  left?.meta === right?.meta &&
+  normalizeCartVariationId(left?.variationId) === normalizeCartVariationId(right?.variationId);
+
 export const getCartLineSubtotal = (item) => {
   const qty = clampCartQuantity(item, item?.qty);
   const price = positiveNumber(item?.price, 0);
@@ -215,4 +226,13 @@ export const buildPaidCheckoutPricingSummary = (basePricingSummary, payment) => 
     discountMaxValue: Number(basePricingSummary?.discountMaxValue || 0),
     discountAmount: nextDiscount,
   };
+};
+
+export const getCreateBookingPaymentAmount = (payment, bookingTotal) => {
+  if (payment?.giftCard === true || payment?.terminal === true) return 0;
+  const requested = Number(payment?.amountPaid || 0);
+  if (!Number.isFinite(requested) || requested <= 0) return 0;
+  const cap = Number(bookingTotal || 0);
+  const amount = cap > 0 ? Math.min(requested, cap) : requested;
+  return Math.round(amount * 100) / 100;
 };

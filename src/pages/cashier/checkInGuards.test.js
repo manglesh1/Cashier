@@ -308,3 +308,30 @@ test("auto-bind plan prefers newly linked waiver holders and target ticket", () 
     ]
   );
 });
+
+test("auto-bind plan can restrict explicit waiver links to selected holders only", () => {
+  const tickets = [
+    ticket({ ticketCode: "A", ticketId: 1, requiresWaiver: true }),
+    ticket({ ticketCode: "B", ticketId: 2, requiresWaiver: true }),
+  ];
+  const participants = [
+    { bookingParticipantId: 10, hasValidWaiver: true },
+    { bookingParticipantId: 20, hasValidWaiver: true },
+  ];
+
+  const plan = buildAutoBindPlan({
+    participants,
+    tickets,
+    preferredTicketCode: "B",
+    preferredParticipantIds: [20],
+    restrictToPreferredParticipants: true,
+  });
+
+  assert.deepEqual(
+    plan.assignments.map((assignment) => ({
+      ticketCode: assignment.ticket.ticketCode,
+      participantId: assignment.participant.bookingParticipantId,
+    })),
+    [{ ticketCode: "B", participantId: 20 }]
+  );
+});

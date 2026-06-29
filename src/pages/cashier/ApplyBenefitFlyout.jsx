@@ -282,7 +282,7 @@ function PromoPanel({ value, onApply, onRemove, onClose }) {
 }
 
 /* ── Member benefit ─────────────────────────────────────────── */
-function MemberPanel({ value, onApply, onRemove, onClose }) {
+function MemberPanel({ value, onApply, onRemove, onClose, onApplied }) {
   const [token, setToken] = useState("");
   const [lookup, { isFetching }] = useLazyLookupVoucherByTokenQuery();
   const [lookupMembership, { isFetching: isFetchingMembership }] =
@@ -326,7 +326,7 @@ function MemberPanel({ value, onApply, onRemove, onClose }) {
         todaysBenefits: memberPass.todaysBenefits,
       });
       setToken("");
-      onClose();
+      onApplied?.();
     } catch (err) {
       toast.error(err?.data?.message || "Member lookup failed");
     }
@@ -865,6 +865,7 @@ export default function ApplyBenefitFlyout({
             onApply={(member) => update({ member })}
             onRemove={() => update({ member: null })}
             onClose={() => setActive(null)}
+            onApplied={onClose}
           />
         )}
         {active === "voucher" && (

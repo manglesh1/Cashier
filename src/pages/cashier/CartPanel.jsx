@@ -6,7 +6,6 @@ import { usePreviewVoucherCoverageMutation } from "../../features/benefits/benef
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 import ApplyBenefitFlyout from "./ApplyBenefitFlyout";
-import AddTipModal from "../../features/tips/AddTipModal";
 
 // Compute a member benefit discount amount from applied member benefits.
 // Reads the todaysBenefits[] array on the applied member and walks each
@@ -200,7 +199,11 @@ export function CartPanel({
     for (const it of items) {
       if (!it.requiresWaiver) continue;
       for (let i = 0; i < it.qty; i += 1) {
-        list.push({ itemId: it.id, itemName: it.name });
+        list.push({
+          itemId: it.id,
+          itemName: it.name,
+          variationName: it.variationName || null,
+        });
       }
     }
     return list;
@@ -258,7 +261,6 @@ export function CartPanel({
   // surfaces a flat 10% as a fallback when no benefits[] are loaded
   // (during the transition before the scan flow is the default).
   const [benefitFlyoutOpen, setBenefitFlyoutOpen] = useState(false);
-  const [takeTipOpen, setTakeTipOpen] = useState(false);
   const [appliedBenefits, setAppliedBenefits] = useState({
     promo: null,
     member: null,
@@ -638,7 +640,7 @@ export function CartPanel({
           ticket rows below. Each leaf shows whether it is already
           assigned to a ticket. Cashier can detach the whole waiver
           (× on the header) or add another guest at any time. */}
-      {(needsCustomer || waiversNeeded > 0 || waiversAttached.length > 0 || primaryCustomer) && (
+      {(items.length > 0 || needsCustomer || waiversNeeded > 0 || waiversAttached.length > 0 || primaryCustomer) && (
         <div style={{
           padding: "12px 18px",
           background: primaryCustomer ? "#EAF8EF" : "var(--ink-25)",
@@ -672,7 +674,9 @@ export function CartPanel({
             <div style={{ fontSize: 13, color: "var(--ink-600)" }}>
               {waiversNeeded > 0
                 ? "Add the booking customer with a signed waiver to start covering tickets."
-                : "Add the booking customer before taking payment."}
+                : needsCustomer
+                  ? "Add the booking customer before taking payment."
+                  : "Optional customer for receipt email."}
             </div>
           ) : !primaryCustomer.signatureId ? (
             <div style={{
@@ -867,6 +871,12 @@ export function CartPanel({
                         whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {spot.itemName}
                       </div>
+                      {spot.variationName && spot.variationName !== spot.itemName && (
+                        <div style={{ fontSize: 11, color: "var(--ink-500)", marginTop: 1,
+                          whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {spot.variationName}
+                        </div>
+                      )}
                       {assigned ? (
                         <div style={{ fontSize: 11, color: "var(--ink-500)", marginTop: 2 }}>
                           <Icon name="user-round" size={10} style={{ verticalAlign: "-1px", marginRight: 4 }} />
@@ -1168,25 +1178,6 @@ export function CartPanel({
           )}
         </div>
 
-        {/* Walk-in / no-booking tip: a guest hands over a tip with no sale. */}
-        {settings.enableTipping && (
-          <div style={{ marginTop: 8 }}>
-            <button
-              type="button"
-              onClick={() => setTakeTipOpen(true)}
-              className="a-btn a-btn--ghost a-btn--sm"
-              style={{ width: "100%", justifyContent: "center" }}
-              title="Record a tip with no booking"
-            >
-              <Icon name="hand-coins" size={16} /> Take a tip
-            </button>
-          </div>
-        )}
-
-        {takeTipOpen && (
-          <AddTipModal booking={null} onClose={() => setTakeTipOpen(false)} />
-        )}
-
         <ApplyBenefitFlyout
           open={benefitFlyoutOpen}
           onClose={() => setBenefitFlyoutOpen(false)}
@@ -1302,6 +1293,25 @@ function CartRow({
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 700, fontSize: 15, color: "var(--ink-800)" }}>{item.name}</div>
+        {item.variationName && item.variationName !== item.name && (
+          <div style={{
+            marginTop: 2,
+            display: "inline-flex",
+            alignItems: "center",
+            maxWidth: "100%",
+            padding: "2px 7px",
+            borderRadius: 999,
+            background: "var(--ink-50)",
+            color: "var(--ink-700)",
+            fontSize: 11,
+            fontWeight: 800,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}>
+            {item.variationName}
+          </div>
+        )}
         <div style={{ fontSize: 12, color: "var(--ink-500)" }}>{item.meta}</div>
         {recipientRows.length > 0 && (
           <div style={{ display: "grid", gap: 6, marginTop: 8 }}>

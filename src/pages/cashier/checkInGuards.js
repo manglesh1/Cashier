@@ -268,6 +268,7 @@ export const buildAutoBindPlan = ({
   tickets = [],
   preferredTicketCode = null,
   preferredParticipantIds = [],
+  restrictToPreferredParticipants = false,
 } = {}) => {
   const boundParticipantIds = new Set(
     tickets
@@ -283,6 +284,7 @@ export const buildAutoBindPlan = ({
   const availableParticipants = participants
     .filter((participant) => {
       const id = Number(participant.bookingParticipantId);
+      if (restrictToPreferredParticipants && !preferredParticipantOrder.has(id)) return false;
       return id && participant.hasValidWaiver && !participant.checkedInAt && !boundParticipantIds.has(id);
     })
     .sort((left, right) => {

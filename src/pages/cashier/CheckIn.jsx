@@ -49,6 +49,7 @@ import {
 } from "../../features/vouchers/voucherApi";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import CheckInPaymentModal from "./CheckInPaymentModal";
+import AddTipModal from "../../features/tips/AddTipModal";
 import TerminalProgressModal from "./TerminalProgressModal";
 import { useDebounceSearch } from "../../hooks/useDebounceSearch";
 import { getTerminal } from "../../lib/terminal";
@@ -164,7 +165,9 @@ const formatScheduledTicketTime = (ticket, bookingTimeRange = "") => {
 
 export function CheckIn() {
   const { searchTerm, inputValue, setDebouncedSearch } = useDebounceSearch(400);
+  const settings = useEffectiveSettings();
   const [selected, setSelected] = useState(null);
+  const [quickTipOpen, setQuickTipOpen] = useState(false);
   const [bookingBucket, setBookingBucket] = useState("upcoming");
   // Row-level quick check-in: fires checkInAll against ONE booking
   // without opening the detail pane. Spinner state is tracked per row
@@ -416,10 +419,27 @@ export function CheckIn() {
           onClick={refetch}
           className="a-btn a-btn--ghost a-btn--sm"
           title="Refresh"
-          style={{ padding: "6px 8px" }}
+          style={{ padding: "6px 10px", justifyContent: "center", flexShrink: 0 }}
         >
-          <Icon name="refresh" size={14} />
+          <Icon name="refresh-cw" size={14} /> Refresh
         </button>
+        {settings.enableTipping && (
+          <button
+            type="button"
+            onClick={() => setQuickTipOpen(true)}
+            className="a-btn a-btn--ghost a-btn--sm"
+            title={selected ? "Add tip to selected booking" : "Take a tip"}
+            aria-label={selected ? "Add tip to selected booking" : "Take a tip"}
+            style={{
+              height: 34,
+              padding: "6px 10px",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <Icon name="hand-coins" size={16} /> Tip
+          </button>
+        )}
       </div>
 
       {/* Inline KPI strip — replaces the 4 cards (saves ~70px).
@@ -533,6 +553,12 @@ export function CheckIn() {
           )}
         </aside>
       </div>
+      {quickTipOpen && (
+        <AddTipModal
+          booking={selected || null}
+          onClose={() => setQuickTipOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -977,6 +1003,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       tickets: ticketRows,
       preferredTicketCode,
       preferredParticipantIds,
+      restrictToPreferredParticipants: preferredParticipantIds.length > 0,
     });
     if (plan.assignments.length <= 0) {
       return { bound: 0, available: plan.available, target: plan.target };
@@ -1587,6 +1614,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           setWaiverTargetCode(ticketCode);
           setWaiverModalOpen(true);
         }}
+        onRemoveParticipant={handleUnlinkParticipant}
         onSaved={refresh}
         isAssigning={binding}
       />
@@ -1996,22 +2024,6 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                     />
                   )}
                 </div>
-                {t.participantId && !isRedeemed && (
-                  <button
-                    type="button"
-                    onClick={() => handleUnlinkParticipant(t.participantId)}
-                    title="Remove this guest from the booking (e.g. no-show)"
-                    style={{
-                      width: 28, height: 28, flexShrink: 0,
-                      borderRadius: 6, border: "1.5px solid var(--ink-200)",
-                      background: "white", color: "var(--ink-500)",
-                      cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                    }}
-                  >
-                    <Icon name="x" size={14} stroke={3} />
-                  </button>
-                )}
                 <button
                   type="button"
                   onClick={() => !isBlocked && handleRedeemOne(t.ticketCode)}
@@ -2152,6 +2164,7 @@ function GuestWorkflowPanel({
   onAddFromWaiver,
   onTargetWaiver,
   onAutoAssign,
+  onRemoveParticipant,
   onSaved,
   isAssigning = false,
 }) {
@@ -2160,6 +2173,13 @@ function GuestWorkflowPanel({
     () => new Set(tickets.map((ticket) => Number(ticket.participantId)).filter(Boolean)),
     [tickets]
   );
+  const ticketByParticipantId = useMemo(() => {
+    const map = new Map();
+    tickets.forEach((ticket) => {
+      if (ticket.participantId) map.set(Number(ticket.participantId), ticket);
+    });
+    return map;
+  }, [tickets]);
   const validParticipants = participants.filter((participant) => participant.hasValidWaiver);
   const availableValidParticipants = validParticipants.filter((participant) => {
     const id = Number(participant.bookingParticipantId);
@@ -2257,16 +2277,22 @@ function GuestWorkflowPanel({
           {sampleParticipants.map((participant) => {
             const id = Number(participant.bookingParticipantId);
             const isBound = boundIds.has(id);
+            const assignedTicket = ticketByParticipantId.get(id);
+            const canRemove = !!onRemoveParticipant && !participant.checkedInAt;
             return (
               <span
                 key={participant.bookingParticipantId}
-                title={participant.hasValidWaiver ? "Valid waiver" : "No valid waiver"}
+                title={[
+                  participant.hasValidWaiver ? "Valid waiver" : "No valid waiver",
+                  assignedTicket?.ticketCode ? `Assigned to ${assignedTicket.ticketCode}` : "",
+                  canRemove ? "Remove from booking" : "",
+                ].filter(Boolean).join(" - ")}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
                   gap: 4,
                   maxWidth: 220,
-                  padding: "4px 8px",
+                  padding: canRemove ? "4px 4px 4px 8px" : "4px 8px",
                   borderRadius: 999,
                   border: `1.5px solid ${participant.hasValidWaiver ? "#8AD5A3" : "var(--ink-200)"}`,
                   background: isBound
@@ -2283,6 +2309,31 @@ function GuestWorkflowPanel({
                 <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {displayText(participant.displayName, "Guest")}
                 </span>
+                {canRemove && (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onRemoveParticipant(id);
+                    }}
+                    title="Remove this person from the booking"
+                    style={{
+                      all: "unset",
+                      cursor: "pointer",
+                      width: 16,
+                      height: 16,
+                      borderRadius: 999,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      flexShrink: 0,
+                      background: isBound ? "rgba(244,91,10,0.18)" : "rgba(0,0,0,0.08)",
+                      color: participant.hasValidWaiver ? "#137A35" : "var(--ink-600)",
+                    }}
+                  >
+                    <Icon name="x" size={9} stroke={3} />
+                  </button>
+                )}
               </span>
             );
           })}
@@ -2368,6 +2419,8 @@ function CheckInSettlementPanel({
   onAddItem,
   onTakePayment,
 }) {
+  const settings = useEffectiveSettings();
+  const [tipOpen, setTipOpen] = useState(false);
   const isPaid = balanceDue <= 0;
   const canTakePayment = !isPaid;
   const subtotal = Number(booking?.subTotal ?? booking?.subtotal ?? booking?.subtotalAmount ?? booking?.totalAmount ?? balanceDue) || 0;
@@ -2630,6 +2683,26 @@ function CheckInSettlementPanel({
           </span>
         </div>
       </div>
+
+      {settings.enableTipping && (
+        <>
+          <button
+            type="button"
+            className="a-btn a-btn--ghost a-btn--sm"
+            onClick={() => setTipOpen(true)}
+            style={{ width: "100%", justifyContent: "center", marginBottom: 8 }}
+            title="Add a tip to this booking"
+          >
+            <Icon name="hand-coins" size={16} /> Add tip
+          </button>
+          {tipOpen && (
+            <AddTipModal
+              booking={booking}
+              onClose={() => setTipOpen(false)}
+            />
+          )}
+        </>
+      )}
 
       {!isPaid && (
         <>

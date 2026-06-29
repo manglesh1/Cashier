@@ -32,7 +32,7 @@ import { useRedeemGiftCardMutation } from "../../features/vouchers/voucherApi";
 import { moneyFmt, roundMoney } from "../../lib/money";
 import { getTerminal } from "../../lib/terminal";
 import { openCashDrawer, printReceipt } from "../../lib/hardware";
-import { buildPaidCheckoutPricingSummary } from "./cartPricing";
+import { buildPaidCheckoutPricingSummary, getCreateBookingPaymentAmount } from "./cartPricing";
 import CheckInPaymentModal from "./CheckInPaymentModal";
 import TerminalPaymentModal from "./TerminalPaymentModal";
 import TerminalProgressModal from "./TerminalProgressModal";
@@ -311,10 +311,11 @@ export default function SellPaymentOverlay({
         const allocation = voucherAllocations[allocationIndex] || {};
         return sum + (Number(allocation.totalAmount || allocation.grandTotal) || 0);
       }, 0);
-      const mainPaymentAmount =
+      const mainBookingTotal =
         noRegular && nonMembershipItems.length > 0 && artifactGrandTotal > 0
           ? artifactGrandTotal
           : cartGrandTotal;
+      const mainPaymentAmount = getCreateBookingPaymentAmount(payment, mainBookingTotal);
       const fullPayment = payByGiftCard || payByTerminal
         ? {}
         : {
