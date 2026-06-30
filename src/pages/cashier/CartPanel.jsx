@@ -49,6 +49,9 @@ function computeMemberBenefitAmount(member, items) {
 // maxValue caps a percentage so e.g. "10% off, max $20" works.
 function computeDiscountAmount(discount, subtotal) {
   if (!discount) return 0;
+  if (discount.source === "code" && discount.amount !== undefined && discount.amount !== null) {
+    return Math.min(Number(discount.amount) || 0, subtotal);
+  }
   const value = Number(discount.value || 0);
   const max = Number(discount.maxValue || 0);
   if (Number(discount.discountType) === 1) {
@@ -57,6 +60,52 @@ function computeDiscountAmount(discount, subtotal) {
   }
   // Fixed
   return Math.min(value, subtotal);
+}
+
+function getCartLineAmount(item) {
+  return roundMoney((Number(item?.price) || 0) * (Number(item?.qty) || 1));
+}
+
+function buildPromoCartLines(items = []) {
+  return items
+    .map((item, idx) => ({
+      itemKey: `line-${idx}`,
+      activityId: Number(item.activityId) || null,
+      variationId: Number(item.variationId) || null,
+      activityType: item.productType || item.activityType || item.activityTypeKey || null,
+      activityTypeKey: item.activityTypeKey || item.productType || item.activityType || null,
+      productType: item.productType || item.activityTypeKey || null,
+      quantity: Math.max(1, Number(item.qty) || 1),
+      subtotal: getCartLineAmount(item),
+      date: item.selectedDate || item.date || null,
+      selectedDate: item.selectedDate || item.date || null,
+      slotId: item.slotId || null,
+    }))
+    .filter((line) => line.subtotal > 0);
+}
+
+function normalizeValidatedPromo(data, fallbackCode = "") {
+  if (!data) return null;
+  return {
+    ...data,
+    source: "code",
+    code: data.code || fallbackCode,
+    amount: roundMoney(Number(data.amount) || 0),
+    eligibleSubtotal: roundMoney(Number(data.eligibleSubtotal) || 0),
+    value: Number(data.value || 0),
+    maxValue: Number(data.maxValue || 0),
+  };
+}
+
+function getBackendDiscountType(discount) {
+  if (!discount) return null;
+  if (discount.source === "code" || discount.code) {
+    const type = Number(discount.discountType);
+    if (type === 1) return "code_percentage";
+    if (type === 2) return "code_fixed";
+    if (type === 3) return "code_buy_get";
+  }
+  return discount.discountType;
 }
 
 function isGiftCardSaleLine(item) {
@@ -285,6 +334,24 @@ export function CartPanel({
   }, [items.length]);
 
   const subtotal = items.reduce((s, it) => s + it.price * it.qty, 0);
+  const promoCartLines = React.useMemo(() => buildPromoCartLines(items), [items]);
+  const promoCartFingerprint = React.useMemo(
+    () =>
+      JSON.stringify(
+        promoCartLines.map((line) => ({
+          itemKey: line.itemKey,
+          activityId: line.activityId,
+          variationId: line.variationId,
+          productType: line.productType,
+          quantity: line.quantity,
+          subtotal: line.subtotal,
+          date: line.date,
+          slotId: line.slotId,
+        }))
+      ),
+    [promoCartLines]
+  );
+  const promoGuestId = primaryCustomer?.guestId || primaryCustomer?.id || null;
   // Promo can come from the inline input (legacy) OR the flyout.
   // Flyout takes precedence when both set.
   const effectivePromo = appliedBenefits.promo || promo;
@@ -344,7 +411,7 @@ export function CartPanel({
       activityId: Number(it.activityId) || null,
       productType: it.productType || it.activityTypeKey || null,
       taxAtSale: it.taxAtSale === true,
-      subtotal: Number(it.price || 0) * Number(it.qty || 1),
+      subtotal: getCartLineAmount(it),
       taxOverride:
         isGiftCardSaleLine(it) && it.taxAtSale !== true
           ? { enabled: true, amount: 0, name: "No tax" }
@@ -385,7 +452,7 @@ export function CartPanel({
         ? {
             code: effectivePromo.code,
             name: effectivePromo.name,
-            type: effectivePromo.discountType,
+            type: getBackendDiscountType(effectivePromo),
             value: effectivePromo.value,
             maxValue: effectivePromo.maxValue,
             amount: discountAmount,
@@ -432,12 +499,18 @@ export function CartPanel({
     // Code path — validates against the server, gets discount details
     if (promoMode === "code") {
       try {
-        const res = await validate(raw).unwrap();
-        if (res?.success && res.data) {
-          setPromo(res.data);
+        const res = await validate({
+          code: raw,
+          subtotalAmount: subtotal,
+          cartLines: promoCartLines,
+          guestId: promoGuestId,
+        }).unwrap();
+        const validatedPromo = normalizeValidatedPromo(res?.data, raw);
+        if (res?.success && validatedPromo) {
+          setPromo(validatedPromo);
           setPromoOpen(false);
           setPromoInput("");
-          toast.success(`Promo "${res.data.name}" applied`);
+          toast.success(`Promo "${validatedPromo.name}" applied`);
         } else {
           toast.error("Invalid promo code");
         }
@@ -568,8 +641,14 @@ export function CartPanel({
         // response → silent $0 discount.)
         let discount = null;
         try {
-          const res = await validate({ code, override: true }).unwrap();
-          discount = res?.data || null;
+          const res = await validate({
+            code,
+            override: true,
+            subtotalAmount: subtotal,
+            cartLines: promoCartLines,
+            guestId: promoGuestId,
+          }).unwrap();
+          discount = normalizeValidatedPromo(res?.data, code);
         } catch (_) {
           discount = null;
         }
@@ -581,7 +660,7 @@ export function CartPanel({
           value: 0,
           maxValue: 0,
         };
-        setPromo({ ...discount, _overrideAuditId: audit.auditId });
+        setPromo({ ...discount, source: "code", _overrideAuditId: audit.auditId });
         toast.success(`Override applied — code "${code}"`);
       }
       setPromoOpen(false);
@@ -597,6 +676,58 @@ export function CartPanel({
     setPromo(null);
     setPromoInput("");
   };
+
+  React.useEffect(() => {
+    const codePromo = appliedBenefits.promo?.code
+      ? { bucket: "flyout", value: appliedBenefits.promo }
+      : promo?.code
+        ? { bucket: "inline", value: promo }
+        : null;
+    if (!codePromo || codePromo.value._manual || !promoCartLines.length) return undefined;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await validate({
+          code: codePromo.value.code,
+          subtotalAmount: subtotal,
+          cartLines: promoCartLines,
+          guestId: promoGuestId,
+        }).unwrap();
+        if (cancelled) return;
+        const nextPromo = normalizeValidatedPromo(res?.data, codePromo.value.code);
+        if (!nextPromo) return;
+        if (codePromo.bucket === "flyout") {
+          setAppliedBenefits((prev) =>
+            prev.promo?.code === codePromo.value.code
+              ? { ...prev, promo: { ...prev.promo, ...nextPromo } }
+              : prev
+          );
+        } else {
+          setPromo((prev) =>
+            prev?.code === codePromo.value.code ? { ...prev, ...nextPromo } : prev
+          );
+        }
+      } catch (err) {
+        if (cancelled) return;
+        const message = err?.data?.message || "Promo removed because it no longer applies to this cart.";
+        if (codePromo.bucket === "flyout") {
+          setAppliedBenefits((prev) =>
+            prev.promo?.code === codePromo.value.code ? { ...prev, promo: null } : prev
+          );
+        } else {
+          setPromo((prev) => (prev?.code === codePromo.value.code ? null : prev));
+        }
+        toast.error(message);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // Re-price code promos when the cart shape changes. Manual discounts are intentionally local.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [promoCartFingerprint, promo?.code, appliedBenefits.promo?.code, promoGuestId]);
 
   const isBold = variant === "bold";
   const panelStyle = {
@@ -1021,7 +1152,7 @@ export function CartPanel({
                 value={promoInput}
                 onChange={(e) => {
                   const v = promoMode === "code"
-                    ? e.target.value.toUpperCase()
+                    ? e.target.value
                     : e.target.value.replace(/[^0-9.]/g, "");
                   setPromoInput(v);
                 }}
@@ -1182,6 +1313,11 @@ export function CartPanel({
           open={benefitFlyoutOpen}
           onClose={() => setBenefitFlyoutOpen(false)}
           applied={appliedBenefits}
+          promoContext={{
+            subtotalAmount: subtotal,
+            cartLines: promoCartLines,
+            guestId: promoGuestId,
+          }}
           outstanding={Math.max(0, total - appliedBenefits.payments
             .filter((p) => p.method === "gift_card")
             .reduce((s, p) => s + p.amount, 0))}
