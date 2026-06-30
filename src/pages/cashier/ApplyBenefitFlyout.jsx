@@ -157,7 +157,7 @@ function PanelShell({ accent, title, onClose, children }) {
 }
 
 /* ── Promo code ─────────────────────────────────────────────── */
-function PromoPanel({ value, onApply, onRemove, onClose }) {
+function PromoPanel({ value, onApply, onRemove, onClose, promoContext = {} }) {
   const [code, setCode] = useState("");
   const [mode, setMode] = useState("code"); // code | percentage | amount
   const [validate, { isFetching }] = useLazyValidateDiscountCodeQuery();
@@ -167,7 +167,12 @@ function PromoPanel({ value, onApply, onRemove, onClose }) {
     if (!raw) return toast.error("Enter a code or amount");
     if (mode === "code") {
       try {
-        const res = await validate(raw).unwrap();
+        const res = await validate({
+          code: raw,
+          subtotalAmount: promoContext.subtotalAmount || 0,
+          cartLines: Array.isArray(promoContext.cartLines) ? promoContext.cartLines : [],
+          guestId: promoContext.guestId || null,
+        }).unwrap();
         const d = res?.data;
         if (!d) return toast.error("Code not recognized");
         if (d.expired || d.blocked) {
@@ -180,6 +185,8 @@ function PromoPanel({ value, onApply, onRemove, onClose }) {
           discountType: d.discountType,
           value: Number(d.value),
           maxValue: Number(d.maxValue || 0),
+          amount: Number(d.amount || 0),
+          eligibleSubtotal: Number(d.eligibleSubtotal || 0),
         });
         setCode("");
         onClose();
@@ -736,6 +743,7 @@ export default function ApplyBenefitFlyout({
   },
   outstanding = 0,
   onChange,
+  promoContext = {},
 }) {
   const [active, setActive] = useState(null); // "promo" | "member" | "voucher" | "gift" | null
 
@@ -857,6 +865,7 @@ export default function ApplyBenefitFlyout({
             onApply={(promo) => update({ promo })}
             onRemove={() => update({ promo: null })}
             onClose={() => setActive(null)}
+            promoContext={promoContext}
           />
         )}
         {active === "member" && (
