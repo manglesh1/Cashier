@@ -171,15 +171,8 @@ export function CatalogGrid({
       item.name,
       item.sub,
       item.id,
-      item.sku,
-      item.productSku,
-      item.raw?.sku,
-      item.raw?.SKU,
     ];
     const optionFields = (item.variationOptions || []).flatMap((option) => [
-      option.sku,
-      option.productSku,
-      option.SKU,
       option.name,
     ]);
     return [...fields, ...optionFields].some((value) =>
@@ -463,7 +456,7 @@ function SearchBar({ value, onChange }) {
         ref={inputRef}
         value={value}
         onChange={(e) => onChange?.(e.target.value)}
-        placeholder="Scan or search SKU, member, party..."
+        placeholder="Scan voucher or search product, member, party..."
         style={{ all: "unset", flex: 1, fontSize: 14, color: "var(--ink-800)" }}
       />
       {hasValue ? (
