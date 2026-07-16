@@ -19,7 +19,7 @@ const SIDECAR_DOWNLOAD_URL =
   import.meta.env.VITE_SIDECAR_DOWNLOAD_URL ||
   "https://github.com/manglesh1/Cashier/releases/latest";
 
-// Helper: read the paired terminal blob for venue wristband mode.
+// Helper: read the paired terminal blob for location wristband mode.
 const readTerminal = () => {
   try {
     return JSON.parse(localStorage.getItem("cashier:terminal") || "null");
@@ -51,7 +51,7 @@ export default function SettingsPage() {
     <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "20px 28px" }}>
       <div style={{ maxWidth: 760, margin: "0 auto", display: "grid", gap: 16 }}>
         {/* Terminal info — read-only summary so the operator knows
-            which till + venue they're configuring. */}
+            which till + location they're configuring. */}
         <Panel
           title="Terminal"
           subtitle="Where this Cashier tab is signed in."
@@ -61,7 +61,7 @@ export default function SettingsPage() {
           <KVRow label="Wristband mode" value={wristbandMode.toUpperCase()} />
         </Panel>
 
-        {/* Wristband Sidecar — only meaningful when the venue is in
+        {/* Wristband Sidecar — only meaningful when the location is in
             RFID mode, but we still show it (informational) for paper /
             none so a curious admin can see what it would do. */}
         <Panel
@@ -69,7 +69,7 @@ export default function SettingsPage() {
           subtitle={
             wristbandMode === "rfid"
               ? "Required for this terminal — reads RFID wristbands and passes scans to the Cashier."
-              : "Not required (this venue is in " + wristbandMode + " mode). Install only if you'll switch to RFID."
+              : "Not required (this location is in " + wristbandMode + " mode). Install only if you'll switch to RFID."
           }
         >
           <SidecarStatusRow bridge={bridge} required={wristbandMode === "rfid"} />

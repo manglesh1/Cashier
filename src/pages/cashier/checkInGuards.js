@@ -132,7 +132,7 @@ export const getTicketBlocker = (
 
   // Late arrival: a slot that ENDED earlier today can still be checked in
   // by the cashier (good will — capacity hold has released back into the
-  // pool by now, so admitting the late guest doesn't squeeze the venue).
+  // pool by now, so admitting the late guest doesn't squeeze the location).
   // Only a slot whose validUntil is a PREVIOUS day is genuinely "expired"
   // by the validity window. Status-based expiry (cron sweep / void) is
   // handled by the earlier status check above.

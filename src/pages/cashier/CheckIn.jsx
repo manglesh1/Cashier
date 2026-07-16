@@ -1940,7 +1940,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                     </span>
                     {time && <span>· {time}</span>}
                     {/* Paper-wristband chip from the backend resolver. Null
-                        when the venue is in RFID / none mode, when the
+                        when the location is in RFID / none mode, when the
                         activity is excluded, or when no rotation is
                         configured. The cashier reads the color + name to
                         grab the right physical wristband. */}

@@ -98,7 +98,7 @@ export default function AddTipModal({ booking, onClose }) {
     try {
       const res = await standaloneTip({
         bookingId: bookingId || undefined,
-        // Walk-in tips have no booking → send the till's venue.
+        // Walk-in tips have no booking → send the till's location.
         locationId: noBooking ? (getTerminal()?.locationId || undefined) : undefined,
         tipAmount,
         method: methodSel,

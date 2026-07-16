@@ -4,7 +4,7 @@ import { baseApi } from "../../api/baseApi";
 //
 //   start  → backend creates a PaymentIntent and tells the reader to
 //            collect. Returns { transaction, status:'processing', readerId }.
-//            We don't pass a readerId — the backend resolves the venue's
+//            We don't pass a readerId — the backend resolves the location's
 //            configured reader (Payments → Card terminals).
 //   status → poll until status is 'captured' (approved) or terminal-failed.
 //   cancel → cancel the reader's in-flight action.

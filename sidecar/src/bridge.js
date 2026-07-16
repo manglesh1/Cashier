@@ -3,7 +3,7 @@
 //
 // Binds to 127.0.0.1 only — never expose this port on the LAN. RFID
 // UIDs are physical credentials; a permissive bridge would let any
-// device on the venue's wifi inject scans. Loopback is the trust
+// device on the location's wifi inject scans. Loopback is the trust
 // boundary.
 //
 // Wire protocol — JSON messages, one per ws frame:

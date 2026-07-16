@@ -530,7 +530,7 @@ function AddOnSuggestionPopup({ suggestions, cartCounts, onAdd, position, onMove
 // terminal's wristbandMode from the paired-terminal blob, polls the
 // bridge status, and links the cashier to Settings for install steps.
 //
-// Renders nothing on paper / none venues, and nothing when the bridge
+// Renders nothing on paper / none locations, and nothing when the bridge
 // reports connected — so the banner is silent unless the cashier
 // actually needs it.
 function SidecarMissingBanner({ onOpenSettings }) {
@@ -549,7 +549,7 @@ function SidecarMissingBanner({ onOpenSettings }) {
     recompute();
     const off = onWristbandBridgeStatus(recompute);
     // Tile-based polling fallback. Bridge fires on every state change,
-    // but if the venue is reconfigured mid-session we want to pick up
+    // but if the location is reconfigured mid-session we want to pick up
     // the new mode without a sign-out.
     const tick = setInterval(recompute, 3000);
     return () => { off(); clearInterval(tick); };
@@ -1056,7 +1056,7 @@ export function CashierApp() {
   // Wristband Sidecar bridge.
   //
   // Previously gated on terminal.wristbandMode === 'rfid', but the
-  // terminal-pair snapshot doesn't include the venue's wristband
+  // terminal-pair snapshot doesn't include the location's wristband
   // config — only deviceId/locationId/templateId. Venues set to RFID
   // in admin would still see wristbandMode='none' here, so the bridge
   // never started and scans from the sidecar never reached the
@@ -1064,7 +1064,7 @@ export function CashierApp() {
   //
   // Fix: always start the bridge. The wristbandBridge client uses an
   // exponential backoff WebSocket connect — when there's no sidecar
-  // running (paper/none venues, dev machines), it retries quietly and
+  // running (paper/none locations, dev machines), it retries quietly and
   // never throws. Cost is one connection attempt every 1-30s; cheap
   // for the resilience win.
   React.useEffect(() => {
@@ -2415,7 +2415,7 @@ export function CashierApp() {
         </button>
       </aside>
       <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden" }}>
-        {/* Top-bar banner — shown when the venue is in RFID mode but the
+        {/* Top-bar banner — shown when the location is in RFID mode but the
             local Wristband Sidecar isn't responding. Clicking the link
             jumps to /settings where the cashier sees install steps. */}
         <SidecarMissingBanner onOpenSettings={() => setScreen("settings")} />
