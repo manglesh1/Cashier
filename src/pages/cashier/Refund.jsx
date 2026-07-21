@@ -4,52 +4,66 @@
 // calling it; the approving manager + reason are recorded in the refund
 // remarks for the audit trail.
 
-import React, { useState } from "react";
+import React, { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
-import { useGetAllBookingQuery, useRefundPaymentMutation } from "../../features/bookings/bookingApi";
-import { useDebounceSearch } from "../../hooks/useDebounceSearch";
+import {
+  useLazySearchBookingSuggestionsQuery,
+  useRefundPaymentMutation,
+} from "../../features/bookings/bookingApi";
+import { LookupSearch } from "../../components/LookupSearch";
+import {
+  RefundBookingLookupOption,
+  bookingCustomerNameOf,
+  bookingLabelOf,
+  bookingSecondaryOf,
+  bookingSuggestionItems,
+  bookingWhenOf,
+  lookupItemKey,
+  paidAmountOf,
+} from "../../components/cashierLookupRenderers";
 import { moneyFmt, roundMoney } from "../../lib/money";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 
-const paidOf = (b) => roundMoney(Number(b?.amountPaid ?? b?.amountPaidTotal ?? 0) || 0);
-const nameOf = (b) => b?.bookingName || b?.guest?.guestName || b?.guestName || "Walk-in";
-const numberOf = (b) => b?.bookingNumber || `#${b?.bookingId}`;
-const whenOf = (b) => {
-  const iso = b?.createdAt || b?.bookingDate || b?.date;
-  if (!iso) return "";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-};
+const paidOf = paidAmountOf;
+const nameOf = bookingCustomerNameOf;
+const numberOf = bookingLabelOf;
+const whenOf = bookingWhenOf;
 
 export function Refund() {
-  const { inputValue, searchTerm, setDebouncedSearch } = useDebounceSearch(350);
-  const trimmed = (searchTerm || "").trim();
-  const { data, isFetching } = useGetAllBookingQuery(
-    { search: trimmed, limit: 8, page: 1 },
-    { skip: trimmed.length < 2 }
-  );
-  const results = data?.data || [];
-
+  const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
   const [managerOpen, setManagerOpen] = useState(false);
   const [done, setDone] = useState(null);
+  const [searchBookingSuggestions] = useLazySearchBookingSuggestionsQuery();
   const [refundPayment, { isLoading: refunding }] = useRefundPaymentMutation();
+
+  const runRefundSearch = useCallback(
+    (search, { limit } = {}) =>
+      searchBookingSuggestions({
+        query: search,
+        limit: limit || 12,
+        paymentStatus: ["paid", "part-paid"],
+      }).unwrap(),
+    [searchBookingSuggestions]
+  );
 
   const refundable = selected ? paidOf(selected) : 0;
   const amountNum = roundMoney(Number(amount) || 0);
 
   const pickBooking = (b) => {
     setSelected(b);
+    setQuery(bookingLabelOf(b));
     setAmount(paidOf(b).toFixed(2));
     setReason("");
   };
 
   const reset = () => {
     setSelected(null);
+    setQuery("");
     setAmount("");
     setReason("");
     setDone(null);
@@ -194,52 +208,30 @@ export function Refund() {
       <div className="eyebrow">Refund</div>
       <h1 style={{ margin: "4px 0 18px", fontFamily: "var(--font-display)", fontSize: 32, fontWeight: 800 }}>Find the original sale</h1>
 
-      <div style={{ display: "inline-flex", alignItems: "center", gap: 10, padding: "12px 16px", background: "#fff", border: "1.5px solid var(--ink-200)", borderRadius: 14, width: "100%", boxSizing: "border-box" }}>
-        <Icon name="search" size={20} stroke={2} style={{ color: "var(--ink-500)" }} />
-        <input
-          value={inputValue}
-          onChange={(e) => setDebouncedSearch(e.target.value)}
-          placeholder="Search by name, email, phone, or booking number"
-          style={{ all: "unset", flex: 1, fontSize: 16 }}
-        />
-      </div>
-
-      <div style={{ marginTop: 18, display: "grid", gap: 10 }}>
-        {trimmed.length < 2 ? (
-          <div style={{ color: "var(--ink-500)", fontSize: 14, padding: 12 }}>Type at least 2 characters to search.</div>
-        ) : isFetching ? (
-          <div style={{ color: "var(--ink-500)", fontSize: 14, padding: 12 }}>Searching…</div>
-        ) : results.length === 0 ? (
-          <div style={{ color: "var(--ink-500)", fontSize: 14, padding: 12 }}>No bookings match “{trimmed}”.</div>
-        ) : (
-          results.map((b) => {
-            const paid = paidOf(b);
-            return (
-              <button
-                key={b.bookingId}
-                type="button"
-                onClick={() => pickBooking(b)}
-                disabled={paid <= 0}
-                title={paid <= 0 ? "Nothing was paid on this booking" : "Refund this sale"}
-                style={{
-                  all: "unset", cursor: paid <= 0 ? "not-allowed" : "pointer",
-                  display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12,
-                  background: "#fff", border: "1.5px solid var(--ink-200)", borderRadius: 14, padding: "14px 16px",
-                  opacity: paid <= 0 ? 0.55 : 1,
-                }}
-              >
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 800, color: "var(--ink-900)" }}>{nameOf(b)}</div>
-                  <div style={{ fontSize: 12, color: "var(--ink-500)", fontFamily: "var(--font-mono)" }}>{numberOf(b)} · {whenOf(b)}</div>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div className="display-num" style={{ fontSize: 18 }}>{moneyFmt(paid)}</div>
-                  <div style={{ fontSize: 11, color: "var(--ink-500)" }}>paid</div>
-                </div>
-              </button>
-            );
-          })
-        )}
+      <LookupSearch
+        autoFocus
+        value={query}
+        onInputChange={(next) => {
+          setQuery(next);
+          if (!next.trim()) setSelected(null);
+        }}
+        onSearch={runRefundSearch}
+        onSelect={pickBooking}
+        minChars={2}
+        limit={12}
+        placeholder="Search paid booking by name, email, phone, booking #, or ticket code"
+        minCharsText="Type at least 2 characters to find a sale."
+        emptyText="No bookings match this refund search."
+        loadingText="Searching sales..."
+        getItems={bookingSuggestionItems}
+        getKey={lookupItemKey}
+        getLabel={bookingLabelOf}
+        getSecondary={bookingSecondaryOf}
+        renderItem={(item) => <RefundBookingLookupOption item={item} />}
+        className="cashier-refund-lookup"
+      />
+      <div style={{ color: "var(--ink-500)", fontSize: 13, padding: "14px 2px" }}>
+        Select the original paid booking. Sales with no recorded payment cannot be refunded.
       </div>
     </div>
   );

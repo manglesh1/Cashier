@@ -1,10 +1,19 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   useGetSignedWaiverQuery,
   useGetWaiverDefinitionQuery,
+  useLazySearchWaiversQuery,
   useSearchWaiversQuery,
 } from "../../features/bookings/bookingApi";
+import { LookupSearch } from "../../components/LookupSearch";
+import {
+  lookupItemKey,
+  waiverLabelOf,
+  waiverSecondaryOf,
+  waiverSuggestionItems,
+  WaiverLookupOption,
+} from "../../components/cashierLookupRenderers";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
 
@@ -222,6 +231,7 @@ export function WaiverDetail() {
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [status, setStatus] = useState("all");
   const [selectedRow, setSelectedRow] = useState(null);
+  const [lookupWaivers] = useLazySearchWaiversQuery();
 
   useEffect(() => {
     const id = setTimeout(() => setDebouncedQuery(query.trim()), 250);
@@ -255,6 +265,25 @@ export function WaiverDetail() {
     refetch: refetchWaiverDefinition,
   } = useGetWaiverDefinitionQuery(selectedWaiverId, { skip: !selectedWaiverId });
   const signingUrl = publicAgreementUrl(waiverDefinition?.waiver);
+
+  const runWaiverLookup = useCallback(
+    (search, { limit } = {}) =>
+      lookupWaivers({
+        search,
+        limit: limit || 12,
+        status,
+        sortBy: status === "expired" ? "expiredAt" : "signedAt",
+        sortDir: "DESC",
+      }).unwrap(),
+    [lookupWaivers, status]
+  );
+
+  const selectLookupWaiver = useCallback((row) => {
+    const label = waiverLabelOf(row);
+    setSelectedRow(row);
+    setQuery(label);
+    setDebouncedQuery(label);
+  }, []);
 
   useEffect(() => {
     if (!holders.length) {
@@ -341,28 +370,24 @@ export function WaiverDetail() {
           </div>
         </div>
 
-        <div style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          background: "#fff",
-          border: "1.5px solid var(--ink-200)",
-          borderRadius: 14,
-          padding: "12px 14px",
-        }}>
-          <Icon name="search" size={18} style={{ color: "var(--ink-500)" }} />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Name, email, phone..."
-            style={{ all: "unset", flex: 1, minWidth: 0, fontSize: 14, fontWeight: 650 }}
-          />
-          {query && (
-            <button type="button" onClick={() => setQuery("")} style={{ all: "unset", cursor: "pointer", color: "var(--ink-500)" }} title="Clear">
-              <Icon name="x" size={16} />
-            </button>
-          )}
-        </div>
+        <LookupSearch
+          value={query}
+          onInputChange={setQuery}
+          onSearch={runWaiverLookup}
+          onSelect={selectLookupWaiver}
+          minChars={2}
+          limit={12}
+          placeholder="Search by customer, guardian, email, or phone"
+          minCharsText="Type at least 2 characters to find signed waivers."
+          emptyText="No signed waivers match this search."
+          loadingText="Searching waivers..."
+          getItems={waiverSuggestionItems}
+          getKey={lookupItemKey}
+          getLabel={waiverLabelOf}
+          getSecondary={waiverSecondaryOf}
+          renderItem={(item) => <WaiverLookupOption item={item} />}
+          className="cashier-waiver-lookup"
+        />
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 6 }}>
           {[

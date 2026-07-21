@@ -17,14 +17,20 @@
 //   • Entitlement  → redeemEntitlement (single-press redeem)
 //   • Membership   → redeemMembership (single-press member ticket)
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
 import {
-  useLazySearchCustomersQuery,
+  useLazyLookupCustomersQuery,
   useLazyGetCustomerRedeemablesQuery,
 } from "../../features/customers/customersApi";
+import { LookupSearch } from "../../components/LookupSearch";
+import {
+  CustomerLookupOption,
+  customerContactOf,
+  customerNameOf,
+} from "../../components/cashierLookupRenderers";
 import {
   useLazyLookupVoucherByTokenQuery,
   useRedeemMembershipMutation,
@@ -52,14 +58,12 @@ import { CartWaiverModal } from "./CartWaiverModal";
 const TOKEN_LOOKS_LIKE = /^AS-[A-Z]-[A-Z0-9]+$/i;
 
 export function Redeem({ onRedeemCheckout }) {
-  const [mode, setMode] = useState("search"); // "search" | "token"
   const [search, setSearch] = useState("");
   const [selectedGuest, setSelectedGuest] = useState(null);
   const [redeemables, setRedeemables] = useState(null);
   const searchInputRef = useRef(null);
 
-  const [searchCustomers, { data: searchData, isFetching: isSearching }] =
-    useLazySearchCustomersQuery();
+  const [lookupCustomers] = useLazyLookupCustomersQuery();
   const [fetchRedeemables, { isFetching: isFetchingRedeemables }] =
     useLazyGetCustomerRedeemablesQuery();
   const [lookupToken] = useLazyLookupVoucherByTokenQuery();
@@ -87,30 +91,17 @@ export function Redeem({ onRedeemCheckout }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Debounced customer search.
-  useEffect(() => {
-    if (mode !== "search") return undefined;
-    const trimmed = search.trim();
-    if (!trimmed) return undefined;
-    // If the typed string LOOKS like a token, switch to token mode
-    // instead of searching customers.
-    if (TOKEN_LOOKS_LIKE.test(trimmed)) {
-      handleTokenInput(trimmed);
-      return undefined;
-    }
-    const handle = setTimeout(() => {
-      searchCustomers({ search: trimmed, limit: 15 });
-    }, 250);
-    return () => clearTimeout(handle);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, mode]);
-
   const pickGuest = async (guest) => {
+    const guestId = guest?.guestId || guest?.customerId || guest?.id;
+    if (!guestId) {
+      toast.error("Customer record is missing an ID.");
+      return;
+    }
     setSelectedGuest(guest);
     setSearch("");
     setRedeemables(null);
     try {
-      const res = await fetchRedeemables(guest.guestId).unwrap();
+      const res = await fetchRedeemables(guestId).unwrap();
       setRedeemables(res || null);
     } catch (err) {
       toast.error(err?.data?.error || "Could not load redeemables");
@@ -125,8 +116,10 @@ export function Redeem({ onRedeemCheckout }) {
 
   const refreshRedeemables = async () => {
     if (!selectedGuest) return;
+    const guestId = selectedGuest?.guestId || selectedGuest?.customerId || selectedGuest?.id;
+    if (!guestId) return;
     try {
-      const res = await fetchRedeemables(selectedGuest.guestId).unwrap();
+      const res = await fetchRedeemables(guestId).unwrap();
       setRedeemables(res || null);
     } catch (err) {
       console.warn("[Redeem] refresh failed:", err?.data?.error);
@@ -196,7 +189,18 @@ export function Redeem({ onRedeemCheckout }) {
     setSearch("");
   };
 
-  const searchResults = searchData?.data || [];
+  const searchRedeemCustomers = useCallback(
+    async (nextSearch) => {
+      const trimmed = String(nextSearch || "").trim();
+      if (TOKEN_LOOKS_LIKE.test(trimmed)) {
+        await handleTokenInput(trimmed);
+        return { data: [] };
+      }
+      return lookupCustomers({ query: trimmed, limit: 15 }).unwrap();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [lookupCustomers]
+  );
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -214,34 +218,21 @@ export function Redeem({ onRedeemCheckout }) {
         <StatusPill tone="info" icon="search">
           Find customer or scan token
         </StatusPill>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 14,
-            background: "white",
-            border: "2px solid var(--ink-800)",
-            borderRadius: 18,
-            padding: "12px 18px",
-            boxShadow: "0 6px 0 var(--ink-800)",
-          }}
-        >
-          <Icon name="search" size={22} stroke={2} style={{ color: "var(--ink-700)" }} />
-          <input
-            ref={searchInputRef}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <LookupSearch
+            inputRef={searchInputRef}
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search name / email / phone — or scan token"
-            style={{
-              all: "unset",
-              flex: 1,
-              fontSize: 16,
-              color: "var(--ink-900)",
-            }}
+            onInputChange={setSearch}
+            onSearch={searchRedeemCustomers}
+            onSelect={pickGuest}
+            placeholder="Search name, email, phone — or scan token"
+            minChars={2}
+            emptyText="No matching customers found."
+            getLabel={customerNameOf}
+            getSecondary={customerContactOf}
+            renderItem={(person) => <CustomerLookupOption item={person} />}
+            className="cashier-lookup--wide"
           />
-          {(isSearching || isFetchingRedeemables) && (
-            <span style={{ fontSize: 11, color: "var(--ink-500)" }}>…</span>
-          )}
           {selectedGuest && (
             <button
               type="button"
@@ -251,55 +242,10 @@ export function Redeem({ onRedeemCheckout }) {
               <Icon name="x" size={14} /> Clear
             </button>
           )}
+          {isFetchingRedeemables && (
+            <span style={{ fontSize: 11, color: "var(--ink-500)" }}>Loading benefits...</span>
+          )}
         </div>
-
-        {/* Customer search results — only when nothing's selected and
-            there's a non-token search term in flight. */}
-        {!selectedGuest && search.trim() && !TOKEN_LOOKS_LIKE.test(search.trim()) && (
-          <div
-            style={{
-              background: "white",
-              border: "1px solid var(--ink-200)",
-              borderRadius: 12,
-              maxHeight: 260,
-              overflowY: "auto",
-            }}
-          >
-            {searchResults.length === 0 && !isSearching && (
-              <div style={{ padding: 14, fontSize: 13, color: "var(--ink-500)" }}>
-                No matches.
-              </div>
-            )}
-            {searchResults.map((g) => (
-              <button
-                key={g.guestId}
-                type="button"
-                onClick={() => pickGuest(g)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 12,
-                  width: "100%",
-                  padding: "10px 14px",
-                  border: "none",
-                  borderBottom: "1px solid var(--ink-100)",
-                  background: "white",
-                  cursor: "pointer",
-                  textAlign: "left",
-                }}
-              >
-                <Icon name="user-round" size={16} style={{ color: "var(--ink-500)" }} />
-                <div style={{ flex: 1, lineHeight: 1.3 }}>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>{g.guestName || "Guest"}</div>
-                  <div style={{ fontSize: 11, color: "var(--ink-500)" }}>
-                    {g.guestEmail || g.guestPhone || "no contact"}
-                  </div>
-                </div>
-                <Icon name="chevron-right" size={14} style={{ color: "var(--ink-400)" }} />
-              </button>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* Selected customer's redeemables */}

@@ -7,7 +7,7 @@
 // Payment + Shift-close screens remain as visual stubs until the user
 // approves their backend additions.
 
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useCallback, useMemo, useState, useEffect } from "react";
 import Cookies from "js-cookie";
 import { useDispatch, useSelector } from "react-redux";
 import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
@@ -59,8 +59,16 @@ import {
   useValidateCartMutation,
   useLazyGetAvailabilityQuery,
   useLazySearchWaiversQuery,
-  useLazySearchGuestsQuery,
 } from "../../features/bookings/bookingApi";
+import { useLazyLookupCustomersQuery } from "../../features/customers/customersApi";
+import { LookupSearch } from "../../components/LookupSearch";
+import {
+  CustomerLookupOption,
+  customerContactOf,
+  customerNameOf,
+  customerSuggestionItems,
+  lookupItemKey,
+} from "../../components/cashierLookupRenderers";
 import { autoScheduleLine, formatDateValue, getCurrentSessionBlocker } from "./scheduleHelpers";
 import {
   setCartItems,
@@ -1010,7 +1018,8 @@ export function CashierApp() {
   const myDevice = useMemo(() => {
     if (pairedTerminal?.deviceId) {
       const fromList = devices.find(
-        (d) => String(d.posDeviceId || d.deviceId) === String(pairedTerminal.deviceId)
+        (d) => [d.posDeviceId, d.deviceId, d.id]
+          .some((value) => String(value) === String(pairedTerminal.deviceId))
       );
       // Fall back to the local pairing snapshot if device list hasn't loaded yet
       return fromList || {
@@ -1025,7 +1034,15 @@ export function CashierApp() {
       };
     }
     return devices.find((d) => String(d.locationId) === String(locationId)) || devices[0] || null;
-  }, [devices, locationId, pairedTerminal?.deviceId]);
+  }, [
+    devices,
+    locationId,
+    pairedTerminal?.deviceId,
+    pairedTerminal?.deviceName,
+    pairedTerminal?.locationId,
+    pairedTerminal?.locationName,
+    pairedTerminal?.templateId,
+  ]);
   const templateId =
     myDevice?.posTemplateId || myDevice?.templateId || myDevice?.presetId || pairedTerminal?.templateId;
   const terminalDeviceId = pairedTerminal?.deviceId || myDevice?.posDeviceId || myDevice?.deviceId;
@@ -2555,26 +2572,19 @@ function normalizeRecipientForCheckout(guest) {
 
 function RecipientPickerModal({ open, customer, current, onPick, onUseCustomer, onClose }) {
   const [query, setQuery] = useState("");
-  const [triggerSearch, { data, isFetching }] = useLazySearchGuestsQuery();
+  const [triggerCustomerLookup] = useLazyLookupCustomersQuery();
+  const searchRecipients = useCallback(
+    (search) => triggerCustomerLookup({ query: search, limit: 16 }).unwrap(),
+    [triggerCustomerLookup]
+  );
 
   useEffect(() => {
     if (!open) return;
     setQuery("");
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return undefined;
-    const timer = setTimeout(() => {
-      if (query.trim().length >= 2) {
-        triggerSearch(query.trim());
-      }
-    }, 250);
-    return () => clearTimeout(timer);
-  }, [open, query, triggerSearch]);
-
   if (!open) return null;
 
-  const rows = query.trim().length >= 2 ? (data?.data || []) : [];
   const currentName = current?.name || current?.guestName || "Booking customer";
   const currentEmail = current?.contactEmail || current?.guestEmail || current?.email || "";
 
@@ -2628,60 +2638,28 @@ function RecipientPickerModal({ open, customer, current, onPick, onUseCustomer, 
           <div style={{ fontSize: 12, color: "var(--ink-500)" }}>{currentEmail || "Email not on file"}</div>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 8, border: "1.5px solid var(--ink-200)", borderRadius: 10, padding: "11px 12px" }}>
-          <Icon name="search" size={16} />
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search member by name, email, or phone"
-            autoFocus
-            style={{ all: "unset", flex: 1, fontSize: 14, fontWeight: 700 }}
-          />
-        </div>
-
-        <div style={{ overflowY: "auto", display: "grid", gap: 8, minHeight: 120 }}>
-          {query.trim().length < 2 ? (
-            <div style={{ padding: 18, textAlign: "center", color: "var(--ink-500)" }}>Type at least 2 characters.</div>
-          ) : isFetching ? (
-            <div style={{ padding: 18, textAlign: "center", color: "var(--ink-500)" }}>Searching...</div>
-          ) : rows.length === 0 ? (
-            <div style={{ padding: 18, textAlign: "center", color: "var(--ink-500)" }}>No matching customers found.</div>
-          ) : (
-            rows.map((guest) => {
-              const normalized = normalizeRecipientForCheckout(guest);
-              return (
-                <button
-                  key={guest.guestId || `${normalized.name}:${normalized.contactEmail}`}
-                  type="button"
-                  onClick={() => onPick?.(normalized)}
-                  style={{
-                    all: "unset",
-                    cursor: normalized.contactEmail ? "pointer" : "not-allowed",
-                    opacity: normalized.contactEmail ? 1 : 0.55,
-                    display: "grid",
-                    gridTemplateColumns: "32px minmax(0, 1fr) auto",
-                    gap: 10,
-                    alignItems: "center",
-                    border: "1.5px solid var(--ink-150)",
-                    borderRadius: 10,
-                    padding: "10px 12px",
-                  }}
-                >
-                  <Icon name="user-round" size={18} />
-                  <span style={{ minWidth: 0 }}>
-                    <span style={{ display: "block", fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {normalized.name || "Guest"}
-                    </span>
-                    <span style={{ display: "block", fontSize: 12, color: "var(--ink-500)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {normalized.contactEmail || normalized.contactPhone || "No email or phone"}
-                    </span>
-                  </span>
-                  <span style={{ fontSize: 12, fontWeight: 900, color: "var(--aero-orange-600)" }}>Attach</span>
-                </button>
-              );
-            })
-          )}
-        </div>
+        <LookupSearch
+          autoFocus
+          value={query}
+          onInputChange={setQuery}
+          onSearch={searchRecipients}
+          onSelect={(guest) => {
+            const normalized = normalizeRecipientForCheckout(guest);
+            if (!normalized?.contactEmail) {
+              toast.error("This member needs an email before benefits can be attached.");
+              return;
+            }
+            onPick?.(normalized);
+          }}
+          placeholder="Search member by name, email, or phone"
+          minChars={2}
+          emptyText="No matching customers found."
+          getItems={customerSuggestionItems}
+          getKey={lookupItemKey}
+          getLabel={customerNameOf}
+          getSecondary={customerContactOf}
+          renderItem={(person) => <CustomerLookupOption item={person} />}
+        />
 
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
           <button type="button" className="a-btn a-btn--ghost" onClick={onUseCustomer} disabled={!customer?.contactEmail}>

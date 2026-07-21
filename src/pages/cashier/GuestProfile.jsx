@@ -1,12 +1,21 @@
 // GuestProfile — search + profile view for the cashier.
-// Type 4+ chars (email / phone / name) → results appear → tap one →
+// Type 3+ chars (email / phone / name) → dropdown appears → select one →
 // see the guest's recent bookings. From here the cashier can jump into
 // the admin booking detail to take payment, send a waiver, etc.
 
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useState } from "react";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
-import { useSearchGuestsQuery, useGetAllBookingQuery } from "../../features/bookings/bookingApi";
+import { useGetAllBookingQuery } from "../../features/bookings/bookingApi";
+import { useLazyLookupCustomersQuery } from "../../features/customers/customersApi";
+import { LookupSearch } from "../../components/LookupSearch";
+import {
+  CustomerLookupOption,
+  customerContactOf,
+  customerEmailOf,
+  customerNameOf,
+  customerPhoneOf,
+} from "../../components/cashierLookupRenderers";
 import { adminBookingDetailUrl } from "../../lib/adminLink";
 
 const fmtMoney = (v) => `$${Number(v || 0).toFixed(2)}`;
@@ -14,84 +23,51 @@ const fmtMoney = (v) => `$${Number(v || 0).toFixed(2)}`;
 export function GuestProfile() {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
+  const [lookupCustomers] = useLazyLookupCustomersQuery();
 
-  const { data: searchResults, isFetching } = useSearchGuestsQuery(query, {
-    skip: query.length < 4,
-  });
-  // Email is the identity key: collapse duplicate guest rows that share an
-  // email into one card (POS walk-ins + admin/online all roll up). Prefer a
-  // real name over a "Walk-in …" placeholder. Rows with no email stay
-  // separate (no key to merge on). Selecting a card loads ALL bookings for
-  // that email (the detail searches by email), so every booking shows.
-  const guests = useMemo(() => {
-    const raw = searchResults?.data || [];
-    const isPlaceholder = (n) => /^walk[\s-]?in/i.test(String(n || "").trim());
-    const byEmail = new Map();
-    const noEmail = [];
-    for (const g of raw) {
-      const email = String(g.guestEmail || "").trim().toLowerCase();
-      if (!email) { noEmail.push(g); continue; }
-      const existing = byEmail.get(email);
-      if (!existing) {
-        byEmail.set(email, { ...g, _profileCount: 1 });
-        continue;
-      }
-      existing._profileCount += 1;
-      // Upgrade the displayed record to a real (non-placeholder) name.
-      if (isPlaceholder(existing.guestName) && !isPlaceholder(g.guestName)) {
-        byEmail.set(email, { ...g, _profileCount: existing._profileCount });
-      }
-    }
-    return [...byEmail.values(), ...noEmail];
-  }, [searchResults]);
+  const searchGuests = useCallback(
+    (search) => lookupCustomers({ query: search, limit: 18 }).unwrap(),
+    [lookupCustomers]
+  );
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
       {/* Search bar */}
       <div style={{ padding: "16px 28px", borderBottom: "1px solid var(--ink-100)" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "12px 18px",
-            background: "#fff",
-            border: "1.5px solid var(--ink-200)",
-            borderRadius: 14,
-            maxWidth: 520,
+        <LookupSearch
+          value={query}
+          onInputChange={(next) => {
+            setQuery(next);
+            if (!next.trim()) setSelected(null);
           }}
-        >
-          <Icon name="search" size={20} stroke={2} style={{ color: "var(--ink-500)" }} />
-          <input
-            value={query}
-            onChange={(e) => { setQuery(e.target.value); setSelected(null); }}
-            placeholder="Search by name, email, or phone (4+ chars)…"
-            style={{ all: "unset", flex: 1, fontSize: 16 }}
-          />
-          {isFetching && <span style={{ fontSize: 11, color: "var(--ink-500)" }}>Searching…</span>}
-        </div>
+          onSearch={searchGuests}
+          onSelect={(guest) => {
+            setSelected(guest);
+            setQuery("");
+          }}
+          placeholder="Search by name, email, or phone"
+          minChars={2}
+          emptyText="No matching customers found."
+          getLabel={customerNameOf}
+          getSecondary={customerContactOf}
+          renderItem={(person) => <CustomerLookupOption item={person} />}
+          className="cashier-lookup--profile"
+        />
       </div>
 
       <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
         {/* Results list */}
         <div style={{ width: 360, overflowY: "auto", borderRight: "1px solid var(--ink-100)", padding: "12px 16px" }}>
-          {query.length < 4 ? (
-            <div style={{ padding: 28, textAlign: "center", color: "var(--ink-500)", fontSize: 13 }}>
-              Type at least 4 characters to search.
-            </div>
-          ) : guests.length === 0 ? (
-            <div style={{ padding: 28, textAlign: "center", color: "var(--ink-500)", fontSize: 13 }}>
-              No matches.
-            </div>
+          {selected ? (
+            <GuestRow
+              g={selected}
+              isSelected
+              onClick={() => setSelected(selected)}
+            />
           ) : (
-            guests.map((g) => (
-              <GuestRow
-                key={g.guestId}
-                g={g}
-                isSelected={selected?.guestId === g.guestId}
-                onClick={() => setSelected(g)}
-              />
-            ))
+            <div style={{ padding: 28, textAlign: "center", color: "var(--ink-500)", fontSize: 13 }}>
+              Search and select a customer to open their profile.
+            </div>
           )}
         </div>
 
@@ -102,7 +78,7 @@ export function GuestProfile() {
           ) : (
             <div style={{ padding: 28, textAlign: "center", color: "var(--ink-500)" }}>
               <Icon name="user-round" size={42} style={{ color: "var(--ink-200)", marginBottom: 12 }} />
-              <div style={{ fontWeight: 700, color: "var(--ink-700)", marginBottom: 4 }}>Pick a guest</div>
+              <div style={{ fontWeight: 700, color: "var(--ink-700)", marginBottom: 4 }}>Pick a customer</div>
               <div style={{ fontSize: 13 }}>Their visit history and active bookings will show here.</div>
             </div>
           )}
@@ -121,6 +97,10 @@ const colorFor = (name) =>
   PALETTE[(String(name || "?").charCodeAt(0) + String(name || "").length) % PALETTE.length];
 
 function GuestRow({ g, isSelected, onClick }) {
+  const name = customerNameOf(g);
+  const email = customerEmailOf(g);
+  const phone = customerPhoneOf(g);
+  const id = g.customerId || g.guestId || g.id;
   return (
     <div
       onClick={onClick}
@@ -139,7 +119,7 @@ function GuestRow({ g, isSelected, onClick }) {
       <div
         style={{
           width: 36, height: 36, borderRadius: 10,
-          background: colorFor(g.guestName),
+          background: colorFor(name),
           color: "white",
           fontWeight: 800, fontSize: 13,
           display: "flex", alignItems: "center", justifyContent: "center",
@@ -147,11 +127,11 @@ function GuestRow({ g, isSelected, onClick }) {
           flexShrink: 0,
         }}
       >
-        {initials(g.guestName)}
+        {initials(name)}
       </div>
       <div style={{ flex: 1, lineHeight: 1.3, minWidth: 0 }}>
         <div style={{ fontWeight: 700, fontSize: 14, color: "var(--ink-900)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.guestName || "—"}</span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name || "—"}</span>
           {g._profileCount > 1 && (
             <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 800, color: "var(--ink-600)", background: "var(--ink-100)", borderRadius: 999, padding: "2px 7px" }}>
               {g._profileCount} profiles
@@ -159,7 +139,7 @@ function GuestRow({ g, isSelected, onClick }) {
           )}
         </div>
         <div style={{ fontSize: 11.5, color: "var(--ink-500)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {g.guestEmail || g.guestPhone || `Guest #${g.guestId}`}
+          {email || phone || `Customer #${id}`}
         </div>
       </div>
     </div>
@@ -169,7 +149,11 @@ function GuestRow({ g, isSelected, onClick }) {
 function GuestDetail({ guest }) {
   // Pull this guest's recent bookings via the same all-bookings query,
   // filtered by their email or phone (search supports both).
-  const searchKey = guest.guestEmail || guest.guestPhone || guest.guestName || "";
+  const name = customerNameOf(guest);
+  const email = customerEmailOf(guest);
+  const phone = customerPhoneOf(guest);
+  const id = guest.customerId || guest.guestId || guest.id;
+  const searchKey = email || phone || name || "";
   const { data, isLoading } = useGetAllBookingQuery({
     page: 1,
     limit: 20,
@@ -192,7 +176,7 @@ function GuestDetail({ guest }) {
             width: 88,
             height: 88,
             borderRadius: 24,
-            background: colorFor(guest.guestName),
+            background: colorFor(name),
             color: "#fff",
             display: "flex",
             alignItems: "center",
@@ -204,7 +188,7 @@ function GuestDetail({ guest }) {
             boxShadow: "0 6px 0 var(--ink-800)",
           }}
         >
-          {initials(guest.guestName)}
+          {initials(name)}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <h1
@@ -217,11 +201,11 @@ function GuestDetail({ guest }) {
               color: "var(--ink-900)",
             }}
           >
-            {guest.guestName || "—"}
+            {name || "—"}
           </h1>
           <div style={{ fontSize: 13, color: "var(--ink-500)", fontFamily: "var(--font-mono, inherit)", marginTop: 6 }}>
-            GST-{guest.guestId} · {guest.guestEmail || "—"}
-            {guest.guestPhone && ` · ${guest.guestPhone}`}
+            CUS-{id} · {email || "—"}
+            {phone && ` · ${phone}`}
           </div>
           {(guest.guestAddress || guest.postcode) && (
             <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 4 }}>

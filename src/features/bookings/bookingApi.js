@@ -25,6 +25,19 @@ export const bookingApi = baseApi.injectEndpoints({
     searchGuests: builder.query({
       query: (query) => `/bookings/search-guest?query=${encodeURIComponent(query)}`,
     }),
+    searchBookingSuggestions: builder.query({
+      query: ({ query = "", limit = 12, dateFrom = "", dateTo = "", status = [], paymentStatus = [] } = {}) => ({
+        url: "/bookings/search-suggestions",
+        params: {
+          query,
+          limit,
+          dateFrom,
+          dateTo,
+          status: Array.isArray(status) ? status.join(",") : status,
+          paymentStatus: Array.isArray(paymentStatus) ? paymentStatus.join(",") : paymentStatus,
+        },
+      }),
+    }),
     createBooking: builder.mutation({
       // Idempotency-Key: a client-generated UUID passed by the cashier flow
       // (see CashierApp.handleCheckout). Retrying the same checkout after a
@@ -230,6 +243,7 @@ export const {
   useGetBookingByIdQuery,
   useSearchGuestsQuery,
   useLazySearchGuestsQuery,
+  useLazySearchBookingSuggestionsQuery,
   useCreateBookingMutation,
   useReslotBookingMutation,
   useGetAvailabilityQuery,

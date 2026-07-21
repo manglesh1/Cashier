@@ -1,10 +1,18 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import {
-  useLazySearchGuestsQuery,
   useLazySearchWaiversQuery,
 } from "../../features/bookings/bookingApi";
+import { useLazyLookupCustomersQuery } from "../../features/customers/customersApi";
+import { LookupSearch } from "../../components/LookupSearch";
+import {
+  CustomerLookupOption,
+  customerContactOf,
+  customerNameOf,
+  customerSuggestionItems,
+  lookupItemKey,
+} from "../../components/cashierLookupRenderers";
 
 const formatDob = (value) => {
   if (!value) return "DOB not on file";
@@ -30,7 +38,7 @@ export function CartWaiverModal({
   const [query, setQuery] = useState("");
   const customerMode = mode === "customer" || Number(needed || 0) <= 0;
   const [triggerWaiverSearch, { data: waiverData, isFetching: isFetchingWaivers }] = useLazySearchWaiversQuery();
-  const [triggerGuestSearch, { data: guestData, isFetching: isFetchingGuests }] = useLazySearchGuestsQuery();
+  const [triggerCustomerLookup] = useLazyLookupCustomersQuery();
   const [showLink, setShowLink] = useState(false);
   const [quickName, setQuickName] = useState("");
   const [quickEmail, setQuickEmail] = useState("");
@@ -56,17 +64,19 @@ export function CartWaiverModal({
 
   useEffect(() => {
     if (!open) return undefined;
+    if (customerMode) return undefined;
     const t = setTimeout(() => {
       if (query.trim().length >= 2) {
-        if (customerMode) {
-          triggerGuestSearch(query.trim());
-        } else {
-          triggerWaiverSearch({ search: query.trim(), limit: 24, contactOnly: true });
-        }
+        triggerWaiverSearch({ search: query.trim(), limit: 24, contactOnly: true });
       }
     }, 250);
     return () => clearTimeout(t);
-  }, [query, triggerGuestSearch, triggerWaiverSearch, open, customerMode]);
+  }, [query, triggerWaiverSearch, open, customerMode]);
+
+  const searchCustomers = useCallback(
+    (search) => triggerCustomerLookup({ query: search, limit: 16 }).unwrap(),
+    [triggerCustomerLookup]
+  );
 
   const waiverGroups = useMemo(() => {
     if (query.trim().length < 2) return [];
@@ -107,17 +117,6 @@ export function CartWaiverModal({
     }
     return Array.from(groups.values()).filter((group) => group.signer);
   }, [waiverData, query]);
-
-  const customerCards = useMemo(() => {
-    if (!customerMode || query.trim().length < 2) return [];
-    return (guestData?.data || []).map((guest) => ({
-      key: `guest:${guest.guestId}`,
-      guestId: guest.guestId,
-      name: guest.guestName || guest.name || "Guest",
-      email: guest.guestEmail || guest.email || "",
-      phone: guest.guestPhone || guest.phone || "",
-    }));
-  }, [customerMode, guestData, query]);
 
   const attachedIds = useMemo(
     () => new Set(attached.map((a) => Number(a.signatureId))),
@@ -234,14 +233,18 @@ export function CartWaiverModal({
 
   const handlePickCustomer = (guest) => {
     if (!guest?.guestId) return;
+    const name = guest.customerName || guest.guestName || guest.name || "Customer";
+    const email = guest.customerEmail || guest.guestEmail || guest.email || "";
+    const phone = guest.customerPhone || guest.guestPhone || guest.phone || "";
     onCustomerChange?.({
       guestId: guest.guestId,
-      name: guest.name,
-      contact: guest.email || guest.phone || "",
-      contactEmail: guest.email || "",
-      contactPhone: guest.phone || "",
+      name,
+      contact: email || phone || "",
+      contactEmail: email,
+      contactPhone: phone,
+      source: "customer",
     });
-    toast.success(`Customer selected: ${guest.name}`);
+    toast.success(`Customer selected: ${name}`);
     handleClose();
   };
 
@@ -328,87 +331,59 @@ export function CartWaiverModal({
             : `${totalCovered} of ${needed} guest${needed === 1 ? "" : "s"} covered. Search signed waivers with an email or phone.`}
         </div>
 
-        <div style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "10px 12px",
-          background: "var(--ink-25)",
-          border: "1.5px solid var(--ink-200)",
-          borderRadius: 12,
-          marginBottom: 12,
-        }}>
-          <Icon name="search" size={16} style={{ color: "var(--ink-500)" }} />
-          <input
-            autoFocus
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Name, email or phone..."
-            style={{ all: "unset", flex: 1, fontSize: 14, fontWeight: 600 }}
-          />
-        </div>
+        {customerMode ? (
+          <div style={{ marginBottom: 12 }}>
+            <LookupSearch
+              autoFocus
+              value={query}
+              onInputChange={setQuery}
+              onSearch={searchCustomers}
+              onSelect={handlePickCustomer}
+              placeholder="Search customer by name, email, or phone"
+              minChars={2}
+              emptyText="No matching customers found."
+              getItems={customerSuggestionItems}
+              getKey={lookupItemKey}
+              getLabel={customerNameOf}
+              getSecondary={customerContactOf}
+              renderItem={(person) => <CustomerLookupOption item={person} />}
+            />
+          </div>
+        ) : (
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "10px 12px",
+            background: "var(--ink-25)",
+            border: "1.5px solid var(--ink-200)",
+            borderRadius: 12,
+            marginBottom: 12,
+          }}>
+            <Icon name="search" size={16} style={{ color: "var(--ink-500)" }} />
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Name, email or phone..."
+              style={{ all: "unset", flex: 1, fontSize: 14, fontWeight: 600 }}
+            />
+          </div>
+        )}
 
         <div style={{ overflowY: "auto", flex: 1, marginBottom: 12 }}>
-          {query.trim().length < 2 ? (
+          {customerMode ? (
+            <div style={{ padding: 16, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
+              Search and select an existing customer, or use quick create below.
+            </div>
+          ) : query.trim().length < 2 ? (
             <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
               Type at least 2 characters to search.
             </div>
-          ) : (customerMode ? isFetchingGuests : isFetchingWaivers) ? (
+          ) : isFetchingWaivers ? (
             <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
               Searching...
             </div>
-          ) : customerMode ? (
-            customerCards.length === 0 ? (
-              <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
-                No matching customers found.
-              </div>
-            ) : (
-              <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
-                {customerCards.map((person) => (
-                  <li key={person.key}>
-                    <button
-                      type="button"
-                      onClick={() => handlePickCustomer(person)}
-                      style={{
-                        all: "unset",
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 12,
-                        width: "100%",
-                        boxSizing: "border-box",
-                        padding: "12px 14px",
-                        background: "white",
-                        border: "1.5px solid var(--ink-200)",
-                        borderRadius: 12,
-                      }}
-                    >
-                      <Icon name="user-round" size={17} style={{ color: "var(--ink-600)", flexShrink: 0 }} />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 800, color: "var(--ink-900)" }}>
-                          {person.name}
-                        </div>
-                        <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 2 }}>
-                          {[person.email, person.phone].filter(Boolean).join(" - ") || "No contact on file"}
-                        </div>
-                      </div>
-                      <span style={{
-                        fontSize: 11,
-                        fontWeight: 800,
-                        color: "var(--ink-600)",
-                        padding: "2px 8px",
-                        background: "var(--ink-25)",
-                        border: "1.5px solid var(--ink-200)",
-                        borderRadius: 999,
-                        flexShrink: 0,
-                      }}>
-                        Customer
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )
           ) : personCards.length === 0 ? (
             <div style={{ padding: 24, textAlign: "center", fontSize: 13, color: "var(--ink-500)" }}>
               No matching customers with signed waivers and contact details.

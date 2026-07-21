@@ -10,14 +10,22 @@
 //
 // Pass 2 of ticket-holder feature: holder strip is read-only here. Bind
 // / swap / send-waiver actions land in Pass 3.
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import {
   useGetBookingByIdQuery,
-  useGetAllBookingQuery,
+  useLazySearchBookingSuggestionsQuery,
 } from "../../features/bookings/bookingApi";
 import { useGetBookingTicketsQuery } from "../../features/tickets/ticketApi";
+import { LookupSearch } from "../../components/LookupSearch";
+import {
+  BookingLookupOption,
+  bookingLabelOf,
+  bookingSecondaryOf,
+  bookingSuggestionItems,
+  lookupItemKey,
+} from "../../components/cashierLookupRenderers";
 import { moneyFmt } from "../../lib/money";
 import { printReceipt } from "../../lib/hardware";
 import { getTerminal } from "../../lib/terminal";
@@ -60,79 +68,37 @@ function CountChip({ done, total, labelDone, labelPartial = labelDone, labelNone
 // ── Entry: search bar + result picker ─────────────────────────────
 function SearchBar({ onPick }) {
   const [q, setQ] = useState("");
-  const trimmed = q.trim();
-  const { data, isFetching } = useGetAllBookingQuery(
-    { search: trimmed, limit: 8, page: 1 },
-    { skip: trimmed.length < 2 }
+  const [searchBookingSuggestions] = useLazySearchBookingSuggestionsQuery();
+
+  const runSearch = useCallback(
+    (query, { limit } = {}) =>
+      searchBookingSuggestions({ query, limit: limit || 12 }).unwrap(),
+    [searchBookingSuggestions]
   );
-  const results = data?.data || [];
 
   return (
-    <div style={{ width: "100%", maxWidth: 820, margin: "0 auto" }}>
-      <div style={{ position: "relative" }}>
-        <input
-          autoFocus
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="Search by name, phone, email, booking #, or ticket code"
-          style={{
-            width: "100%", boxSizing: "border-box",
-            padding: "16px 20px 16px 48px",
-            background: "white",
-            border: "2px solid var(--ink-800)",
-            borderRadius: 16, boxShadow: "0 4px 0 var(--ink-800)",
-            fontSize: 16, fontWeight: 600, color: "var(--ink-900)",
-            outline: "none",
-          }}
-        />
-        <Icon name="search" size={20} style={{ position: "absolute", left: 18, top: 18, color: "var(--ink-500)" }} />
-      </div>
-      {trimmed.length >= 2 && (
-        <div style={{
-          marginTop: 12, background: "white",
-          border: "1.5px solid var(--ink-200)", borderRadius: 14,
-          overflow: "hidden",
-        }}>
-          {isFetching && <div style={{ padding: 16, textAlign: "center", color: "var(--ink-500)" }}>Searching…</div>}
-          {!isFetching && results.length === 0 && (
-            <div style={{ padding: 24, textAlign: "center", color: "var(--ink-500)" }}>No bookings match.</div>
-          )}
-          {results.map((r) => (
-            <button
-              key={r.bookingId}
-              type="button"
-              onClick={() => onPick(r.bookingId)}
-              style={{
-                all: "unset", cursor: "pointer", display: "block", width: "100%", boxSizing: "border-box",
-                padding: "14px 18px",
-                borderBottom: "1px solid var(--ink-100)",
-                background: "white",
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--ink-25)")}
-              onMouseLeave={(e) => (e.currentTarget.style.background = "white")}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div>
-                  <div style={{ fontWeight: 700, color: "var(--ink-900)" }}>
-                    {r.bookingName || r.guest?.guestName || "Walk-in"}
-                  </div>
-                  <div style={{ fontSize: 12, color: "var(--ink-500)" }}>
-                    #{r.bookingNumber || r.bookingId}
-                    {(r.bookingDate || r.dateOfBooking) && ` · ${new Date(r.bookingDate || r.dateOfBooking).toLocaleDateString()}`}
-                    {r.totalAmount != null && ` · ${moneyFmt(r.totalAmount)}`}
-                  </div>
-                  {(r.guest?.guestPhone || r.guest?.guestEmail) && (
-                    <div style={{ fontSize: 11, color: "var(--ink-400)", marginTop: 2 }}>
-                      {r.guest?.guestPhone || r.guest?.guestEmail}
-                    </div>
-                  )}
-                </div>
-                <Icon name="chevron-right" size={18} style={{ color: "var(--ink-400)" }} />
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
+    <div className="cashier-find-booking-search">
+      <LookupSearch
+        autoFocus
+        value={q}
+        onInputChange={setQ}
+        onSearch={runSearch}
+        onSelect={(item) => {
+          setQ(bookingLabelOf(item));
+          onPick(item.bookingId);
+        }}
+        minChars={2}
+        limit={12}
+        placeholder="Search by name, phone, email, booking #, or ticket code"
+        minCharsText="Type at least 2 characters to find a booking."
+        emptyText="No bookings match this search."
+        loadingText="Searching bookings..."
+        getItems={bookingSuggestionItems}
+        getKey={lookupItemKey}
+        getLabel={bookingLabelOf}
+        getSecondary={bookingSecondaryOf}
+        renderItem={(item) => <BookingLookupOption item={item} />}
+      />
     </div>
   );
 }

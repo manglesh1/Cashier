@@ -4,6 +4,22 @@
 
 import { baseApi } from "../../api/baseApi";
 
+const normalizeCustomer = (customer) => ({
+  ...customer,
+  id: customer.id ?? customer.customerId ?? customer.guestId,
+  customerId: customer.customerId ?? customer.id ?? customer.guestId,
+  customerName: customer.customerName ?? customer.name ?? customer.guestName,
+  customerEmail: customer.customerEmail ?? customer.email ?? customer.guestEmail,
+  customerPhone: customer.customerPhone ?? customer.phone ?? customer.guestPhone,
+  guestId: customer.guestId ?? customer.customerId ?? customer.id,
+  guestName: customer.guestName ?? customer.customerName ?? customer.name,
+  guestEmail: customer.guestEmail ?? customer.customerEmail ?? customer.email,
+  guestPhone: customer.guestPhone ?? customer.customerPhone ?? customer.phone,
+  name: customer.name ?? customer.customerName ?? customer.guestName,
+  email: customer.email ?? customer.customerEmail ?? customer.guestEmail,
+  phone: customer.phone ?? customer.customerPhone ?? customer.guestPhone,
+});
+
 export const customersApi = baseApi.injectEndpoints({
   endpoints: (builder) => ({
     // GET /api/customers?search=<query>&limit=&page=
@@ -17,13 +33,19 @@ export const customersApi = baseApi.injectEndpoints({
       }),
       transformResponse: (response) => ({
         ...response,
-        data: (response?.data || []).map((guest) => ({
-          ...guest,
-          guestId: guest.guestId ?? guest.id,
-          guestName: guest.guestName ?? guest.name,
-          guestEmail: guest.guestEmail ?? guest.email,
-          guestPhone: guest.guestPhone ?? guest.phone,
-        })),
+        data: (response?.data || []).map(normalizeCustomer),
+      }),
+    }),
+
+    lookupCustomers: builder.query({
+      query: ({ query = "", limit = 12 } = {}) => ({
+        url: "/customers/lookup",
+        method: "GET",
+        params: { query, limit },
+      }),
+      transformResponse: (response) => ({
+        ...response,
+        data: (response?.data || []).map(normalizeCustomer),
       }),
     }),
 
@@ -48,6 +70,7 @@ export const customersApi = baseApi.injectEndpoints({
 
 export const {
   useLazySearchCustomersQuery,
+  useLazyLookupCustomersQuery,
   useGetCustomerRedeemablesQuery,
   useLazyGetCustomerRedeemablesQuery,
 } = customersApi;
