@@ -49,6 +49,24 @@ export const customersApi = baseApi.injectEndpoints({
       }),
     }),
 
+    // GET /api/customers/:id?compact=1
+    // Same customer profile endpoint used by the main Movira customer detail page.
+    // Cashier keeps compact mode on by default so lookup selection opens quickly.
+    getCustomerById: builder.query({
+      query: ({ id, compact = true } = {}) => ({
+        url: `/customers/${id}`,
+        method: "GET",
+        params: compact ? { compact: 1 } : undefined,
+      }),
+      transformResponse: (response) => ({
+        ...response,
+        data: response?.data ? normalizeCustomer(response.data) : response?.data,
+      }),
+      providesTags: (result, error, arg) => [
+        { type: "Customers", id: arg?.id },
+      ],
+    }),
+
     // GET /api/customers/:id/redeemable
     // Returns the guest's currently active redeemable artefacts:
     //   { guest, vouchers[], entitlements[], memberships[] }
@@ -71,6 +89,8 @@ export const customersApi = baseApi.injectEndpoints({
 export const {
   useLazySearchCustomersQuery,
   useLazyLookupCustomersQuery,
+  useGetCustomerByIdQuery,
+  useLazyGetCustomerByIdQuery,
   useGetCustomerRedeemablesQuery,
   useLazyGetCustomerRedeemablesQuery,
 } = customersApi;
