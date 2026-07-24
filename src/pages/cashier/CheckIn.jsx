@@ -5,13 +5,14 @@
 // pending tickets, mints redemption events, and respects waiver/expiry
 // rules — the exact same path the Redeem screen takes).
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
 import { CashierScreenBoundary } from "./CashierScreenBoundary";
 import {
   useGetAllBookingQuery,
+  useLazySearchBookingSuggestionsQuery,
   useGetCheckInStatusQuery,
   useCheckInParticipantsMutation,
   useUndoParticipantCheckInMutation,
@@ -51,6 +52,15 @@ import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import CheckInPaymentModal from "./CheckInPaymentModal";
 import AddTipModal from "../../features/tips/AddTipModal";
 import TerminalProgressModal from "./TerminalProgressModal";
+import { LookupSearch } from "../../components/LookupSearch";
+import {
+  BookingLookupOption,
+  bookingCustomerNameOf,
+  bookingLabelOf,
+  bookingSecondaryOf,
+  bookingSuggestionItems,
+  lookupItemKey,
+} from "../../components/cashierLookupRenderers";
 import { useDebounceSearch } from "../../hooks/useDebounceSearch";
 import { getTerminal } from "../../lib/terminal";
 import { printReceipt, openCashDrawer } from "../../lib/hardware";
@@ -167,6 +177,7 @@ export function CheckIn() {
   const { searchTerm, inputValue, setDebouncedSearch } = useDebounceSearch(400);
   const settings = useEffectiveSettings();
   const [selected, setSelected] = useState(null);
+  const [selectedLookupLabel, setSelectedLookupLabel] = useState("");
   const [quickTipOpen, setQuickTipOpen] = useState(false);
   const [bookingBucket, setBookingBucket] = useState("upcoming");
   // Row-level quick check-in: fires checkInAll against ONE booking
@@ -174,6 +185,49 @@ export function CheckIn() {
   // so other rows stay tappable while one is in flight.
   const [rowCheckingInId, setRowCheckingInId] = useState(null);
   const [rowCheckInAll] = useCheckInAllTicketsMutation();
+  const [searchBookingSuggestions] = useLazySearchBookingSuggestionsQuery();
+
+  const runBookingLookup = useCallback(
+    (query, { limit } = {}) =>
+      searchBookingSuggestions({
+        query,
+        limit: limit || 12,
+        dateFrom: today,
+        dateTo: today,
+        status: ["confirmed", "pending"],
+      }).unwrap(),
+    [searchBookingSuggestions]
+  );
+
+  const selectLookupBooking = useCallback(
+    (item) => {
+      const label = bookingLabelOf(item);
+      setSelectedLookupLabel(label);
+      setDebouncedSearch(label);
+      setSelected({
+        bookingId: item.bookingId,
+        bookingNumber: item.bookingNumber,
+        bookingName: bookingCustomerNameOf(item),
+        customerName: item.customerName,
+        customerEmail: item.customerEmail || item.email,
+        customerPhone: item.customerPhone || item.phone,
+      });
+    },
+    [setDebouncedSearch]
+  );
+
+  const handleLookupInputChange = useCallback(
+    (next) => {
+      const nextText = next.trim();
+      const selectedText = selectedLookupLabel.trim();
+      setDebouncedSearch(next);
+      if (!nextText || (selected?.bookingId && (!selectedText || nextText !== selectedText))) {
+        setSelectedLookupLabel("");
+        setSelected(null);
+      }
+    },
+    [selected?.bookingId, selectedLookupLabel, setDebouncedSearch]
+  );
 
   // Gate-side RFID scan listener. Any `cashier:scan` with source="rfid"
   // that isn't consumed by a child component (e.g. the Bind affordance
@@ -395,25 +449,24 @@ export function CheckIn() {
         }}>
           Check-in
         </h1>
-        <div style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "8px 14px",
-          background: "#fff",
-          border: "1.5px solid var(--ink-200)",
-          borderRadius: 12,
-          flex: 1,
-          minWidth: 0,
-        }}>
-          <Icon name="search" size={18} stroke={2} style={{ color: "var(--ink-500)" }} />
-          <input
-            value={inputValue}
-            onChange={(e) => setDebouncedSearch(e.target.value)}
-            placeholder="Search by name, email, phone, or booking ID…"
-            style={{ all: "unset", flex: 1, minWidth: 0, fontSize: 15 }}
-          />
-        </div>
+        <LookupSearch
+          value={inputValue}
+          onInputChange={handleLookupInputChange}
+          onSearch={runBookingLookup}
+          onSelect={selectLookupBooking}
+          minChars={2}
+          limit={12}
+          placeholder="Search by name, email, phone, booking #, or ticket code"
+          minCharsText="Type at least 2 characters to find a check-in booking."
+          emptyText="No check-in bookings match this search."
+          loadingText="Searching bookings..."
+          getItems={bookingSuggestionItems}
+          getKey={lookupItemKey}
+          getLabel={bookingLabelOf}
+          getSecondary={bookingSecondaryOf}
+          renderItem={(item) => <BookingLookupOption item={item} badge="Check-in" />}
+          className="cashier-checkin-lookup"
+        />
         <button
           type="button"
           onClick={refetch}
@@ -1940,7 +1993,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
                     </span>
                     {time && <span>· {time}</span>}
                     {/* Paper-wristband chip from the backend resolver. Null
-                        when the venue is in RFID / none mode, when the
+                        when the location is in RFID / none mode, when the
                         activity is excluded, or when no rotation is
                         configured. The cashier reads the color + name to
                         grab the right physical wristband. */}

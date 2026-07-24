@@ -10,9 +10,9 @@
 // so the caller's onApproved just refreshes/closes; it must NOT also
 // record a payment (that would double-charge).
 //
-// Reader: not passed — the backend resolves the venue's configured reader
-// (Payments → Card terminals). Currency optional: pass the venue's Stripe
-// account currency (a US account needs USD even for a CAD venue).
+// Reader: not passed — the backend resolves the location's configured reader
+// (Payments → Card terminals). Currency optional: pass the location's Stripe
+// account currency (a US account needs USD even for a CAD location).
 
 import React, { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";

@@ -7,7 +7,7 @@
 //     we can badge "PAST DUE · $X owed" on the card. Returns null when
 //     the membership has no subscription (one-time purchase) so the card
 //     just renders without a badge.
-//   • collectMemberPayment(profileId)  → in-venue "Collect now". Settles
+//   • collectMemberPayment(profileId)  → in-location "Collect now". Settles
 //     a past-due open invoice on the spot. Backend invalidates the
 //     membership cache; we re-fetch the billing query via tags so the
 //     badge disappears after a successful collect.

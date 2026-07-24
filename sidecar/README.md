@@ -30,7 +30,7 @@ recognized as an internal or external command`, re-run `npm install` —
 `cross-env` needs to be on disk.
 
 Open the Cashier (`http://localhost:5173`) in Chrome on the same
-machine. If the venue's `wristbandMode` is `rfid`, the bridge auto-
+machine. If the location's `wristbandMode` is `rfid`, the bridge auto-
 connects on cashier login. You'll see fake scans dispatched as
 `cashier:scan` events — drop a `window.addEventListener("cashier:scan", ...)`
 into the DevTools console to verify.
@@ -104,7 +104,7 @@ error storm.
 | `MOVIRA_WRISTBAND_PORT` | `7777` | Localhost WebSocket port |
 | `MOVIRA_WRISTBAND_MOCK_MS` | `7000` | Mock scan interval (ms) |
 
-The Cashier's connection port is driven by the venue config
+The Cashier's connection port is driven by the location config
 (`wristbandConfig.rfid.bridgePort`, set in the admin Wristbands page).
 Default `7777`; change if you have a port conflict.
 
@@ -141,7 +141,7 @@ npm run package:linux   # AppImage
 ```
 
 Bundles Electron + the adapter for the platform. Plan to add code-
-signing (Windows Authenticode + Apple notarisation) before venue
+signing (Windows Authenticode + Apple notarisation) before location
 rollout; unsigned binaries trigger SmartScreen and Gatekeeper warnings
 that confuse cashiers.
 
@@ -153,7 +153,7 @@ that confuse cashiers.
 - **Tray icon art** — currently a 1×1 transparent placeholder.
 - **Mifare DESFire / NFC Type 2 tag support** — the ACR122U adapter
   reads the standard GET_DATA_UID APDU which covers Type A / Mifare
-  Classic 4-byte UIDs (most venue wristbands). Type 2 (7-byte) and
+  Classic 4-byte UIDs (most location wristbands). Type 2 (7-byte) and
   DESFire are a follow-up if your tag vendor supplies those.
 - **Tag-write support** — current code is read-only. Writing app data
   to tags (locker IDs, F&B credit) would extend the adapter with

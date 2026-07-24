@@ -5,7 +5,7 @@
 // Adapter selection (env): MOVIRA_WRISTBAND_ADAPTER = mock | acr122u
 // Bridge port (env):        MOVIRA_WRISTBAND_PORT     default 7777
 //
-// The Cashier reads bridgePort + reader from the venue's
+// The Cashier reads bridgePort + reader from the location's
 // wristbandConfig.rfid blob (admin → Wristbands page) and connects
 // here. Once a scan lands, we broadcast it to every connected client;
 // the browser consumer dispatches the existing `cashier:scan` window

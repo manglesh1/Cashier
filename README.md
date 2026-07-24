@@ -49,7 +49,7 @@ https://dfu5picvz3zde.cloudfront.net/cashier/
 ## Architecture
 
 - **Auth** — uses the same `/auth/login` endpoint as admin. Token + user
-  + venues persist via `redux-persist` so a tablet refresh doesn't
+  + locations persist via `redux-persist` so a tablet refresh doesn't
   log the cashier out.
 - **API** — RTK Query with one `baseApi` slice; per-feature slices
   (`bookingApi`, `ticketApi`, `posApi`) extend it via `injectEndpoints`.
