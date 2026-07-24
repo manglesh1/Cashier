@@ -411,9 +411,8 @@ export default function TerminalPaymentModal({
             setPendingAlloc(null);
           }}
         />
-        {/* Card-present approval happens ON THE DEVICE (the Terminal Simulator
-            app or a real reader) — the cashier just waits for the result. No
-            in-cashier "simulate tap" shortcut. */}
+        {/* Card-present approval happens on the physical reader; the cashier
+            waits for the provider result. */}
       </div>
       <style>{`@keyframes terminalspin { to { transform: rotate(360deg); } }`}</style>
     </div>
