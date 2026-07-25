@@ -18,14 +18,14 @@ import {
   customerPhoneOf,
 } from "../../components/cashierLookupRenderers";
 import { adminBookingDetailUrl } from "../../lib/adminLink";
+import { formatDisplayDate } from "../../lib/date";
 
 const fmtMoney = (v) => `$${Number(v || 0).toFixed(2)}`;
 
 const fmtDate = (value, fallback = "-") => {
   if (!value) return fallback;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleDateString(undefined, {
+  return formatDisplayDate(value, {
+    fallback: String(value),
     month: "short",
     day: "2-digit",
     year: "numeric",

@@ -2350,7 +2350,7 @@ export function CashierApp() {
     header = <Header breadcrumb="COMPLIANCE · WAIVERS" title="Waiver" right={<StatusPill tone="info">Live lookup</StatusPill>} />;
   } else if (screen === "refund") {
     body = <Refund />;
-    header = <Header breadcrumb="VOID & REFUND" title="Refund" subtitle="Manager review for > $50" />;
+    header = <Header breadcrumb="VOID & REFUND" title="Refund" />;
   } else if (screen === "settings") {
     body = <SettingsPage />;
     header = <Header breadcrumb="TILL" title="Settings" subtitle="Terminal config + installs" />;

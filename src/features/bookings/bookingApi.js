@@ -107,9 +107,12 @@ export const bookingApi = baseApi.injectEndpoints({
           sourceId: bookingId,
           origin: "pos",
         },
-        headers: {
-          "Idempotency-Key": idempotencyKey || crypto.randomUUID(),
-        },
+        // The component owns the attempt key and retains it after ambiguous
+        // network failures. Never mint a new key here: doing so would turn an
+        // HTTP retry into a second money-moving command.
+        headers: idempotencyKey
+          ? { "Idempotency-Key": idempotencyKey }
+          : undefined,
       }),
       invalidatesTags: (result, error, { bookingId }) => [
         { type: "Booking", id: bookingId },

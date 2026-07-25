@@ -27,6 +27,7 @@ import {
   lookupItemKey,
 } from "../../components/cashierLookupRenderers";
 import { moneyFmt } from "../../lib/money";
+import { formatDisplayDate } from "../../lib/date";
 import { printReceipt } from "../../lib/hardware";
 import { getTerminal } from "../../lib/terminal";
 import { useTipDefaults } from "../../features/tips/useTipDefaults";
@@ -351,7 +352,10 @@ function BookingSummary({ booking }) {
       </div>
       <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 4 }}>
         #{booking.bookingNumber || booking.bookingId}
-        {booking.bookingDate && ` · ${new Date(booking.bookingDate).toLocaleDateString()}`}
+        {booking.bookingDate &&
+          ` · ${formatDisplayDate(booking.bookingDate, {
+            fallback: String(booking.bookingDate),
+          })}`}
       </div>
 
       {(guest.guestPhone || guest.guestEmail) && (

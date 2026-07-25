@@ -10,7 +10,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { useStore } from "react-redux";
+import { useVerifyManagerOverrideMutation } from "../features/authorization/managerOverrideApi";
 
 export default function ManagerOverridePrompt({
   open,
@@ -21,6 +21,7 @@ export default function ManagerOverridePrompt({
   targetId,
   payload,
   defaultReason = "",
+  reasonLabel = "Approval note (optional)",
   onApprove,      // (audit) => void
   onCancel,
 }) {
@@ -28,7 +29,7 @@ export default function ManagerOverridePrompt({
   const [reason, setReason] = useState(defaultReason);
   const [submitting, setSubmitting] = useState(false);
   const inputRef = useRef(null);
-  const store = useStore();
+  const [verifyManagerOverride] = useVerifyManagerOverrideMutation();
 
   useEffect(() => {
     if (open) {
@@ -47,31 +48,24 @@ export default function ManagerOverridePrompt({
     }
     setSubmitting(true);
     try {
-      const token = store.getState()?.auth?.token;
-      const apiBase = import.meta.env.VITE_API_BASE_URL || "/api";
-      const res = await fetch(`${apiBase}/pos/manager-override/verify`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          // Mark this as the Cashier (plaintext) client so the backend skips
-          // encryption — without it the response is AES-encrypted in prod and
-          // body.success is unreadable, so every override is read as rejected.
-          // Same header the RTK baseApi sets on every request.
-          "x-client-app": "cashier",
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({ pin, action, targetType, targetId, reason, payload }),
-      });
-      const body = await res.json();
-      if (!res.ok || !body?.success) {
-        toast.error(body?.error || "Manager override rejected");
-        setSubmitting(false);
-        return;
-      }
+      const body = await verifyManagerOverride({
+        pin,
+        action,
+        targetType,
+        targetId,
+        reason,
+        payload,
+      }).unwrap();
+      if (!body?.success) throw new Error("Manager override rejected");
       toast.success(`Approved by ${body.data.managerName}`);
       onApprove?.(body.data);
     } catch (err) {
-      toast.error(err?.message || "Override request failed");
+      toast.error(
+        err?.data?.error ||
+          err?.data?.message ||
+          err?.message ||
+          "Override request failed"
+      );
       setSubmitting(false);
     }
   };
@@ -130,6 +124,9 @@ export default function ManagerOverridePrompt({
         <label style={{ display: "block", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-500)", marginBottom: 6 }}>
           Manager PIN
         </label>
+        <div style={{ fontSize: 11, color: "var(--ink-500)", marginBottom: 8 }}>
+          Manager identity is verified by PIN. No manager email is required.
+        </div>
         <input
           ref={inputRef}
           type="password"
@@ -159,13 +156,14 @@ export default function ManagerOverridePrompt({
         />
 
         <label style={{ display: "block", fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-500)", marginBottom: 6 }}>
-          Reason (optional but recommended)
+          {reasonLabel}
         </label>
         <input
           type="text"
           value={reason}
           onChange={(e) => setReason(e.target.value)}
           placeholder="e.g. Customer brought expired flyer"
+          autoComplete="off"
           style={{
             width: "100%",
             padding: "10px 14px",

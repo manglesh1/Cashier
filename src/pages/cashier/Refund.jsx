@@ -2,7 +2,7 @@
 // decides whether direct cashier permission is enough or a location-bound
 // manager approval is required.
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
@@ -24,9 +24,14 @@ import {
   paidAmountOf,
 } from "../../components/cashierLookupRenderers";
 import { moneyFmt, roundMoney } from "../../lib/money";
+import { keyForAttempt } from "../../lib/idempotency";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import { useLazyLookupGiftCardQuery } from "../../features/vouchers/voucherApi";
 import { validateRefundDestination } from "./refundValidation";
+import {
+  originalTenderLabel,
+  refundSubmitBlockReason,
+} from "./refundPresentation";
 
 const paidOf = paidAmountOf;
 const nameOf = bookingCustomerNameOf;
@@ -48,6 +53,7 @@ export function Refund() {
   const [amountInitializedFor, setAmountInitializedFor] = useState(null);
   const [searchBookingSuggestions] = useLazySearchBookingSuggestionsQuery();
   const [refundPayment, { isLoading: refunding }] = useRefundPaymentMutation();
+  const refundAttemptRef = useRef(null);
 
   const runRefundSearch = useCallback(
     (search, { limit } = {}) =>
@@ -98,7 +104,11 @@ export function Refund() {
   useEffect(() => {
     const request = requestResponse?.data;
     if (!request?.refundRequestId || !done || done.status === request.status) return;
-    setDone({ ...done, status: request.status });
+    setDone({
+      ...done,
+      status: request.status,
+      cancelWhenCompleted: Boolean(request.cancelWhenCompleted),
+    });
     if (request.status === "completed") {
       toast.success(`Refund completed for ${done.bookingNumber}`);
     } else if (["manual_review", "partial"].includes(request.status)) {
@@ -107,6 +117,7 @@ export function Refund() {
   }, [done, requestResponse]);
 
   const pickBooking = (b) => {
+    refundAttemptRef.current = null;
     setSelected(b);
     setQuery(bookingLabelOf(b));
     setAmount("");
@@ -119,6 +130,7 @@ export function Refund() {
   };
 
   const reset = () => {
+    refundAttemptRef.current = null;
     setResolutionMethod("original_tender");
     setGiftCardCode("");
     setDestinationGiftCard(null);
@@ -193,9 +205,25 @@ export function Refund() {
 
   const doRefund = async (audit) => {
     setManagerOpen(false);
+    const fingerprint = JSON.stringify({
+      bookingId: selected.bookingId,
+      amount: amountNum.toFixed(2),
+      resolutionMethod,
+      destinationGiftCardId:
+        resolutionMethod === "gift_card"
+          ? destinationGiftCard?.giftCardId || null
+          : null,
+      cashConfirmed: cashConfirmationRequired ? cashConfirmed : null,
+      previewVersion: preview.previewVersion,
+    });
+    const idempotencyKey = keyForAttempt(refundAttemptRef, {
+      prefix: "cashier-refund",
+      fingerprint,
+    });
     try {
       const res = await refundPayment({
         bookingId: selected.bookingId,
+        idempotencyKey,
         amount: amountNum,
         resolutionMethod,
         destinationGiftCardId: resolutionMethod === "gift_card" ? destinationGiftCard?.giftCardId : undefined,
@@ -211,6 +239,9 @@ export function Refund() {
       const result = res?.data || {};
       const request = result.refundRequest || {};
       const status = request.status || "processing";
+      // The server accepted the command. A later partial refund is a new
+      // command even when it happens to use the same amount/destination.
+      refundAttemptRef.current = null;
       setDone({
         refundAmount: roundMoney(result.refundAmount ?? amountNum),
         resolutionMethod,
@@ -219,6 +250,7 @@ export function Refund() {
         bookingNumber: numberOf(selected),
         refundRequestId: request.refundRequestId,
         status,
+        cancelWhenCompleted: Boolean(request.cancelWhenCompleted),
       });
       if (status === "completed") {
         toast.success(`Refunded ${moneyFmt(result.refundAmount ?? amountNum)}`);
@@ -233,6 +265,7 @@ export function Refund() {
         return;
       }
       if (err?.data?.error === "refund_preview_stale") {
+        refundAttemptRef.current = null;
         toast.warning("Refundable amount changed. Review the refreshed amount and try again.");
         refetchPreview();
         setAmountInitializedFor(null);
@@ -265,6 +298,13 @@ export function Refund() {
               : "The payment provider has not confirmed the refund yet. This screen will update automatically."}
           </div>
         )}
+        {completed && (
+          <div style={{ maxWidth: 520, textAlign: "center", fontSize: 14, color: "var(--ink-600)", marginBottom: 10 }}>
+            {done.cancelWhenCompleted
+              ? "The booking was cancelled and its reserved capacity was released."
+              : "The booking remains active because this was a partial refund."}
+          </div>
+        )}
         <div style={{ fontSize: 15, color: "var(--ink-600)", marginBottom: 6 }}>
           {done.bookingNumber}
           {done.balance != null ? ` · balance ${moneyFmt(done.balance)}` : ""}
@@ -287,13 +327,22 @@ export function Refund() {
   // ── Amount + approval ──────────────────────────────────────────────
   if (selected) {
     const destinationLabels = {
-      original_tender: "Original card / tender",
+      original_tender: originalTenderLabel(preview?.tenders),
       gift_card: "Gift card",
       cash: "Cash",
     };
     const destinationOptions = preview?.destinations || [];
     const destinationReady = resolutionMethod !== "gift_card" || Boolean(destinationGiftCard?.giftCardId);
     const cashReady = !cashConfirmationRequired || cashConfirmed;
+    const submitBlockReason = refundSubmitBlockReason({
+      refunding,
+      previewLoading,
+      previewFailed,
+      refundable,
+      destinationReady,
+      cashReady,
+      verdict: preview?.verdict,
+    });
     return (
       <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px", maxWidth: 720, margin: "0 auto", width: "100%" }}>
         <button onClick={reset} className="a-btn a-btn--ghost a-btn--sm" style={{ marginBottom: 14 }}>
@@ -320,6 +369,13 @@ export function Refund() {
             </div>
           )}
         </div>
+
+        {preview?.cancellation?.automaticForFullRefund && (
+          <div style={{ border: "1px solid #fcd34d", background: "#fffbeb", color: "#78350f", borderRadius: 10, padding: 12, marginBottom: 14, fontSize: 13 }}>
+            A full refund cancels this booking and releases its reserved capacity after
+            provider confirmation. A partial refund keeps the booking active.
+          </div>
+        )}
 
         {previewFailed && (
           <div style={{ border: "1px solid #fca5a5", background: "#fef2f2", color: "#991b1b", borderRadius: 10, padding: 12, marginBottom: 14, fontSize: 13 }}>
@@ -371,7 +427,12 @@ export function Refund() {
           {cashConfirmationRequired && (
             <label style={{ display: "flex", gap: 10, padding: 12, border: "1.5px solid #f59e0b", background: "#fffbeb", borderRadius: 10, fontSize: 12 }}>
               <input type="checkbox" checked={cashConfirmed} onChange={(event) => setCashConfirmed(event.target.checked)} />
-              <span><strong style={{ display: "block" }}>Confirm cash payout</strong>Submit first, then hand the exact completed amount to the customer and retain the receipt.</span>
+              <span>
+                <strong style={{ display: "block" }}>
+                  Required: confirm {resolutionMethod === "original_tender" ? "original cash" : "cash"} payout
+                </strong>
+                Submit first, then hand the exact completed amount to the customer and retain the receipt.
+              </span>
             </label>
           )}
         </div>
@@ -396,6 +457,7 @@ export function Refund() {
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="e.g. customer left early, duplicate charge"
+              autoComplete="off"
               style={{ fontSize: 14, padding: "10px 12px", border: "1.5px solid var(--ink-300)", borderRadius: 10 }}
             />
           </label>
@@ -405,7 +467,7 @@ export function Refund() {
           type="button"
           className="a-btn a-btn--primary"
           onClick={requestRefund}
-          disabled={refunding || previewLoading || previewFailed || refundable <= 0 || !destinationReady || !cashReady || preview?.verdict?.canSubmit === false}
+          disabled={Boolean(submitBlockReason)}
           style={{ width: "100%", justifyContent: "center", minHeight: 52, marginTop: 18, fontSize: 16 }}
         >
           <Icon name="undo-2" size={18} />
@@ -417,6 +479,14 @@ export function Refund() {
               ? `Refund ${moneyFmt(amountNum)} · manager approval`
               : `Refund ${moneyFmt(amountNum)}`}
         </button>
+        {submitBlockReason && (
+          <div
+            role="status"
+            style={{ marginTop: 8, color: "#92400e", fontSize: 12, fontWeight: 700 }}
+          >
+            {submitBlockReason}
+          </div>
+        )}
 
         <ManagerOverridePrompt
           open={managerOpen}
@@ -431,7 +501,8 @@ export function Refund() {
             resolutionMethod,
             destinationGiftCardId: destinationGiftCard?.giftCardId || undefined,
           }}
-          defaultReason={reason || "POS refund"}
+          defaultReason=""
+          reasonLabel="Approval note (optional)"
           onCancel={() => setManagerOpen(false)}
           onApprove={doRefund}
         />
