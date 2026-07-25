@@ -14,6 +14,7 @@ const FALLBACKS = {
   autoCheckInOnPurchase: true,
   allowUndoCheckIn: false,
   requirePinForReprint: true,
+  requirePOSPinForRefunds: false,
   enableDiscounts: true,
   enableCustomDiscount: true,
   allowCustomDiscountWithoutPin: false,

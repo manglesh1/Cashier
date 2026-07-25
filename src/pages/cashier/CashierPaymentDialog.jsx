@@ -27,6 +27,7 @@ import { computeTipBase } from "../../features/tips/tipMath";
 import { getTerminal } from "../../lib/terminal";
 import { openCashDrawer, printReceipt } from "../../lib/hardware";
 import { moneyFmt, roundMoney } from "../../lib/money";
+import { createIdempotencyKey } from "../../lib/idempotency";
 
 function buildBookingPromoCartLines(booking) {
   const bookingItems = Array.isArray(booking?.bookingItems) ? booking.bookingItems : [];
@@ -156,10 +157,7 @@ export default function CashierPaymentDialog({
     // Mint a key now so handleSubmit and any retry share the same one.
     // crypto.randomUUID is available in all modern browsers / Electron
     // / WebView 2 — safe for kiosks.
-    const id = (typeof crypto !== "undefined" && crypto.randomUUID)
-      ? crypto.randomUUID()
-      : `pay_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-    setSessionKey(`pay_${id}`);
+    setSessionKey(createIdempotencyKey("cashier-payment"));
   }, [open, booking?.bookingId]);
 
   // NOTE: All hooks must run on every render. The early return below
@@ -217,7 +215,7 @@ export default function CashierPaymentDialog({
   // Record the tip as a dedicated `tips`-table row (no PaymentTransaction)
   // once the booking exists and is paid. Non-fatal: the sale is complete
   // regardless, so a failure just nudges the cashier to use "Add tip" later.
-  const recordTipIfAny = async (bid) => {
+  const recordTipIfAny = async (bid, attemptKey) => {
     if (!bid || tipAmount <= 0 || !(isCash || isCheck)) return null;
     try {
       const res = await standaloneTip({
@@ -228,7 +226,7 @@ export default function CashierPaymentDialog({
         defaultAllocation: tipDefaults.defaultAllocation,
         managerOverrideAuditId: tip.managerOverrideAuditId || undefined,
         source: "checkout",
-        idempotencyKey: sessionKey ? `${sessionKey}:tip` : `tip_${bid}`,
+        idempotencyKey: `${attemptKey}:tip`,
       }).unwrap();
       return res?.data || null;
     } catch (err) {
@@ -389,6 +387,13 @@ export default function CashierPaymentDialog({
       return;
     }
 
+    // useEffect normally creates this when the dialog opens. Ensure it again
+    // synchronously for the first-render/fast-click edge case, then use the
+    // same base key for every retry of this checkout attempt.
+    const attemptKey =
+      sessionKey || createIdempotencyKey("cashier-payment");
+    if (!sessionKey) setSessionKey(attemptKey);
+
     // Lock now, synchronously, before any await.
     submitLockRef.current = true;
     const terminal = getTerminal();
@@ -433,7 +438,7 @@ export default function CashierPaymentDialog({
             paymentMethod: "complimentary",
             terminalDeviceId: terminal?.deviceId || null,
             remarks: discountRemarks,
-            idempotencyKey: sessionKey ? `${sessionKey}:discount` : undefined,
+            idempotencyKey: `${attemptKey}:discount`,
           }).unwrap();
           discountCommitted = true;
         }
@@ -443,6 +448,7 @@ export default function CashierPaymentDialog({
           ...(gcApplied.pin ? { pin: gcApplied.pin } : {}),
           amount: giftApplied,
           bookingId,
+          idempotencyKey: `${attemptKey}:gift-card`,
           note: note || "POS gift card payment",
         }).unwrap();
         const balanceAfter = Number(gc?.data?.balanceAfter ?? 0);
@@ -457,13 +463,13 @@ export default function CashierPaymentDialog({
             referenceNumber: methodRef,
             terminalDeviceId: terminal?.deviceId || null,
             remarks: methodRemarks,
-            idempotencyKey: sessionKey ? `${sessionKey}:payment` : undefined,
+            idempotencyKey: `${attemptKey}:payment`,
           }).unwrap();
           if (isCash) openCashDrawer({ bookingId, terminal });
         }
         // Tip rides on the cash/check remainder (gift-card + cash/check split).
         // Decoupled from the tender — recorded as its own tips-table row.
-        await recordTipIfAny(bookingId);
+        await recordTipIfAny(bookingId, attemptKey);
         setComplete({
           ...(receiptInfo || {}),
           bookingId,
@@ -507,7 +513,7 @@ export default function CashierPaymentDialog({
         if (isCash && finalRecord > 0) {
           openCashDrawer({ bookingId: result?.bookingId || null, terminal });
         }
-        await recordTipIfAny(result?.bookingId);
+        await recordTipIfAny(result?.bookingId, attemptKey);
         setComplete({
           ...(result || {}),
           amountPaid: roundMoney(finalRecord),
@@ -533,7 +539,7 @@ export default function CashierPaymentDialog({
           paymentMethod: "complimentary",
           terminalDeviceId: terminal?.deviceId || null,
           remarks: discountRemarks,
-          idempotencyKey: sessionKey ? `${sessionKey}:discount` : undefined,
+          idempotencyKey: `${attemptKey}:discount`,
         }).unwrap();
         discountCommitted = true;
       }
@@ -551,7 +557,7 @@ export default function CashierPaymentDialog({
           terminalId: method === "card" ? (terminal?.terminalId || undefined) : undefined,
           posDeviceId: method === "card" ? (terminal?.deviceId || undefined) : undefined,
           remarks: methodRemarks,
-          idempotencyKey: sessionKey ? `${sessionKey}:payment` : undefined,
+          idempotencyKey: `${attemptKey}:payment`,
         }).unwrap();
       }
       // Card-on-terminal path: backend returns { status: 'pending', transactionId, terminalSessionId }.
@@ -571,7 +577,7 @@ export default function CashierPaymentDialog({
       if (isCash && finalRecord > 0) {
         openCashDrawer({ bookingId: booking.bookingId, terminal });
       }
-      await recordTipIfAny(booking.bookingId);
+      await recordTipIfAny(booking.bookingId, attemptKey);
       setComplete({
         ...(res?.data || {}),
         amountPaid: roundMoney(finalRecord + discountAmount),

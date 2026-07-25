@@ -1,6 +1,7 @@
 import React from "react";
 import { Icon } from "../pages/cashier/Icon";
 import { moneyFmt, roundMoney } from "../lib/money";
+import { formatDisplayDate } from "../lib/date";
 
 export const responseDataItems = (response) => response?.data || [];
 
@@ -55,9 +56,12 @@ export const bookingSecondaryOf = (item) =>
 export const bookingWhenOf = (item) => {
   const value = item?.dateOfBooking || item?.createdAt || item?.bookingDate || item?.date;
   if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  return formatDisplayDate(value, {
+    fallback: String(value),
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 };
 
 export const paidAmountOf = (item) => {

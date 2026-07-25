@@ -203,7 +203,7 @@ Any scanned code flows through **one** pipeline: `scan → resolve → [redeemab
   shows a chooser; only the picked people are linked (backend `people`
   param: `["signer","minor:0",…]`). Prevents auto-adding the guardian.
 - **Refund:** real flow — search booking → amount + reason → manager override →
-  `POST /payment/manual-refund/:id` (manager-gated endpoint).
+  `POST /payments/refund-requests` (manager-gated, idempotent endpoint).
 - **Voucher counter:** `/vouchers/by-token/:token` now falls back to a
   **Ticket by ticketCode** (`kind:"ticket"`) so stock-item/add-on tickets
   (AS-T-…) resolve and redeem there.

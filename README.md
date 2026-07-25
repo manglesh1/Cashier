@@ -67,5 +67,5 @@ backends ship:
   hands off to admin via the new-tab link.
 - **Shift / drawer**: needs `Shifts` table + 3 endpoints
   (`open`, `current`, `close`). Today the screen is a visual stub.
-- **Refund**: backend exists (`POST /payment/manual-refund/:id`) — wire
+- **Refund**: uses `POST /payments/refund-requests` with idempotency and manager audit proof
   the screen to it.

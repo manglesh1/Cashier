@@ -36,6 +36,11 @@ export function attachScannerListener({ targetEl } = {}) {
   const onKeyDown = (e) => {
     // Skip modifier-only events and key combos (Ctrl+R, Cmd+P, etc.)
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const key = typeof e?.key === "string" ? e.key : "";
+    if (!key) {
+      buffer = "";
+      return;
+    }
 
     const now = Date.now();
     const gap = now - lastKeyAt;
@@ -46,7 +51,7 @@ export function attachScannerListener({ targetEl } = {}) {
       buffer = "";
     }
 
-    if (e.key === "Enter") {
+    if (key === "Enter") {
       // End-of-scan terminator. Only emit if the burst is long enough
       // AND came in fast enough (the Enter itself must be part of the
       // burst — that's what the gap check above enforces).
@@ -69,8 +74,8 @@ export function attachScannerListener({ targetEl } = {}) {
 
     // Only buffer single printable chars. Function keys, arrows etc are
     // ignored so the cashier's keyboard nav still works.
-    if (e.key.length === 1) {
-      buffer += e.key;
+    if (key.length === 1) {
+      buffer += key;
     } else {
       // Non-printable key in the middle of a burst — reset the buffer
       // so the half-captured scan can't accidentally fire later.

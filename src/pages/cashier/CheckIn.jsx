@@ -67,6 +67,10 @@ import { printReceipt, openCashDrawer } from "../../lib/hardware";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
 import { moneyFmt, roundMoney } from "../../lib/money";
 import {
+  createIdempotencyKey,
+  ensureIdempotencyKey,
+} from "../../lib/idempotency";
+import {
   isSessionBookable,
   isVariationUnavailable,
   getVariationSlotIds,
@@ -1371,10 +1375,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     setPaymentNote("");
     setPaymentDiscount(null);
     setPaymentComplete(null);
-    paymentSessionRef.current =
-      (typeof crypto !== "undefined" && crypto.randomUUID)
-        ? `pay_${crypto.randomUUID()}`
-        : `pay_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    paymentSessionRef.current = createIdempotencyKey("cashier-checkin-payment");
     paymentLockRef.current = false;
     setPaymentOpen(true);
   };
@@ -1399,7 +1400,10 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       ? Math.max(0, Number((tenderedAmount - payableBalance).toFixed(2)))
       : 0;
     const terminal = getTerminal();
-    const sessionKey = paymentSessionRef.current;
+    const sessionKey = ensureIdempotencyKey(
+      paymentSessionRef,
+      "cashier-checkin-payment"
+    );
     const cashRemark = paymentMethod === "cash"
       ? `Cash tendered ${moneyFmt(tenderedAmount)}; change due ${moneyFmt(changeDue)}.`
       : "";
@@ -1413,7 +1417,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           amountPaid: discountAmount,
           paymentMethod: "complimentary",
           terminalDeviceId: terminal?.deviceId || null,
-          idempotencyKey: sessionKey ? `${sessionKey}:discount` : undefined,
+          idempotencyKey: `${sessionKey}:discount`,
           remarks: [
             `POS discount applied: ${paymentDiscount?.label || "Discount"}`,
             paymentDiscount?.code ? `Code ${paymentDiscount.code}.` : "",
@@ -1433,7 +1437,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           terminalDeviceId: terminal?.deviceId || null,
           terminalId: paymentMethod === "card" ? (terminal?.terminalId || undefined) : undefined,
           posDeviceId: paymentMethod === "card" ? (terminal?.deviceId || undefined) : undefined,
-          idempotencyKey: sessionKey ? `${sessionKey}:payment` : undefined,
+          idempotencyKey: `${sessionKey}:payment`,
           remarks: [paymentNote || "Payment recorded at POS check-in", cashRemark].filter(Boolean).join(" "),
         }).unwrap();
       }
@@ -1460,10 +1464,9 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         setPaymentDiscount(null);
         setPaymentMethod("card");
         setPaymentAmount(balanceRemaining.toFixed(2));
-        paymentSessionRef.current =
-          (typeof crypto !== "undefined" && crypto.randomUUID)
-            ? `pay_${crypto.randomUUID()}`
-            : `pay_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        paymentSessionRef.current = createIdempotencyKey(
+          "cashier-checkin-payment"
+        );
         refresh();
         toast.success(`${moneyFmt(recordAmount + discountAmount)} recorded - ${moneyFmt(balanceRemaining)} still due`);
         return;
@@ -1504,7 +1507,10 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     if (apply <= 0) { toast.error("Gift card has no balance to apply."); return; }
     paymentLockRef.current = true;
     const terminal = getTerminal();
-    const sessionKey = paymentSessionRef.current;
+    const sessionKey = ensureIdempotencyKey(
+      paymentSessionRef,
+      "cashier-checkin-payment"
+    );
     try {
       if (discountAmount > 0) {
         await recordPayment({
@@ -1512,7 +1518,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           amountPaid: discountAmount,
           paymentMethod: "complimentary",
           terminalDeviceId: terminal?.deviceId || null,
-          idempotencyKey: sessionKey ? `${sessionKey}:discount` : undefined,
+          idempotencyKey: `${sessionKey}:discount`,
           remarks: [
             `POS discount applied: ${paymentDiscount?.label || "Discount"}`,
             paymentDiscount?.code ? `Code ${paymentDiscount.code}.` : "",
@@ -1525,6 +1531,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         ...(pin ? { pin: String(pin).trim() } : {}),
         amount: apply,
         bookingId: booking.bookingId,
+        idempotencyKey: `${sessionKey}:gift-card`,
         note: paymentNote || "POS gift card payment",
       }).unwrap();
       const balanceRemaining = roundMoney(Math.max(0, payable - apply));
@@ -1535,10 +1542,9 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
         setPaymentDiscount(null);
         setPaymentMethod("card");
         setPaymentAmount(balanceRemaining.toFixed(2));
-        paymentSessionRef.current =
-          (typeof crypto !== "undefined" && crypto.randomUUID)
-            ? `pay_${crypto.randomUUID()}`
-            : `pay_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+        paymentSessionRef.current = createIdempotencyKey(
+          "cashier-checkin-payment"
+        );
         toast.success(`${moneyFmt(apply + discountAmount)} recorded - ${moneyFmt(balanceRemaining)} still due`);
         return;
       }
@@ -1721,10 +1727,9 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
               setPaymentDiscount(null);
               setPaymentMethod("cash");
               setPaymentAmount("");
-              paymentSessionRef.current =
-                (typeof crypto !== "undefined" && crypto.randomUUID)
-                  ? `pay_${crypto.randomUUID()}`
-                  : `pay_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+              paymentSessionRef.current = createIdempotencyKey(
+                "cashier-checkin-payment"
+              );
               refresh();
               toast.success(`${moneyFmt(pendingTerminal.amount)} on card - ${moneyFmt(balanceRemaining)} still due`);
               return;

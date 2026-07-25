@@ -1,14 +1,14 @@
-// Refund — find a paid booking, refund up to what was paid, with manager
-// approval. The backend route (/payment/manual-refund/:id) is manager-gated
-// and money-sensitive, so we always require a manager override (PIN) before
-// calling it; the approving manager + reason are recorded in the refund
-// remarks for the audit trail.
+// Refund — find a paid booking and refund up to what was paid. Backend policy
+// decides whether direct cashier permission is enough or a location-bound
+// manager approval is required.
 
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
 import {
+  useGetRefundPreviewQuery,
+  useGetRefundRequestQuery,
   useLazySearchBookingSuggestionsQuery,
   useRefundPaymentMutation,
 } from "../../features/bookings/bookingApi";
@@ -24,7 +24,14 @@ import {
   paidAmountOf,
 } from "../../components/cashierLookupRenderers";
 import { moneyFmt, roundMoney } from "../../lib/money";
+import { keyForAttempt } from "../../lib/idempotency";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
+import { useLazyLookupGiftCardQuery } from "../../features/vouchers/voucherApi";
+import { validateRefundDestination } from "./refundValidation";
+import {
+  originalTenderLabel,
+  refundSubmitBlockReason,
+} from "./refundPresentation";
 
 const paidOf = paidAmountOf;
 const nameOf = bookingCustomerNameOf;
@@ -37,9 +44,16 @@ export function Refund() {
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
   const [managerOpen, setManagerOpen] = useState(false);
+  const [resolutionMethod, setResolutionMethod] = useState("original_tender");
+  const [giftCardCode, setGiftCardCode] = useState("");
+  const [destinationGiftCard, setDestinationGiftCard] = useState(null);
+  const [cashConfirmed, setCashConfirmed] = useState(false);
+  const [lookupGiftCard, { isFetching: giftCardLoading }] = useLazyLookupGiftCardQuery();
   const [done, setDone] = useState(null);
+  const [amountInitializedFor, setAmountInitializedFor] = useState(null);
   const [searchBookingSuggestions] = useLazySearchBookingSuggestionsQuery();
   const [refundPayment, { isLoading: refunding }] = useRefundPaymentMutation();
+  const refundAttemptRef = useRef(null);
 
   const runRefundSearch = useCallback(
     (search, { limit } = {}) =>
@@ -51,76 +65,258 @@ export function Refund() {
     [searchBookingSuggestions]
   );
 
-  const refundable = selected ? paidOf(selected) : 0;
+  const {
+    data: previewResponse,
+    isFetching: previewLoading,
+    isError: previewFailed,
+    error: previewError,
+    refetch: refetchPreview,
+  } = useGetRefundPreviewQuery(
+    { bookingId: selected?.bookingId, resolutionMethod },
+    { skip: !selected?.bookingId }
+  );
+  const preview = previewResponse?.data;
+  const { data: requestResponse } = useGetRefundRequestQuery(done?.refundRequestId, {
+    skip: !done?.refundRequestId || done?.status !== "processing",
+    pollingInterval: done?.status === "processing" ? 3000 : 0,
+  });
+
+  const refundable = Number(preview?.refundableAmount) || 0;
   const amountNum = roundMoney(Number(amount) || 0);
+  const approvalRequired = Boolean(preview?.authorization?.managerApprovalRequired);
+  const selectedDestination = preview?.destinations?.find(
+    (destination) => destination.method === resolutionMethod
+  );
+  const cashConfirmationRequired = selectedDestination?.requiresCashConfirmation === true;
+
+  useEffect(() => {
+    const initializationKey = `${selected?.bookingId || ""}:${resolutionMethod}`;
+    if (
+      selected?.bookingId &&
+      preview?.previewVersion &&
+      amountInitializedFor !== initializationKey
+    ) {
+      setAmount(refundable.toFixed(2));
+      setAmountInitializedFor(initializationKey);
+    }
+  }, [amountInitializedFor, preview?.previewVersion, refundable, resolutionMethod, selected?.bookingId]);
+
+  useEffect(() => {
+    const request = requestResponse?.data;
+    if (!request?.refundRequestId || !done || done.status === request.status) return;
+    setDone({
+      ...done,
+      status: request.status,
+      cancelWhenCompleted: Boolean(request.cancelWhenCompleted),
+    });
+    if (request.status === "completed") {
+      toast.success(`Refund completed for ${done.bookingNumber}`);
+    } else if (["manual_review", "partial"].includes(request.status)) {
+      toast.warning("Refund needs staff review. Do not issue another refund.");
+    }
+  }, [done, requestResponse]);
 
   const pickBooking = (b) => {
+    refundAttemptRef.current = null;
     setSelected(b);
     setQuery(bookingLabelOf(b));
-    setAmount(paidOf(b).toFixed(2));
+    setAmount("");
+    setAmountInitializedFor(null);
     setReason("");
+    setResolutionMethod("original_tender");
+    setGiftCardCode("");
+    setDestinationGiftCard(null);
+    setCashConfirmed(false);
   };
 
   const reset = () => {
+    refundAttemptRef.current = null;
+    setResolutionMethod("original_tender");
+    setGiftCardCode("");
+    setDestinationGiftCard(null);
+    setCashConfirmed(false);
     setSelected(null);
     setQuery("");
     setAmount("");
     setReason("");
     setDone(null);
+    setAmountInitializedFor(null);
+  };
+
+  const selectResolutionMethod = (method) => {
+    setResolutionMethod(method);
+    setDestinationGiftCard(null);
+    setGiftCardCode("");
+    setCashConfirmed(false);
+    setAmountInitializedFor(null);
+  };
+
+  const lookupDestinationGiftCard = async () => {
+    const code = giftCardCode.trim();
+    if (!code) { toast.error("Enter a gift card code."); return; }
+    try {
+      const response = await lookupGiftCard({ code }).unwrap();
+      const card = response?.data;
+      if (!card?.giftCardId) throw new Error("Gift card was not found.");
+      if (["cancelled", "expired"].includes(String(card.status || "").toLowerCase())) {
+        throw new Error(`Gift card is ${card.status}.`);
+      }
+      setDestinationGiftCard(card);
+      toast.success(`Gift card ${card.code} selected.`);
+    } catch (error) {
+      toast.error(error?.data?.message || error?.message || "Gift card lookup failed.");
+    }
   };
 
   const requestRefund = () => {
     if (!selected) return;
+    if (previewLoading || !preview) {
+      toast.error("Refundable amount is still loading.");
+      return;
+    }
+    if (!preview.authorization?.eligible) {
+      toast.error(preview.authorization?.message || "You cannot refund this booking.");
+      return;
+    }
     if (!Number.isFinite(amountNum) || amountNum <= 0) {
       toast.error("Enter a refund amount.");
       return;
     }
     if (amountNum > refundable) {
-      toast.error(`Refund cannot exceed the ${moneyFmt(refundable)} paid.`);
+      toast.error(`Refund cannot exceed the authoritative ${moneyFmt(refundable)} available.`);
       return;
     }
-    setManagerOpen(true);
+    const destinationError = validateRefundDestination({
+      resolutionMethod,
+      destinationGiftCard,
+      cashConfirmationRequired,
+      cashConfirmed,
+    });
+    if (destinationError) {
+      toast.error(destinationError);
+      return;
+    }
+    if (approvalRequired) {
+      setManagerOpen(true);
+      return;
+    }
+    doRefund(null);
   };
 
   const doRefund = async (audit) => {
     setManagerOpen(false);
+    const fingerprint = JSON.stringify({
+      bookingId: selected.bookingId,
+      amount: amountNum.toFixed(2),
+      resolutionMethod,
+      destinationGiftCardId:
+        resolutionMethod === "gift_card"
+          ? destinationGiftCard?.giftCardId || null
+          : null,
+      cashConfirmed: cashConfirmationRequired ? cashConfirmed : null,
+      previewVersion: preview.previewVersion,
+    });
+    const idempotencyKey = keyForAttempt(refundAttemptRef, {
+      prefix: "cashier-refund",
+      fingerprint,
+    });
     try {
       const res = await refundPayment({
         bookingId: selected.bookingId,
+        idempotencyKey,
         amount: amountNum,
+        resolutionMethod,
+        destinationGiftCardId: resolutionMethod === "gift_card" ? destinationGiftCard?.giftCardId : undefined,
+        cashConfirmed: cashConfirmationRequired ? cashConfirmed : undefined,
+        managerOverrideAuditId: audit?.auditId,
         remarks: [
           reason ? `Reason: ${reason}.` : "POS refund.",
+          `Destination: ${resolutionMethod}.`,
           audit?.managerName ? `Approved by ${audit.managerName}.` : "",
         ].filter(Boolean).join(" "),
+        previewVersion: preview.previewVersion,
       }).unwrap();
       const result = res?.data || {};
+      const request = result.refundRequest || {};
+      const status = request.status || "processing";
+      // The server accepted the command. A later partial refund is a new
+      // command even when it happens to use the same amount/destination.
+      refundAttemptRef.current = null;
       setDone({
         refundAmount: roundMoney(result.refundAmount ?? amountNum),
+        resolutionMethod,
         balance: result.balance,
         paymentStatus: result.paymentStatus,
         bookingNumber: numberOf(selected),
+        refundRequestId: request.refundRequestId,
+        status,
+        cancelWhenCompleted: Boolean(request.cancelWhenCompleted),
       });
-      toast.success(`Refunded ${moneyFmt(result.refundAmount ?? amountNum)}`);
+      if (status === "completed") {
+        toast.success(`Refunded ${moneyFmt(result.refundAmount ?? amountNum)}`);
+      } else if (["manual_review", "partial"].includes(status)) {
+        toast.warning("Refund recorded for staff review. Do not issue another refund.");
+      } else {
+        toast.info("Refund submitted. Payment confirmation is still pending.");
+      }
     } catch (err) {
+      if (!audit && err?.data?.error === "manager_approval_required") {
+        setManagerOpen(true);
+        return;
+      }
+      if (err?.data?.error === "refund_preview_stale") {
+        refundAttemptRef.current = null;
+        toast.warning("Refundable amount changed. Review the refreshed amount and try again.");
+        refetchPreview();
+        setAmountInitializedFor(null);
+        return;
+      }
       toast.error(err?.data?.error || err?.data?.message || "Could not process refund");
     }
   };
 
   // ── Success ────────────────────────────────────────────────────────
   if (done) {
+    const completed = done.status === "completed";
+    const needsReview = ["manual_review", "partial"].includes(done.status);
     return (
       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", padding: 40 }}>
-        <div style={{ width: 88, height: 88, borderRadius: 28, background: "var(--color-success)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid var(--ink-800)" }}>
-          <Icon name="check" size={48} stroke={3} />
+        <div style={{ width: 88, height: 88, borderRadius: 28, background: completed ? "var(--color-success)" : needsReview ? "#b45309" : "var(--color-info, #2563eb)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid var(--ink-800)" }}>
+          <Icon name={completed ? "check" : needsReview ? "triangle-alert" : "clock-3"} size={48} stroke={3} />
         </div>
         <h1 style={{ fontFamily: "var(--font-display)", fontSize: 40, fontWeight: 800, margin: "18px 0 4px" }}>
-          Refunded {moneyFmt(done.refundAmount)}
+          {completed
+            ? `Refunded ${moneyFmt(done.refundAmount)}`
+            : needsReview
+              ? "Refund needs review"
+              : "Refund submitted"}
         </h1>
+        {!completed && (
+          <div style={{ maxWidth: 520, textAlign: "center", fontSize: 14, color: "var(--ink-600)", marginBottom: 10 }}>
+            {needsReview
+              ? "The request is recorded and its refundable headroom is reserved. Do not submit a second refund."
+              : "The payment provider has not confirmed the refund yet. This screen will update automatically."}
+          </div>
+        )}
+        {completed && (
+          <div style={{ maxWidth: 520, textAlign: "center", fontSize: 14, color: "var(--ink-600)", marginBottom: 10 }}>
+            {done.cancelWhenCompleted
+              ? "The booking was cancelled and its reserved capacity was released."
+              : "The booking remains active because this was a partial refund."}
+          </div>
+        )}
         <div style={{ fontSize: 15, color: "var(--ink-600)", marginBottom: 6 }}>
           {done.bookingNumber}
           {done.balance != null ? ` · balance ${moneyFmt(done.balance)}` : ""}
         </div>
-        {done.paymentStatus && <StatusPill tone="info">{String(done.paymentStatus).replace(/_/g, " ")}</StatusPill>}
+        <StatusPill tone={completed ? "success" : needsReview ? "warning" : "info"}>
+          {String(done.status).replace(/_/g, " ")}
+        </StatusPill>
+        {done.refundRequestId && (
+          <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-500)", marginTop: 8 }}>
+            Request #{done.refundRequestId}
+          </div>
+        )}
         <button onClick={reset} className="a-btn a-btn--primary" style={{ marginTop: 22 }}>
           <Icon name="arrow-right" size={18} /> New refund
         </button>
@@ -130,6 +326,23 @@ export function Refund() {
 
   // ── Amount + approval ──────────────────────────────────────────────
   if (selected) {
+    const destinationLabels = {
+      original_tender: originalTenderLabel(preview?.tenders),
+      gift_card: "Gift card",
+      cash: "Cash",
+    };
+    const destinationOptions = preview?.destinations || [];
+    const destinationReady = resolutionMethod !== "gift_card" || Boolean(destinationGiftCard?.giftCardId);
+    const cashReady = !cashConfirmationRequired || cashConfirmed;
+    const submitBlockReason = refundSubmitBlockReason({
+      refunding,
+      previewLoading,
+      previewFailed,
+      refundable,
+      destinationReady,
+      cashReady,
+      verdict: preview?.verdict,
+    });
     return (
       <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px", maxWidth: 720, margin: "0 auto", width: "100%" }}>
         <button onClick={reset} className="a-btn a-btn--ghost a-btn--sm" style={{ marginBottom: 14 }}>
@@ -144,10 +357,84 @@ export function Refund() {
               <div style={{ fontSize: 13, color: "var(--ink-500)", marginTop: 2 }}>{nameOf(selected)}</div>
             </div>
             <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 11, color: "var(--ink-500)", fontWeight: 800, textTransform: "uppercase", letterSpacing: ".06em" }}>Paid</div>
-              <div className="display-num" style={{ fontSize: 28 }}>{moneyFmt(refundable)}</div>
+              <div style={{ fontSize: 11, color: "var(--ink-500)", fontWeight: 800, textTransform: "uppercase", letterSpacing: ".06em" }}>Refundable now</div>
+              <div className="display-num" style={{ fontSize: 28 }}>{previewLoading ? "…" : moneyFmt(refundable)}</div>
             </div>
           </div>
+          {preview && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 18, marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--ink-200)", fontSize: 12, color: "var(--ink-600)" }}>
+              <span>Captured {moneyFmt(preview.capturedAmount)}</span>
+              <span>Refunded or reserved {moneyFmt(preview.reservedAmount)}</span>
+              <span>{preview.tenders?.length || 0} tender{preview.tenders?.length === 1 ? "" : "s"}</span>
+            </div>
+          )}
+        </div>
+
+        {preview?.cancellation?.automaticForFullRefund && (
+          <div style={{ border: "1px solid #fcd34d", background: "#fffbeb", color: "#78350f", borderRadius: 10, padding: 12, marginBottom: 14, fontSize: 13 }}>
+            A full refund cancels this booking and releases its reserved capacity after
+            provider confirmation. A partial refund keeps the booking active.
+          </div>
+        )}
+
+        {previewFailed && (
+          <div style={{ border: "1px solid #fca5a5", background: "#fef2f2", color: "#991b1b", borderRadius: 10, padding: 12, marginBottom: 14, fontSize: 13 }}>
+            {previewError?.data?.message || "Could not load the refundable amount."}{" "}
+            <button type="button" className="a-btn a-btn--ghost a-btn--sm" onClick={refetchPreview}>Retry</button>
+          </div>
+        )}
+
+        <div style={{ display: "grid", gap: 10, marginBottom: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 900, color: "var(--ink-600)" }}>Return money as</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+            {destinationOptions.map((destination) => (
+              <button
+                key={destination.method}
+                type="button"
+                disabled={!destination.enabled}
+                onClick={() => selectResolutionMethod(destination.method)}
+                style={{
+                  textAlign: "left",
+                  padding: 12,
+                  borderRadius: 10,
+                  border: resolutionMethod === destination.method ? "2px solid #2563eb" : "1.5px solid var(--ink-300)",
+                  background: resolutionMethod === destination.method ? "#eff6ff" : "#fff",
+                  opacity: destination.enabled ? 1 : 0.45,
+                  cursor: destination.enabled ? "pointer" : "not-allowed",
+                }}
+              >
+                <strong style={{ display: "block", fontSize: 13 }}>{destinationLabels[destination.method]}</strong>
+                <span style={{ display: "block", marginTop: 3, fontSize: 11, color: "var(--ink-500)" }}>
+                  {destination.enabled ? `Up to ${moneyFmt(destination.refundableAmount)}` : String(destination.reason || "Unavailable").replace(/_/g, " ")}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          {resolutionMethod === "gift_card" && (
+            <div style={{ border: "1.5px solid #93c5fd", background: "#eff6ff", borderRadius: 10, padding: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 6 }}>Destination gift card</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input value={giftCardCode} onChange={(event) => setGiftCardCode(event.target.value)} placeholder="XXXX-XXXX-XXXX" style={{ flex: 1, minWidth: 0, padding: "10px 12px", border: "1.5px solid #93c5fd", borderRadius: 8 }} />
+                <button type="button" className="a-btn a-btn--secondary a-btn--sm" onClick={lookupDestinationGiftCard} disabled={giftCardLoading}>
+                  {giftCardLoading ? "Checking..." : "Look up"}
+                </button>
+              </div>
+              {destinationGiftCard && <div style={{ marginTop: 7, color: "#166534", fontSize: 12, fontWeight: 800 }}>Selected {destinationGiftCard.code} ? balance {moneyFmt(destinationGiftCard.currentBalance)}</div>}
+            </div>
+          )}
+
+          {cashConfirmationRequired && (
+            <label style={{ display: "flex", gap: 10, padding: 12, border: "1.5px solid #f59e0b", background: "#fffbeb", borderRadius: 10, fontSize: 12 }}>
+              <input type="checkbox" checked={cashConfirmed} onChange={(event) => setCashConfirmed(event.target.checked)} />
+              <span>
+                <strong style={{ display: "block" }}>
+                  Required: confirm {resolutionMethod === "original_tender" ? "original cash" : "cash"} payout
+                </strong>
+                Submit first, then hand the exact completed amount to the customer and retain the receipt.
+              </span>
+            </label>
+          )}
         </div>
 
         <div style={{ display: "grid", gap: 12 }}>
@@ -170,6 +457,7 @@ export function Refund() {
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               placeholder="e.g. customer left early, duplicate charge"
+              autoComplete="off"
               style={{ fontSize: 14, padding: "10px 12px", border: "1.5px solid var(--ink-300)", borderRadius: 10 }}
             />
           </label>
@@ -179,12 +467,26 @@ export function Refund() {
           type="button"
           className="a-btn a-btn--primary"
           onClick={requestRefund}
-          disabled={refunding}
+          disabled={Boolean(submitBlockReason)}
           style={{ width: "100%", justifyContent: "center", minHeight: 52, marginTop: 18, fontSize: 16 }}
         >
           <Icon name="undo-2" size={18} />
-          {refunding ? "Processing…" : `Refund ${moneyFmt(amountNum)} · manager approval`}
+          {refunding
+            ? "Processing…"
+            : previewLoading
+              ? "Checking refundable amount…"
+            : approvalRequired
+              ? `Refund ${moneyFmt(amountNum)} · manager approval`
+              : `Refund ${moneyFmt(amountNum)}`}
         </button>
+        {submitBlockReason && (
+          <div
+            role="status"
+            style={{ marginTop: 8, color: "#92400e", fontSize: 12, fontWeight: 700 }}
+          >
+            {submitBlockReason}
+          </div>
+        )}
 
         <ManagerOverridePrompt
           open={managerOpen}
@@ -193,8 +495,14 @@ export function Refund() {
           action="pos_refund"
           targetType="booking"
           targetId={selected.bookingId}
-          payload={{ amount: amountNum }}
-          defaultReason={reason || "POS refund"}
+          payload={{
+            amount: amountNum,
+            currency: preview?.currency,
+            resolutionMethod,
+            destinationGiftCardId: destinationGiftCard?.giftCardId || undefined,
+          }}
+          defaultReason=""
+          reasonLabel="Approval note (optional)"
           onCancel={() => setManagerOpen(false)}
           onApprove={doRefund}
         />

@@ -97,15 +97,43 @@ export const bookingApi = baseApi.injectEndpoints({
       ],
     }),
     refundPayment: builder.mutation({
-      query: ({ bookingId, ...body }) => ({
-        url: `/payment/manual-refund/${bookingId}`,
+      query: ({ bookingId, idempotencyKey, ...body }) => ({
+        url: `/payments/refund-requests`,
         method: "POST",
-        body,
+        body: {
+          ...body,
+          bookingId,
+          sourceType: "booking",
+          sourceId: bookingId,
+          origin: "pos",
+        },
+        // The component owns the attempt key and retains it after ambiguous
+        // network failures. Never mint a new key here: doing so would turn an
+        // HTTP retry into a second money-moving command.
+        headers: idempotencyKey
+          ? { "Idempotency-Key": idempotencyKey }
+          : undefined,
       }),
       invalidatesTags: (result, error, { bookingId }) => [
         { type: "Booking", id: bookingId },
         "Bookings",
       ],
+    }),
+    getRefundPreview: builder.query({
+      query: ({ bookingId, amount, cancelWhenCompleted, resolutionMethod } = {}) => ({
+        url: "/payments/refund-requests/preview",
+        params: {
+          sourceType: "booking",
+          sourceId: bookingId,
+          bookingId,
+          amount,
+          cancelWhenCompleted: cancelWhenCompleted || undefined,
+          resolutionMethod: resolutionMethod || "original_tender",
+        },
+      }),
+    }),
+    getRefundRequest: builder.query({
+      query: (refundRequestId) => `/payments/refund-requests/${refundRequestId}`,
     }),
 
     // ── Card-on-terminal flow (Phase 4b) ─────────────────────────────
@@ -252,6 +280,8 @@ export const {
   useSendBookingConfirmationMutation,
   useRecordPaymentMutation,
   useRefundPaymentMutation,
+  useGetRefundPreviewQuery,
+  useGetRefundRequestQuery,
   useGetTerminalPaymentStatusQuery,
   useCancelTerminalPaymentMutation,
   useGetCheckInStatusQuery,

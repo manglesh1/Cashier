@@ -70,6 +70,15 @@ export default function SellPaymentOverlay({
   // ── Idempotency / re-entry guards ─────────────────────────────────
   const paymentLockRef = useRef(false);
   const paymentSessionRef = useRef(null);
+  const ensurePaymentSessionKey = () => {
+    if (!paymentSessionRef.current) {
+      paymentSessionRef.current =
+        (typeof crypto !== "undefined" && crypto.randomUUID)
+          ? `sell-${crypto.randomUUID()}`
+          : `sell-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+    return paymentSessionRef.current;
+  };
 
   // ── Synthetic display-only booking ────────────────────────────────
   // Built from the cart's draft so CheckInPaymentModal can render
@@ -413,6 +422,7 @@ export default function SellPaymentOverlay({
   // ── Submit handlers (mirror CheckIn.jsx) ─────────────────────────
   const handleRecordPayment = async () => {
     if (paymentComplete || paymentLockRef.current) return;
+    const paymentSessionKey = ensurePaymentSessionKey();
     const discountAmount = roundMoney(Math.min(Number(paymentDiscount?.amount || 0), balanceDue));
     const payableBalance = roundMoney(Math.max(0, balanceDue - discountAmount));
     const tenderedAmount = Number(paymentAmount);
@@ -477,9 +487,7 @@ export default function SellPaymentOverlay({
             amountPaid: discountAmount,
             paymentMethod: "complimentary",
             terminalDeviceId: terminal?.deviceId || null,
-            idempotencyKey: paymentSessionRef.current
-              ? `${paymentSessionRef.current}:discount`
-              : undefined,
+            idempotencyKey: `${paymentSessionKey}:discount`,
             remarks: [
               `POS discount applied: ${paymentDiscount?.label || "Discount"}`,
               paymentDiscount?.code ? `Code ${paymentDiscount.code}.` : "",
@@ -522,9 +530,7 @@ export default function SellPaymentOverlay({
           changeDue,
           terminalDeviceId: terminal?.deviceId || null,
           remarks: [paymentNote || "Payment recorded at POS sell", cashRemark].filter(Boolean).join(" "),
-          idempotencyKey: paymentSessionRef.current
-            ? `${paymentSessionRef.current}:retry-${paymentMethod}`
-            : undefined,
+          idempotencyKey: `${paymentSessionKey}:retry-${paymentMethod}`,
         }).unwrap();
       }
 
@@ -591,6 +597,7 @@ export default function SellPaymentOverlay({
   // contract.
   const handleGiftCardPayment = async ({ code, pin, amount }) => {
     if (paymentComplete || paymentLockRef.current) return;
+    const paymentSessionKey = ensurePaymentSessionKey();
     const discountAmount = roundMoney(Math.min(Number(paymentDiscount?.amount || 0), balanceDue));
     const payable = roundMoney(Math.max(0, balanceDue - discountAmount));
     const apply = roundMoney(Math.min(payable, Number(amount) || 0));
@@ -618,6 +625,7 @@ export default function SellPaymentOverlay({
           amountPaid: discountAmount,
           paymentMethod: "complimentary",
           terminalDeviceId: terminal?.deviceId || null,
+          idempotencyKey: `${paymentSessionKey}:discount`,
           remarks: [
             `POS discount applied: ${paymentDiscount?.label || "Discount"}`,
             paymentDiscount?.code ? `Code ${paymentDiscount.code}.` : "",
@@ -629,6 +637,7 @@ export default function SellPaymentOverlay({
         ...(pin ? { pin: String(pin).trim() } : {}),
         amount: apply,
         bookingId: primary.bookingId,
+        idempotencyKey: `${paymentSessionKey}:gift-card`,
         note: paymentNote || "POS gift card payment",
       }).unwrap();
       const balanceRemaining = roundMoney(Math.max(0, payable - apply));
