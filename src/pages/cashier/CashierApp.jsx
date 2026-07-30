@@ -1009,8 +1009,7 @@ export function CashierApp() {
   // the device record comes from localStorage. Falls back to the first
   // device for the location if pairing somehow vanished mid-session.
   const pairedTerminal = getTerminal();
-  // /pos/devices needs ?locationId — getLocationFromRequest reads query first.
-  // Cashier's token doesn't carry session-style context the way admin does.
+  // The shared API client scopes this request with X-Location-Id.
   const { data: devicesData } = useGetAllPosDevicesQuery(
     pairedTerminal?.locationId || locationId
   );

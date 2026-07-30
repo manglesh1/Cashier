@@ -74,9 +74,9 @@ export const posApi = baseApi.injectEndpoints({
       invalidatesTags: ["PresetBuilder"],
     }),
 
-    // Devices — accepts locationId (required by backend's getLocationFromRequest)
+    // Devices are scoped by the shared X-Location-Id request header.
     getAllPosDevices: builder.query({
-      query: (locationId) => ({ url: "/pos/devices", params: locationId ? { locationId } : {} }),
+      query: () => ({ url: "/pos/devices" }),
       providesTags: ["PosDevice"],
     }),
     getPosDeviceById: builder.query({

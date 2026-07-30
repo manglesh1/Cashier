@@ -41,7 +41,7 @@ jobs:
 
       - name: Load production build config
         run: |
-          echo "VITE_API_BASE_URL=/api" >> "$GITHUB_ENV"
+          echo "VITE_API_BASE_URL=/api/cashier" >> "$GITHUB_ENV"
           echo "VITE_ADMIN_URL=${APP_URL}" >> "$GITHUB_ENV"
           echo "VITE_PUBLIC_APP_URL=${APP_URL}" >> "$GITHUB_ENV"
           echo "VITE_BASE_PATH=${CASHIER_BASE_PATH}" >> "$GITHUB_ENV"
