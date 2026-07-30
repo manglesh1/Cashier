@@ -38,6 +38,20 @@ const nameOf = bookingCustomerNameOf;
 const numberOf = bookingLabelOf;
 const whenOf = bookingWhenOf;
 
+const destinationReasonLabels = {
+  disabled_by_policy: "Disabled by venue policy",
+  no_eligible_tender: "Not available for this payment",
+  nuvei_terminal_original_tender_requires_terminal:
+    "Nuvei terminal return requires the certified terminal refund flow",
+};
+
+function destinationReasonLabel(reason) {
+  return (
+    destinationReasonLabels[reason] ||
+    String(reason || "Unavailable").replace(/_/g, " ")
+  );
+}
+
 export function Refund() {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
@@ -405,7 +419,9 @@ export function Refund() {
               >
                 <strong style={{ display: "block", fontSize: 13 }}>{destinationLabels[destination.method]}</strong>
                 <span style={{ display: "block", marginTop: 3, fontSize: 11, color: "var(--ink-500)" }}>
-                  {destination.enabled ? `Up to ${moneyFmt(destination.refundableAmount)}` : String(destination.reason || "Unavailable").replace(/_/g, " ")}
+                  {destination.enabled
+                    ? `Up to ${moneyFmt(destination.refundableAmount)}`
+                    : destinationReasonLabel(destination.reason)}
                 </span>
               </button>
             ))}
