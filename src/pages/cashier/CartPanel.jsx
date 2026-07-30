@@ -634,11 +634,11 @@ export function CartPanel({
         toast.success(`Override applied — $${payload.value.toFixed(2)} off`);
       } else {
         // Code override — re-validate via the RTK query (goes through baseApi,
-        // so it carries the cashier header + Bearer token AND decrypts the
-        // response) with override=1, so the backend returns the discount details
-        // bypassing the eligibility check the manager just overrode. (The old
-        // raw fetch sent neither header nor token → encrypted/unauthorized
-        // response → silent $0 discount.)
+        // so it carries the cashier header + Bearer token) with override=1, so
+        // the backend returns the discount details bypassing the eligibility
+        // check the manager just overrode. The old raw fetch sent neither
+        // header nor token, resulting in an unauthorized response and a silent
+        // $0 discount.
         let discount = null;
         try {
           const res = await validate({
