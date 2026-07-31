@@ -21,12 +21,19 @@ import { logout } from "./features/auth/authSlice";
 export default function App() {
   const token = useSelector((s) => s.auth?.token);
   const session = useSelector((s) => s.auth?.session);
+  const locations = useSelector((s) => s.auth?.locations || []);
   const dispatch = useDispatch();
   // bump after pairing/unpairing so we re-read localStorage
   const [, setPairingTick] = useState(0);
   // Toggle between ClockIn (default) and email fallback
   const [authMode, setAuthMode] = useState("pin"); // "pin" | "email"
   const terminal = getTerminal();
+  const activeLocation = locations.find(
+    (item) => String(item.locationId) === String(terminal?.locationId)
+  ) || locations[0];
+  const demoEntitlements = activeLocation?.saasEntitlements?.demo
+    ? activeLocation.saasEntitlements
+    : null;
   // Tracks whether the "session expired" toast has fired for the CURRENT
   // session. Reset on logout (effect below) and on a new login — the
   // login reset uses session.loggedInAt so a token-refresh that issues a
@@ -99,6 +106,32 @@ export default function App() {
 
   return (
     <>
+      {token && demoEntitlements ? (
+        <div
+          role="status"
+          style={{
+            position: "relative",
+            zIndex: 80,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            padding: "9px 16px",
+            borderBottom: "1px solid color-mix(in srgb, var(--brand-primary, #7c3aed) 30%, transparent)",
+            background: "color-mix(in srgb, var(--brand-primary, #7c3aed) 10%, white)",
+            color: "var(--ink-900, #1c1917)",
+            fontSize: 13,
+            fontWeight: 800,
+          }}
+        >
+          <span><strong style={{ color: "var(--brand-primary, #7c3aed)" }}>DEMO MODE</strong> · Sandbox payments and test data only</span>
+          <span style={{ whiteSpace: "nowrap", fontSize: 12 }}>
+            {demoEntitlements.demoExpiresAt
+              ? `Expires ${new Date(demoEntitlements.demoExpiresAt).toLocaleDateString()}`
+              : "No expiry set"}
+          </span>
+        </div>
+      ) : null}
       {body}
       <Toaster
         position="top-center"
