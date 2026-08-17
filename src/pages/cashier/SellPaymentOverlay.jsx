@@ -489,7 +489,7 @@ export default function SellPaymentOverlay({
             terminalDeviceId: terminal?.deviceId || null,
             idempotencyKey: `${paymentSessionKey}:discount`,
             remarks: [
-              `POS discount applied: ${paymentDiscount?.label || "Discount"}`,
+              `POS promo applied: ${paymentDiscount?.label || "Promo"}`,
               paymentDiscount?.code ? `Code ${paymentDiscount.code}.` : "",
               paymentDiscount?.managerName ? `Approved by ${paymentDiscount.managerName}.` : "",
             ].filter(Boolean).join(" "),
@@ -627,7 +627,7 @@ export default function SellPaymentOverlay({
           terminalDeviceId: terminal?.deviceId || null,
           idempotencyKey: `${paymentSessionKey}:discount`,
           remarks: [
-            `POS discount applied: ${paymentDiscount?.label || "Discount"}`,
+            `POS promo applied: ${paymentDiscount?.label || "Promo"}`,
             paymentDiscount?.code ? `Code ${paymentDiscount.code}.` : "",
           ].filter(Boolean).join(" "),
         }).unwrap();

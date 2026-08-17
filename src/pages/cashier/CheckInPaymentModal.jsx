@@ -303,7 +303,7 @@ function CheckInPaymentModal({
   const requestManagerDiscount = () => {
     const amt = roundMoney(Math.min(Number(manualDiscount), balanceDue));
     if (!amt || amt <= 0) {
-      toast.error("Enter discount amount.");
+      toast.error("Enter promo amount.");
       return;
     }
     setManagerOpen(true);
@@ -465,7 +465,7 @@ function CheckInPaymentModal({
               />
               <div style={{ background: "#FFFDD1", border: "1.5px solid var(--ink-400)", padding: 12, fontSize: 14, fontWeight: 800 }}>
                 <TotalLine label="Order Total" value={moneyFmt(subTotal)} />
-                <TotalLine label="Existing Discounts" value={moneyFmt(existingDiscount)} />
+                <TotalLine label="Existing Promos" value={moneyFmt(existingDiscount)} />
                 <TotalLine label="POS Discount" value={moneyFmt(discountAmount)} tone={discountAmount > 0 ? "#F45B0A" : undefined} />
                 <div style={{ borderTop: "3px solid var(--ink-900)", margin: "8px 0" }} />
                 <TotalLine label="Sub Total" value={moneyFmt(Math.max(0, subTotal - existingDiscount - discountAmount))} />
@@ -579,7 +579,7 @@ function CheckInPaymentModal({
                 )}
                 {discountAmount > 0 && (
                   <div style={{ display: "flex", justifyContent: "space-between", color: "#F45B0A", marginTop: 6 }}>
-                    <span>{discount?.label || "Discount"}</span>
+                    <span>{discount?.label || "Promo"}</span>
                     <span>-{moneyFmt(discountAmount)}</span>
                   </div>
                 )}
@@ -628,17 +628,17 @@ function CheckInPaymentModal({
       </div>
       <ManagerOverridePrompt
         open={managerOpen}
-        title="Approve manager discount"
+        title="Approve manager promo"
         description={`Apply ${moneyFmt(Math.min(Number(manualDiscount), balanceDue))} discount to ${displayText(booking.bookingNumber, "booking")}.`}
         action="pos_manager_discount"
         targetType="booking"
         targetId={booking.bookingId}
         payload={{ amount: roundMoney(Math.min(Number(manualDiscount), balanceDue)) }}
-        defaultReason="POS check-in manager discount"
+        defaultReason="POS check-in manager promo"
         onCancel={() => setManagerOpen(false)}
         onApprove={(audit) => {
           const amt = roundMoney(Math.min(Number(manualDiscount), balanceDue));
-          onDiscountChange({ amount: amt, label: "Manager discount", source: "manager", managerName: audit?.managerName });
+          onDiscountChange({ amount: amt, label: "Manager promo", source: "manager", managerName: audit?.managerName });
           onAmountChange(method === "cash" ? "" : roundMoney(Math.max(0, balanceDue - amt)).toFixed(2));
           setManagerOpen(false);
         }}

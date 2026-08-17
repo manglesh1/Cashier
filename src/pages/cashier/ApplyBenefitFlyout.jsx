@@ -176,7 +176,7 @@ function PromoPanel({ value, onApply, onRemove, onClose, promoContext = {} }) {
         const d = res?.data;
         if (!d) return toast.error("Code not recognized");
         if (d.expired || d.blocked) {
-          return toast.error("Code expired or blocked — use Manager Discount instead");
+          return toast.error("Code expired or blocked — use Manager Promo instead");
         }
         onApply({
           source: "code",
@@ -232,7 +232,7 @@ function PromoPanel({ value, onApply, onRemove, onClose, promoContext = {} }) {
   }
 
   return (
-    <PanelShell accent={ACCENT.promo} title="Promo / discount" onClose={onClose}>
+    <PanelShell accent={ACCENT.promo} title="Promos" onClose={onClose}>
       <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
         {[
           { v: "code", label: "Code" },

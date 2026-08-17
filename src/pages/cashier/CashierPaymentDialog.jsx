@@ -352,7 +352,7 @@ export default function CashierPaymentDialog({
   const requestManagerDiscount = () => {
     const amt = roundMoney(Math.min(Number(manualDiscount), balanceDue));
     if (!amt || amt <= 0) {
-      toast.error("Enter discount amount.");
+      toast.error("Enter promo amount.");
       return;
     }
     setManagerOpen(true);
@@ -405,7 +405,7 @@ export default function CashierPaymentDialog({
     const methodRef = isCheck && needRemainder ? `CHK-${checkNumber.trim()}` : undefined;
     const methodRemarks = [note || "Payment recorded at POS sell", cashRemark, checkRemark].filter(Boolean).join(" ");
     const discountRemarks = [
-      `POS discount applied: ${discount?.label || "Discount"}`,
+      `POS promo applied: ${discount?.label || "Promo"}`,
       discount?.code ? `Code ${discount.code}.` : "",
       discount?.managerName ? `Approved by ${discount.managerName}.` : "",
     ].filter(Boolean).join(" ");
@@ -790,7 +790,7 @@ export default function CashierPaymentDialog({
                 <span>Tax</span><span>{moneyFmt(taxAmount)}</span>
                 {totalDiscountShown > 0 && (
                   <>
-                    <span style={{ color: "#137A35" }}>Discount {discount?.label || booking.discount?.name ? `· ${discount?.label || booking.discount?.name}` : ""}</span>
+                    <span style={{ color: "#137A35" }}>Promo {discount?.label || booking.discount?.name ? `· ${discount?.label || booking.discount?.name}` : ""}</span>
                     <span style={{ color: "#137A35" }}>−{moneyFmt(totalDiscountShown)}</span>
                   </>
                 )}
@@ -809,7 +809,7 @@ export default function CashierPaymentDialog({
               <div style={{ marginTop: 14, padding: "10px 12px", background: "white",
                 border: "1.5px solid var(--ink-200)", borderRadius: 10 }}>
                 <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: ".06em",
-                  textTransform: "uppercase", color: "var(--ink-500)", marginBottom: 6 }}>Discount</div>
+                  textTransform: "uppercase", color: "var(--ink-500)", marginBottom: 6 }}>Promo</div>
                 <div style={{ display: "flex", gap: 6 }}>
                   <input value={couponCode} onChange={(e) => setCouponCode(e.target.value)}
                     placeholder="Coupon code"
@@ -1061,17 +1061,17 @@ export default function CashierPaymentDialog({
 
         <ManagerOverridePrompt
           open={managerOpen}
-          title="Approve manager discount"
+          title="Approve manager promo"
           description={`Apply ${moneyFmt(Math.min(Number(manualDiscount), balanceDue))} discount to ${booking.bookingNumber || ""}.`}
           action="pos_manager_discount"
           targetType="booking"
           targetId={booking.bookingId || "draft-sale"}
           payload={{ amount: roundMoney(Math.min(Number(manualDiscount), balanceDue)) }}
-          defaultReason="POS sell manager discount"
+          defaultReason="POS sell manager promo"
           onCancel={() => setManagerOpen(false)}
           onApprove={(audit) => {
             const amt = roundMoney(Math.min(Number(manualDiscount), balanceDue));
-            setDiscount({ amount: amt, label: "Manager discount", source: "manager", managerName: audit?.managerName });
+            setDiscount({ amount: amt, label: "Manager promo", source: "manager", managerName: audit?.managerName });
             setAmount(method === "cash" ? "" : roundMoney(Math.max(0, balanceDue - amt)).toFixed(2));
             setManagerOpen(false);
           }}

@@ -241,7 +241,7 @@ function GuestDetail({ customer, isLoading }) {
         <Stat icon="shopping-bag" label="Total bookings" value={customer?.bookingCount ?? bookings.length ?? 0} />
         <Stat icon="check-circle" label="Visits" value={customer?.visitCount ?? 0} />
         <Stat icon="dollar-sign" label="Total spend" value={fmtMoney(customer?.totalSpend)} tone="success" />
-        <Stat icon="tag" label="Total discount" value={fmtMoney(customer?.totalDiscount)} />
+        <Stat icon="tag" label="Total promo savings" value={fmtMoney(customer?.totalDiscount)} />
         <Stat icon="calendar" label="Last visit" value={fmtDate(customer?.lastVisitAt || customer?.lastBookingAt || latestBooking?.date)} />
         <Stat icon="credit-card" label="Outstanding" value={fmtMoney(outstanding)} tone={Number(outstanding) > 0 ? "danger" : "success"} />
       </section>

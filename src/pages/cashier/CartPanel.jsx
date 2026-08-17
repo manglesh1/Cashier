@@ -568,7 +568,7 @@ export function CartPanel({
     }
     if (promoMode === "amount") {
       if (value > subtotal) {
-        toast.error("Discount can't exceed the subtotal");
+        toast.error("Promo can't exceed the subtotal");
         return;
       }
       // Threshold gate — over the location's $ limit needs manager override (unless skipPin)
@@ -1083,7 +1083,7 @@ export function CartPanel({
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 700, fontSize: 14, color: "var(--aero-electric-500)" }}>{member.name} · Gold</div>
-              <div style={{ fontSize: 12, color: "var(--aero-electric-500)" }}>10% member discount applied</div>
+              <div style={{ fontSize: 12, color: "var(--aero-electric-500)" }}>10% member promo applied</div>
             </div>
           </div>
         )}
@@ -1194,7 +1194,7 @@ export function CartPanel({
             </div>
             {promoMode !== "code" && !skipPin && (
               <div style={{ fontSize: 11, color: "var(--ink-500)", fontWeight: 600 }}>
-                Manual {promoMode === "percentage" ? "percent" : "dollar"} discounts above {promoMode === "percentage" ? `${pctLimit}%` : `$${amtLimit.toFixed(2)}`} need a manager.
+                Manual {promoMode === "percentage" ? "percent" : "dollar"} promos above {promoMode === "percentage" ? `${pctLimit}%` : `$${amtLimit.toFixed(2)}`} need a manager.
               </div>
             )}
           </div>
@@ -1215,8 +1215,8 @@ export function CartPanel({
             effectivePromo
               ? effectivePromo.code
                 ? `Promo · ${effectivePromo.code}`
-                : effectivePromo.name || "Discount"
-              : "Discount"
+                : effectivePromo.name || "Promo"
+              : "Promo"
           }
           memberDiscount={memberDiscount}
           memberLabel={

@@ -1419,7 +1419,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           terminalDeviceId: terminal?.deviceId || null,
           idempotencyKey: `${sessionKey}:discount`,
           remarks: [
-            `POS discount applied: ${paymentDiscount?.label || "Discount"}`,
+            `POS promo applied: ${paymentDiscount?.label || "Promo"}`,
             paymentDiscount?.code ? `Code ${paymentDiscount.code}.` : "",
             paymentDiscount?.managerName ? `Approved by ${paymentDiscount.managerName}.` : "",
           ].filter(Boolean).join(" "),
@@ -1520,7 +1520,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           terminalDeviceId: terminal?.deviceId || null,
           idempotencyKey: `${sessionKey}:discount`,
           remarks: [
-            `POS discount applied: ${paymentDiscount?.label || "Discount"}`,
+            `POS promo applied: ${paymentDiscount?.label || "Promo"}`,
             paymentDiscount?.code ? `Code ${paymentDiscount.code}.` : "",
             paymentDiscount?.managerName ? `Approved by ${paymentDiscount.managerName}.` : "",
           ].filter(Boolean).join(" "),
@@ -2722,7 +2722,7 @@ function CheckInSettlementPanel({
         </div>
         {discount > 0 && (
           <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, fontWeight: 700, color: "#137A35" }}>
-            <span>Discount</span>
+            <span>Promo</span>
             <span>-{moneyFmt(discount)}</span>
           </div>
         )}
