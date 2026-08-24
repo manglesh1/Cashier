@@ -161,7 +161,7 @@ export default function SettingsPage() {
             }}>
               <strong>✓ {bridge.scanCount} scans this session</strong>
               {bridge.lastScanAt && (
-                <> · last at {new Date(bridge.lastScanAt).toLocaleTimeString()}</>
+                <> · last at {new Date(bridge.lastScanAt).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}</>
               )}
             </div>
           )}

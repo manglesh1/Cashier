@@ -37,11 +37,11 @@ import AddTipModal from "../../features/tips/AddTipModal";
 const sinceLabel = (iso) => {
   if (!iso) return "—";
   const d = new Date(iso);
-  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true });
 };
 const timeOnly = (iso) => {
   if (!iso) return "";
-  return new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true });
 };
 
 // Visual chips for status counts

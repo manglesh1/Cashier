@@ -957,10 +957,11 @@ function RecentActivity({ recent }) {
 function RecentRow({ entry }) {
   const ok = (entry.status || "success") === "success";
   const time = entry.redeemedAt
-    ? new Date(entry.redeemedAt).toLocaleTimeString("en-US", {
+      ? new Date(entry.redeemedAt).toLocaleTimeString("en-US", {
         hour: "numeric",
         minute: "2-digit",
         second: "2-digit",
+        hour12: true,
       })
     : "";
   return (

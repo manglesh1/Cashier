@@ -34,6 +34,7 @@ import {
   sessionMatchesCartLine,
   timeRangeFromSession,
 } from "./scheduleHelpers";
+import { formatTime12Hour, formatTimeText12Hour } from "../../lib/time";
 
 export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
   const initialDate = item?.selectedDate || item?.date || formatDateValue(new Date());
@@ -400,7 +401,7 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
                         opacity: available ? 1 : 0.6,
                       }}
                     >
-                      <div style={{ fontWeight: 900, color: "var(--ink-900)" }}>{getStartTime(session)}</div>
+                      <div style={{ fontWeight: 900, color: "var(--ink-900)" }}>{formatTime12Hour(getStartTime(session))}</div>
                       <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 3 }}>
                         {Number(session.capacityRemaining || 0)} {session.availabilityLabel || "spots left"}
                       </div>
@@ -519,7 +520,7 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
                               <div key={key} style={{ border: "1px solid var(--ink-100)", borderRadius: 12, padding: 10, background: "var(--ink-50)" }}>
                                 <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
                                   <div>
-                                    <div className="eyebrow" style={{ fontSize: 10 }}>{(group.fromTime || "").slice(0, 5)} - {(group.toTime || "").slice(0, 5)}</div>
+                                    <div className="eyebrow" style={{ fontSize: 10 }}>{formatTimeText12Hour(`${(group.fromTime || "").slice(0, 5)} - ${(group.toTime || "").slice(0, 5)}`)}</div>
                                     <div style={{ fontWeight: 800, color: "var(--ink-800)" }}>{selectedNames.join(", ") || "Select resource"}</div>
                                   </div>
                                   <button type="button" className="a-btn a-btn--ghost a-btn--sm" onClick={() => setOpenResourceGroup(isOpen ? null : key)}>
@@ -638,7 +639,7 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
               <aside style={{ border: "1.5px solid var(--ink-200)", borderRadius: 14, padding: 14, alignSelf: "start", background: "var(--ink-50)" }}>
                 <div className="eyebrow">Selection</div>
                 <div style={{ marginTop: 6, fontWeight: 900, fontSize: 18 }}>{formatShortDate(selectedDate)}</div>
-                <div style={{ marginTop: 4, color: "var(--ink-600)", fontWeight: 700 }}>{timeRangeFromSession(selectedSession)}</div>
+                <div style={{ marginTop: 4, color: "var(--ink-600)", fontWeight: 700 }}>{formatTimeText12Hour(timeRangeFromSession(selectedSession))}</div>
                 <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
                   <SummaryRow label="Option" value={selectedVariation?.name || "-"} />
                   <SummaryRow label="Available" value={selectedVariation ? getVariationAvailabilitySummary(selectedVariation, selectedSession) : "-"} />

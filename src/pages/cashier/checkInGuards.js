@@ -102,7 +102,7 @@ export const normalizeTicketSummaryPayload = (payload = {}, tickets = []) => {
 
 export const redeemReasonMessage = (reason, ticket) => {
   const start = ticket?.validFrom
-    ? new Date(ticket.validFrom).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    ? new Date(ticket.validFrom).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
     : null;
   const messages = {
     payment_required: "Collect payment before check-in",

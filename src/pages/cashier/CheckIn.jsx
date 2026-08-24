@@ -79,6 +79,7 @@ import {
   formatShortDate,
 } from "./scheduleHelpers";
 import { adminBookingDetailUrl } from "../../lib/adminLink";
+import { formatTime12Hour, formatTimeRange12Hour, formatTimeText12Hour } from "../../lib/time";
 import {
   buildAutoBindPlan,
   buildCheckInAllPlan,
@@ -128,30 +129,13 @@ const firstText = (...values) => {
 const fmtTime = (range) => formatClockLabel((range || "").split(/[–-]/)[0].trim()) || "—";
 
 const formatClockLabel = (value) => {
-  if (!value) return "";
-  const raw = String(value).trim();
-  const timeMatch = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
-  if (timeMatch) {
-    const hour24 = Number(timeMatch[1]);
-    const hour = hour24 % 12 || 12;
-    const suffix = hour24 >= 12 ? "PM" : "AM";
-    return `${hour}:${timeMatch[2]} ${suffix}`;
-  }
-  const parsed = new Date(raw);
-  if (!Number.isNaN(parsed.getTime())) {
-    return parsed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  }
-  return raw;
+  return formatTime12Hour(value);
 };
 
 const formatTimeRange = (value) => {
   const raw = String(value || "").trim();
   if (!raw || raw === "—") return "";
-  const parts = raw.split(/\s*(?:–|-|to)\s*/i).filter(Boolean);
-  if (parts.length >= 2) {
-    return `${formatClockLabel(parts[0])} - ${formatClockLabel(parts[1])}`;
-  }
-  return formatClockLabel(raw);
+  return formatTimeText12Hour(raw);
 };
 
 const formatScheduledTicketTime = (ticket, bookingTimeRange = "") => {
@@ -1198,7 +1182,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       setReslotOpen(false);
       await refresh();
       const d = res?.data;
-      toast.success(d?.fromTime ? `Moved to ${d.fromTime} – ${d.toTime}` : "Moved to the selected slot");
+      toast.success(d?.fromTime ? `Moved to ${formatTimeRange12Hour(d.fromTime, d.toTime)}` : "Moved to the selected slot");
     } catch (err) {
       toast.error(err?.data?.error || err?.data?.message || "Could not move booking");
     }
@@ -3030,7 +3014,7 @@ function ReslotModal({ activityId, variationId, activityName, busy, onPick, onCl
                   onClick={() => onPick(slotId)}
                   style={{ all: "unset", cursor: busy ? "wait" : "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, background: "#fff", border: "1.5px solid var(--ink-200)", borderRadius: 12, padding: "14px 16px" }}
                 >
-                  <div style={{ fontWeight: 900, color: "var(--ink-900)" }}>{timeRangeFromSession(session)}</div>
+                  <div style={{ fontWeight: 900, color: "var(--ink-900)" }}>{formatTimeRange(timeRangeFromSession(session))}</div>
                   <div style={{ fontSize: 12, color: "var(--ink-600)", fontWeight: 700 }}>
                     {Number(session.capacityRemaining || 0)} {session.availabilityLabel || "spots left"}
                   </div>
