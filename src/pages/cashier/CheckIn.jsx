@@ -8,6 +8,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { appConfirm } from "../../services/appDialog";
+import { taxLineLabel, totalWithTaxLabel } from "../../lib/taxDisplay";
 import { Icon } from "./Icon";
 import { StatusPill } from "./StatusPill";
 import { CashierScreenBoundary } from "./CashierScreenBoundary";
@@ -66,6 +67,7 @@ import { useDebounceSearch } from "../../hooks/useDebounceSearch";
 import { getTerminal } from "../../lib/terminal";
 import { printReceipt, openCashDrawer } from "../../lib/hardware";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
+import { formatParkInstantTime, getParkClock } from "../../lib/parkClock";
 import { moneyFmt, roundMoney } from "../../lib/money";
 import {
   createIdempotencyKey,
@@ -99,13 +101,6 @@ import {
   summarizeRedeemFailures,
 } from "./checkInGuards";
 
-const localIsoDate = (date = new Date()) => {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-};
-const today = localIsoDate();
 const asArray = (value) => (Array.isArray(value) ? value : []);
 const displayText = (value, fallback = "") => {
   if (value === null || value === undefined || value === "") return fallback;
@@ -129,8 +124,10 @@ const firstText = (...values) => {
 
 const fmtTime = (range) => formatClockLabel((range || "").split(/[–-]/)[0].trim()) || "—";
 
-const formatClockLabel = (value) => {
-  return formatTime12Hour(value);
+const formatClockLabel = (value, timezone) => {
+  if (/^\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?$/i.test(String(value || ""))) return formatTime12Hour(value);
+  if (!timezone) return "Park timezone not configured";
+  return formatParkInstantTime(value, timezone);
 };
 
 const formatTimeRange = (value) => {
@@ -139,7 +136,7 @@ const formatTimeRange = (value) => {
   return formatTimeText12Hour(raw);
 };
 
-const formatScheduledTicketTime = (ticket, bookingTimeRange = "") => {
+const formatScheduledTicketTime = (ticket, bookingTimeRange = "", timezone) => {
   const slotStart = ticket?.slot?.fromTime;
   const slotEnd = ticket?.slot?.toTime;
   if (slotStart && slotEnd) {
@@ -152,12 +149,12 @@ const formatScheduledTicketTime = (ticket, bookingTimeRange = "") => {
     const start = new Date(ticket.validFrom);
     const end = new Date(ticket.validUntil);
     const durationHours = (end - start) / (1000 * 60 * 60);
-    const startsAtDayOpen = start.getHours() === 0 && start.getMinutes() === 0;
-    if (startsAtDayOpen && durationHours > 6) return `until ${formatClockLabel(ticket.validUntil)}`;
-    return `${formatClockLabel(ticket.validFrom)} - ${formatClockLabel(ticket.validUntil)}`;
+    const startsAtDayOpen = timezone && getParkClock(timezone, start).minuteOfDay === 0;
+    if (startsAtDayOpen && durationHours > 6) return `until ${formatClockLabel(ticket.validUntil, timezone)}`;
+    return `${formatClockLabel(ticket.validFrom, timezone)} - ${formatClockLabel(ticket.validUntil, timezone)}`;
   }
 
-  return ticket?.validFrom ? formatClockLabel(ticket.validFrom) : "";
+  return ticket?.validFrom ? formatClockLabel(ticket.validFrom, timezone) : "";
 };
 
 
@@ -165,6 +162,12 @@ const formatScheduledTicketTime = (ticket, bookingTimeRange = "") => {
 export function CheckIn() {
   const { searchTerm, inputValue, setDebouncedSearch } = useDebounceSearch(400);
   const settings = useEffectiveSettings();
+  const [clockTick, setClockTick] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockTick(Date.now()), 60000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const today = settings.timezone ? getParkClock(settings.timezone, new Date(clockTick)).date : "";
   const [selected, setSelected] = useState(null);
   const [selectedLookupLabel, setSelectedLookupLabel] = useState("");
   const [quickTipOpen, setQuickTipOpen] = useState(false);
@@ -177,15 +180,17 @@ export function CheckIn() {
   const [searchBookingSuggestions] = useLazySearchBookingSuggestionsQuery();
 
   const runBookingLookup = useCallback(
-    (query, { limit } = {}) =>
-      searchBookingSuggestions({
+    (query, { limit } = {}) => {
+      if (!today) throw new Error("Configure the park timezone in Control before searching today's bookings.");
+      return searchBookingSuggestions({
         query,
         limit: limit || 12,
         dateFrom: today,
         dateTo: today,
         status: ["confirmed", "pending"],
-      }).unwrap(),
-    [searchBookingSuggestions]
+      }).unwrap();
+    },
+    [searchBookingSuggestions, today]
   );
 
   const selectLookupBooking = useCallback(
@@ -295,7 +300,7 @@ export function CheckIn() {
     status: ["confirmed", "pending"],
     paymentStatus: [],
     activityId: [],
-  });
+  }, { skip: !today });
 
   const bookings = asArray(data?.data);
   const stats = data?.stats || {};
@@ -1137,10 +1142,10 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     const now = new Date();
     const map = new Map();
     tickets.forEach((ticket) => {
-      map.set(ticket.ticketCode, getTicketBlocker(ticket, { balanceDue, participantsById, now }));
+      map.set(ticket.ticketCode, getTicketBlocker(ticket, { balanceDue, participantsById, now, timezone: settings.timezone }));
     });
     return map;
-  }, [tickets, balanceDue, participantsById]);
+  }, [tickets, balanceDue, participantsById, settings.timezone]);
 
   // Late arrival: if a session ticket has expired, the cashier can move the
   // booking into an available slot today (capacity-correct re-slot) so the
@@ -1245,7 +1250,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     const ticket = tickets.find((t) => t.ticketCode === code);
     const blocker = ticket ? ticketBlockers.get(code) : null;
     if (blocker) {
-      toast.error(redeemReasonMessage(blocker, ticket));
+      toast.error(redeemReasonMessage(blocker, ticket, settings.timezone));
       return;
     }
     const terminal = getTerminal();
@@ -1259,7 +1264,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
     toast.promise(promise, {
       loading: "Redeeming…",
       success: () => { refresh(); return "Checked in"; },
-      error: (err) => err?.data?.error || redeemReasonMessage(err?.data?.reason, ticket) || "Redeem failed",
+      error: (err) => err?.data?.error || redeemReasonMessage(err?.data?.reason, ticket, settings.timezone) || "Redeem failed",
     });
   };
 
@@ -1344,7 +1349,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
       else if (failures.length > 0) toast.warning(message, { id: toastId });
       else toast.success(message, { id: toastId });
     } catch (err) {
-      toast.error(err?.data?.error || err?.data?.message || redeemReasonMessage(err?.data?.reason) || err?.message || "Redeem failed", { id: toastId });
+      toast.error(err?.data?.error || err?.data?.message || redeemReasonMessage(err?.data?.reason, null, settings.timezone) || err?.message || "Redeem failed", { id: toastId });
     }
   };
 
@@ -1751,6 +1756,7 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
           variationId={reslotActivity.variationId}
           activityName={reslotActivity.name}
           busy={reslotting}
+          timezone={settings.timezone}
           onPick={handleReslot}
           onClose={() => setReslotOpen(false)}
         />
@@ -1933,12 +1939,12 @@ function SelectedBookingDetail({ booking, onCheckedIn }) {
             const isRedeemed = isRedeemedTicket(t);
             const isSelected = selectedCodes.has(t.ticketCode);
             const blocker = ticketBlockers.get(t.ticketCode);
-            const blockerMessage = blocker ? redeemReasonMessage(blocker, t) : "";
+            const blockerMessage = blocker ? redeemReasonMessage(blocker, t, settings.timezone) : "";
             const isBlocked = Boolean(blocker);
             const productName = firstText(t.product?.name, t.activity?.name, activityNameFromBooking(booking), "Item");
             const variationName = displayText(t.variation?.name, "");
             const ticketCode = displayText(t.ticketCode, "");
-            const time = formatScheduledTicketTime(t, bookingTimeRange);
+            const time = formatScheduledTicketTime(t, bookingTimeRange, settings.timezone);
             return (
               <li
                 key={t.ticketId}
@@ -2712,7 +2718,7 @@ function CheckInSettlementPanel({
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, fontWeight: 700 }}>
-          <span>Tax</span>
+          <span>{taxLineLabel(booking)}</span>
           <span>{moneyFmt(tax)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 13, fontWeight: 700 }}>
@@ -2720,7 +2726,7 @@ function CheckInSettlementPanel({
           <span>{moneyFmt(amountPaid)}</span>
         </div>
         <div style={{ borderTop: "1px dashed var(--ink-200)", paddingTop: 8, display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
-          <span style={{ fontSize: 14, fontWeight: 800 }}>Balance due</span>
+          <span style={{ fontSize: 14, fontWeight: 800 }}>{totalWithTaxLabel("Balance due", tax)}</span>
           <span style={{ fontSize: 22, fontWeight: 950, fontFamily: "var(--font-display, inherit)" }}>
             {moneyFmt(balanceDue)}
           </span>
@@ -2949,8 +2955,9 @@ function OrderAddItemModal({ bookingId, onAdd, onClose }) {
 }
 
 // Picker of today's open sessions to move a late/expired booking into.
-function ReslotModal({ activityId, variationId, activityName, busy, onPick, onClose }) {
-  const today = localIsoDate();
+function ReslotModal({ activityId, variationId, activityName, busy, timezone, onPick, onClose }) {
+  const parkClock = getParkClock(timezone);
+  const today = parkClock.date;
   const { data, isFetching, error } = useGetAvailabilityQuery(
     { date: today, activityId },
     { skip: !activityId }
@@ -2958,8 +2965,7 @@ function ReslotModal({ activityId, variationId, activityName, busy, onPick, onCl
   const sessionsData = data?.data || data || {};
   const sessions = Array.isArray(sessionsData.sessions) ? sessionsData.sessions : [];
 
-  const now = new Date();
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const nowMinutes = parkClock.minuteOfDay;
   const toMin = (v) => {
     const [h, m] = String(v).split(":").map(Number);
     return Number.isFinite(h) ? h * 60 + (Number.isFinite(m) ? m : 0) : null;
@@ -3017,7 +3023,7 @@ function ReslotModal({ activityId, variationId, activityName, busy, onPick, onCl
                 >
                   <div style={{ fontWeight: 900, color: "var(--ink-900)" }}>{formatTimeRange(timeRangeFromSession(session))}</div>
                   <div style={{ fontSize: 12, color: "var(--ink-600)", fontWeight: 700 }}>
-                    {Number(session.capacityRemaining || 0)} {session.availabilityLabel || "spots left"}
+                    {Number(session.capacityRemaining || 0)} {session.availabilityLabel || "spots left"}{session.hasPaymentPending ? " · payment pending" : session.hasActiveHold ? " · temporarily held" : ""}
                   </div>
                 </button>
               ))}

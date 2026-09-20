@@ -31,6 +31,8 @@ import { formatDisplayDate } from "../../lib/date";
 import { printReceipt } from "../../lib/hardware";
 import { getTerminal } from "../../lib/terminal";
 import { useTipDefaults } from "../../features/tips/useTipDefaults";
+import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
+import { formatParkInstantTime } from "../../lib/parkClock";
 import AddTipModal from "../../features/tips/AddTipModal";
 
 // ── Status helpers ────────────────────────────────────────────────
@@ -39,9 +41,10 @@ const sinceLabel = (iso) => {
   const d = new Date(iso);
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", hour12: true });
 };
-const timeOnly = (iso) => {
+const timeOnly = (iso, timezone) => {
   if (!iso) return "";
-  return new Date(iso).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true });
+  if (!timezone) return "Park timezone not configured";
+  return formatParkInstantTime(iso, timezone);
 };
 
 // Visual chips for status counts
@@ -147,6 +150,7 @@ const VERB_BY_TYPE = {
 
 // ── A single grouped ticket card ──────────────────────────────────
 function TicketGroupCard({ group }) {
+  const settings = useEffectiveSettings();
   const verb = VERB_BY_TYPE[group.productType] || VERB_BY_TYPE.session_pass;
   const total = group.items.length;
   const done = group.items.filter((t) => t.status === "redeemed").length;
@@ -156,7 +160,7 @@ function TicketGroupCard({ group }) {
   const [showHolders, setShowHolders] = useState(false);
 
   const validWindow = (group.validFrom && group.validUntil)
-    ? `${timeOnly(group.validFrom)}–${timeOnly(group.validUntil)}`
+    ? `${timeOnly(group.validFrom, settings.timezone)}–${timeOnly(group.validUntil, settings.timezone)}`
     : null;
 
   return (

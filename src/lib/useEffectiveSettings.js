@@ -51,10 +51,11 @@ const FALLBACKS = {
   minRemainingMinutes: 0,
   // Sales tax — comes from the paired location's default TaxRate so the
   // cart matches the booking the backend creates. taxRate is a percent
-  // (e.g. 10 = 10%). null → CartPanel uses its own fallback. taxCalculation
-  // mirrors the location: "add_to_price" (tax on top) or "include_in_price".
+  // (e.g. 10 = 10%). null blocks checkout until the park is configured.
+  // taxCalculation mirrors the park's explicit inclusive/additive choice.
   taxRate: null,
-  taxCalculation: "add_to_price",
+  taxCalculation: null,
+  timezone: null,
 };
 
 export function useEffectiveSettings() {

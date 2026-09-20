@@ -9,6 +9,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Icon } from "./Icon";
+import { taxLineLabel, totalWithTaxLabel } from "../../lib/taxDisplay";
 import {
   useRecordPaymentMutation,
   useSendBookingConfirmationMutation,
@@ -787,14 +788,14 @@ export default function CashierPaymentDialog({
               <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 16px",
                 fontSize: 13, color: "var(--ink-700)" }}>
                 <span>Subtotal</span><span>{moneyFmt(subTotal)}</span>
-                <span>Tax</span><span>{moneyFmt(taxAmount)}</span>
+                <span>{taxLineLabel(booking)}</span><span>{moneyFmt(taxAmount)}</span>
                 {totalDiscountShown > 0 && (
                   <>
                     <span style={{ color: "#137A35" }}>Promo {discount?.label || booking.discount?.name ? `· ${discount?.label || booking.discount?.name}` : ""}</span>
                     <span style={{ color: "#137A35" }}>−{moneyFmt(totalDiscountShown)}</span>
                   </>
                 )}
-                <span style={{ fontWeight: 800, fontSize: 16, marginTop: 6, color: "var(--ink-900)" }}>Balance due</span>
+                <span style={{ fontWeight: 800, fontSize: 16, marginTop: 6, color: "var(--ink-900)" }}>{totalWithTaxLabel("Balance due", taxAmount)}</span>
                 <span style={{ fontWeight: 800, fontSize: 16, marginTop: 6, color: "var(--ink-900)" }}>{moneyFmt(payableBalance)}</span>
                 {giftApplied > 0 && (
                   <>

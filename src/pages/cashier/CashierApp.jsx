@@ -69,7 +69,7 @@ import {
   customerSuggestionItems,
   lookupItemKey,
 } from "../../components/cashierLookupRenderers";
-import { autoScheduleLine, formatDateValue, getCurrentSessionBlocker } from "./scheduleHelpers";
+import { autoScheduleLine, getCurrentSessionBlocker } from "./scheduleHelpers";
 import {
   setCartItems,
   setCartCustomer as setCartCustomerAction,
@@ -90,6 +90,7 @@ import {
   onWristbandBridgeStatus,
 } from "../../lib/wristbandBridge";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
+import { getParkClock } from "../../lib/parkClock";
 
 // ── Map preset { sections: [{ products: [...] }] } → CatalogGrid sections
 const SECTION_TONES = ["orange", "yellow", "neutral", "orange", "yellow"];
@@ -171,6 +172,8 @@ function normalizePresetSections(preset) {
           maxGuests: v.maxGuests ?? v.maximumGuests ?? p.maxGuests ?? p.maximumGuests ?? null,
           sku: v.sku || v.SKU || null,
           taxOverride: v.taxOverride || null,
+          taxOverrideEnabled: v.taxOverrideEnabled,
+          taxOverridePercent: v.taxOverridePercent ?? null,
           taxInclusive: v.taxInclusive === true,
           taxAtSale: v.taxAtSale === true,
           activityTaxOverride: v.activityTaxOverride || p.activityTaxOverride || null,
@@ -200,6 +203,8 @@ function normalizePresetSections(preset) {
         isVoucherPack,
         voucherMeta,
         taxOverride: p.taxOverride || null,
+        taxOverrideEnabled: p.taxOverrideEnabled,
+        taxOverridePercent: p.taxOverridePercent ?? null,
         taxInclusive: p.taxInclusive === true,
         activityTaxOverride: p.activityTaxOverride || null,
         activityTaxOverrideEnabled: p.activityTaxOverrideEnabled === true,
@@ -1059,7 +1064,13 @@ export function CashierApp() {
       try {
         const res = await heartbeat({ deviceId: terminalDeviceId, appVersion: "0.1.0" }).unwrap();
         if (res?.settings) updateTerminalSettings(res.settings);
-      } catch { /* offline / transient — keep last good settings */ }
+      } catch (error) {
+        // A configuration error is authoritative: never continue quoting with
+        // the last cached tax/timezone. Network outages keep the prior snapshot.
+        if (error?.status === 409 && ["PARK_TAX_NOT_CONFIGURED", "PARK_TAX_INVALID", "PARK_TIMEZONE_NOT_CONFIGURED"].includes(error?.data?.code)) {
+          updateTerminalSettings({ ...(getTerminal()?.settings || {}), taxRate: null, taxCalculation: null, timezone: null });
+        }
+      }
     };
     tick();
     const id = setInterval(tick, 60_000);
@@ -1197,6 +1208,8 @@ export function CashierApp() {
         productItem.taxOverride ||
         productItem.raw?.taxOverride ||
         null,
+      taxOverrideEnabled: productItem.taxOverrideEnabled ?? productItem.raw?.taxOverrideEnabled,
+      taxOverridePercent: productItem.taxOverridePercent ?? productItem.raw?.taxOverridePercent ?? null,
       taxInclusive:
         productItem.taxInclusive === true ||
         productItem.raw?.taxInclusive === true,
@@ -1245,14 +1258,16 @@ export function CashierApp() {
       setScheduleRequiredItem({ item: productItem, section });
       return;
     }
-    const today = formatDateValue(new Date());
+    let parkClock;
+    try { parkClock = getParkClock(posSettings.timezone); }
+    catch (error) { toast.error(error.message); return; }
+    const today = parkClock.date;
     setAutoSchedulingId(productItem.id);
     try {
       const res = await fetchAvailability({ date: today, activityId }, true).unwrap();
       const data = res?.data || res || {};
       const sessions = Array.isArray(data.sessions) ? data.sessions : [];
-      const now = new Date();
-      const nowMinutes = now.getHours() * 60 + now.getMinutes();
+      const nowMinutes = parkClock.minuteOfDay;
       const graceMinutes = Number.isFinite(Number(posSettings.joinGraceMinutes))
         ? Number(posSettings.joinGraceMinutes)
         : 15;
@@ -1572,7 +1587,10 @@ export function CashierApp() {
       blockCheckout("schedule", "Please check out one booking date at a time.");
       return;
     }
-    const bookingDate = scheduledDates[0] || formatDateValue(new Date());
+    let parkClock;
+    try { parkClock = getParkClock(posSettings.timezone); }
+    catch (error) { blockCheckout("schedule", error.message); return; }
+    const bookingDate = scheduledDates[0] || parkClock.date;
 
     const sessions = regularItems
       .filter((it) => it.activityId)

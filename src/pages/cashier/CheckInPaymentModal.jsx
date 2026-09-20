@@ -12,6 +12,7 @@
 //     share the "complete" state.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { taxLineLabel, totalWithTaxLabel } from "../../lib/taxDisplay";
 import { toast } from "sonner";
 import { appConfirm } from "../../services/appDialog";
 import { Icon } from "./Icon";
@@ -470,9 +471,9 @@ function CheckInPaymentModal({
                 <TotalLine label="POS Discount" value={moneyFmt(discountAmount)} tone={discountAmount > 0 ? "#F45B0A" : undefined} />
                 <div style={{ borderTop: "3px solid var(--ink-900)", margin: "8px 0" }} />
                 <TotalLine label="Sub Total" value={moneyFmt(Math.max(0, subTotal - existingDiscount - discountAmount))} />
-                <TotalLine label="Plus Tax" value={moneyFmt(taxAmount)} />
+                <TotalLine label={taxLineLabel(booking)} value={moneyFmt(taxAmount)} />
                 <div style={{ borderTop: "3px solid var(--ink-900)", margin: "8px 0" }} />
-                <TotalLine label="Grand Total" value={moneyFmt(balanceDue)} tone="#08A5E8" />
+                <TotalLine label={totalWithTaxLabel("Balance due", taxAmount)} value={moneyFmt(balanceDue)} tone="#08A5E8" />
                 <TotalLine label="Tender Due" value={moneyFmt(payableBalance)} tone="#F45B0A" />
                 <TotalLine label="Tendered" value={moneyFmt(tendered)} />
                 <TotalLine

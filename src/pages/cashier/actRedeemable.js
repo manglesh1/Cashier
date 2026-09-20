@@ -3,7 +3,8 @@
 // backend call. Same logic works on every screen (gate, counter, check-in) —
 // the backend declares the action, the frontend just dispatches it.
 
-import { pickNearestSession, getVariationSlotIds, normalizeVariationId, formatDateValue } from "./scheduleHelpers";
+import { pickNearestSession, getVariationSlotIds, normalizeVariationId } from "./scheduleHelpers";
+import { getParkClock } from "../../lib/parkClock";
 
 export async function actRedeemable(redeemable, { context, deps }) {
   const action = redeemable?.action || {};
@@ -35,13 +36,11 @@ export async function actRedeemable(redeemable, { context, deps }) {
 
     case "schedule_nearest": {
       if (!action.activityId) return { ok: false, message: "This pass has no activity to schedule." };
-      // LOCAL date — NOT toISOString (UTC). In IST early-morning, UTC is still
-      // the previous day, which would schedule into yesterday's slots.
-      const today = formatDateValue(new Date());
+      const parkClock = getParkClock(posSettings?.timezone);
+      const today = parkClock.date;
       const res = await fetchAvailability({ date: today, activityId: action.activityId }, true).unwrap();
       const sessions = Array.isArray(res?.data?.sessions) ? res.data.sessions : (res?.sessions || []);
-      const now = new Date();
-      const nowMinutes = now.getHours() * 60 + now.getMinutes();
+      const nowMinutes = parkClock.minuteOfDay;
       const graceMinutes = Number.isFinite(Number(posSettings?.joinGraceMinutes)) ? Number(posSettings.joinGraceMinutes) : 15;
       const minRemainingMinutes = Number.isFinite(Number(posSettings?.minRemainingMinutes)) ? Number(posSettings.minRemainingMinutes) : 0;
       const session = pickNearestSession(sessions, nowMinutes, { graceMinutes, minRemainingMinutes });

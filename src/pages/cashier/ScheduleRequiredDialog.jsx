@@ -35,9 +35,16 @@ import {
   timeRangeFromSession,
 } from "./scheduleHelpers";
 import { formatTime12Hour, formatTimeText12Hour } from "../../lib/time";
+import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
+import { getParkClock } from "../../lib/parkClock";
 
 export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
-  const initialDate = item?.selectedDate || item?.date || formatDateValue(new Date());
+  const settings = useEffectiveSettings();
+  let parkClock = null;
+  let timezoneError = null;
+  try { parkClock = getParkClock(settings.timezone); }
+  catch (error) { timezoneError = error.message; }
+  const initialDate = item?.selectedDate || item?.date || parkClock?.date || "";
   const [selectedDate, setSelectedDate] = useState(initialDate);
   const [selectedSession, setSelectedSession] = useState(null);
   const [selectedVariationId, setSelectedVariationId] = useState(normalizeVariationId(item?.variationId));
@@ -50,7 +57,7 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
   const activityId = item?.activityId;
   const { data, isFetching, error } = useGetAvailabilityQuery(
     { date: selectedDate, activityId },
-    { skip: !activityId }
+    { skip: !activityId || !parkClock || !selectedDate }
   );
 
   const sessionsData = data?.data || data || {};
@@ -62,8 +69,8 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
   // intentionally do NOT apply here; they gate only the auto-assign flow
   // (CashierApp.autoAssignAndAdd). Other dates show every slot. Grid uses
   // `visibleSessions`; matching/hydration keeps the full `sessions` list.
-  const isToday = selectedDate === formatDateValue(new Date());
-  const nowMinutes = (() => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); })();
+  const isToday = selectedDate === parkClock?.date;
+  const nowMinutes = parkClock?.minuteOfDay ?? -1;
   const visibleSessions = isToday
     ? sessions.filter((s) => isSessionNotEnded(s, nowMinutes))
     : sessions;
@@ -165,14 +172,14 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
       }
     : null;
 
-  const dateOptions = Array.from({ length: 14 }, (_, index) => {
-    const date = addDays(new Date(), index);
+  const dateOptions = parkClock ? Array.from({ length: 14 }, (_, index) => {
+    const date = addDays(new Date(`${parkClock.date}T12:00:00`), index);
     return {
       value: formatDateValue(date),
       label: index === 0 ? "Today" : date.toLocaleDateString("en-US", { weekday: "short" }),
       sub: date.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
     };
-  });
+  }) : [];
 
   const handleSessionPick = (session) => {
     const variations = session?.variations || [];
@@ -264,6 +271,10 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
       return { ...prev, [key]: next };
     });
   };
+
+  if (timezoneError) {
+    return <div role="alert" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900"><p>{timezoneError}</p><button type="button" onClick={onClose}>Close</button></div>;
+  }
 
   return (
     <div
@@ -403,7 +414,9 @@ export function ScheduleRequiredDialog({ item, section, onClose, onAdd }) {
                     >
                       <div style={{ fontWeight: 900, color: "var(--ink-900)" }}>{formatTime12Hour(getStartTime(session))}</div>
                       <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 3 }}>
-                        {Number(session.capacityRemaining || 0)} {session.availabilityLabel || "spots left"}
+                        {!available
+                          ? session.hasPaymentPending ? "Payment pending" : session.hasActiveHold ? "Temporarily held" : session.hasConfirmedBooking ? "Booked" : session.unavailableReason || "Unavailable"
+                          : `${Number(session.capacityRemaining || 0)} ${session.availabilityLabel || "spots left"}${session.hasPaymentPending ? " · payment pending" : session.hasActiveHold ? " · temporarily held" : ""}`}
                       </div>
                     </button>
                   );

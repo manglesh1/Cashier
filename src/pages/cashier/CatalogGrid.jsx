@@ -370,6 +370,8 @@ export function buildChosenWithVariant(item, option) {
     maxGuests: option.maxGuests ?? option.maximumGuests ?? item.maxGuests ?? item.maximumGuests ?? null,
     sku: option.sku || option.SKU || item.sku || item.SKU || null,
     taxOverride: option.taxOverride || item.taxOverride || null,
+    taxOverrideEnabled: option.taxOverrideEnabled ?? item.taxOverrideEnabled,
+    taxOverridePercent: option.taxOverridePercent ?? item.taxOverridePercent ?? null,
     taxInclusive: option.taxInclusive === true || item.taxInclusive === true,
     taxAtSale: option.taxAtSale === true || item.taxAtSale === true,
     activityTaxOverride: option.activityTaxOverride || item.activityTaxOverride || null,

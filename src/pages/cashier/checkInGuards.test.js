@@ -17,6 +17,7 @@ import {
 } from "./checkInGuards.js";
 
 const now = new Date("2026-05-18T10:00:00Z");
+const check = (row, options) => getTicketBlocker(row, { timezone: "UTC", ...options });
 
 function ticket(overrides = {}) {
   return {
@@ -31,7 +32,7 @@ function ticket(overrides = {}) {
 }
 
 test("unpaid booking blocks ticket check-in in the POS guard", () => {
-  assert.equal(getTicketBlocker(ticket(), { balanceDue: 12.5, now }), "payment_required");
+  assert.equal(check(ticket(), { balanceDue: 12.5, now }), "payment_required");
 });
 
 test("paid booking status wins over stale balance fields", () => {
@@ -49,19 +50,34 @@ test("unpaid booking keeps explicit balance due", () => {
 });
 
 test("same-day early arrival is allowed to check in (good will)", () => {
-  const laterToday = (() => { const d = new Date(now); d.setHours(23, 0, 0, 0); return d.toISOString(); })();
+  const laterToday = "2026-05-18T23:00:00Z";
   assert.equal(
-    getTicketBlocker(ticket({ validFrom: laterToday }), { balanceDue: 0, now }),
+    check(ticket({ validFrom: laterToday }), { balanceDue: 0, now }),
     null
   );
 });
 
 test("future-day booking is still too early to check in", () => {
-  const tomorrow = (() => { const d = new Date(now); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); return d.toISOString(); })();
+  const tomorrow = "2026-05-19T09:00:00Z";
   assert.equal(
-    getTicketBlocker(ticket({ validFrom: tomorrow }), { balanceDue: 0, now }),
+    check(ticket({ validFrom: tomorrow }), { balanceDue: 0, now }),
     "not_yet_valid"
   );
+});
+
+test("ticket same-day policy uses the park date across a UTC midnight", () => {
+  const nearMidnight = new Date("2026-05-19T02:00:00Z");
+  const laterParkDay = "2026-05-19T15:00:00Z";
+  assert.equal(getTicketBlocker(ticket({ validFrom: laterParkDay }), {
+    now: nearMidnight, timezone: "America/Toronto",
+  }), "not_yet_valid");
+  assert.equal(getTicketBlocker(ticket({ validFrom: laterParkDay }), {
+    now: nearMidnight, timezone: "Asia/Kolkata",
+  }), null);
+});
+
+test("slot check-in blocks when the park timezone is not configured", () => {
+  assert.equal(getTicketBlocker(ticket({ validFrom: "2026-05-18T09:00:00Z" }), { now }), "timezone_required");
 });
 
 test("same-day past slot allows late check-in (no longer blocked)", () => {
@@ -70,7 +86,7 @@ test("same-day past slot allows late check-in (no longer blocked)", () => {
   // guest. Mirrors the early-arrival policy on the validFrom side.
   const oneHourAgo = new Date(now.getTime() - 3600 * 1000).toISOString();
   assert.equal(
-    getTicketBlocker(ticket({ validUntil: oneHourAgo }), { balanceDue: 0, now }),
+    check(ticket({ validUntil: oneHourAgo }), { balanceDue: 0, now }),
     null
   );
 });
@@ -80,21 +96,16 @@ test("previous-day expired slot still blocks check-in", () => {
   // not be able to admit on this. Only the validity window protects
   // against this; status-based expiry (cron sweep / void) is covered
   // by the status check above.
-  const yesterday = (() => {
-    const d = new Date(now);
-    d.setDate(d.getDate() - 1);
-    d.setHours(17, 0, 0, 0);
-    return d.toISOString();
-  })();
+  const yesterday = "2026-05-17T17:00:00Z";
   assert.equal(
-    getTicketBlocker(ticket({ validUntil: yesterday }), { balanceDue: 0, now }),
+    check(ticket({ validUntil: yesterday }), { balanceDue: 0, now }),
     "expired"
   );
 });
 
 test("waiver-required ticket without participant cannot check in", () => {
   assert.equal(
-    getTicketBlocker(ticket({ requiresWaiver: true }), { balanceDue: 0, now }),
+    check(ticket({ requiresWaiver: true }), { balanceDue: 0, now }),
     "requires_waiver_no_holder"
   );
 });
@@ -102,7 +113,7 @@ test("waiver-required ticket without participant cannot check in", () => {
 test("waiver-required ticket with participant but no valid waiver cannot check in", () => {
   const participantsById = new Map([[7, { bookingParticipantId: 7, hasValidWaiver: false }]]);
   assert.equal(
-    getTicketBlocker(ticket({ requiresWaiver: true, participantId: 7 }), {
+    check(ticket({ requiresWaiver: true, participantId: 7 }), {
       balanceDue: 0,
       participantsById,
       now,
@@ -113,7 +124,7 @@ test("waiver-required ticket with participant but no valid waiver cannot check i
 
 test("waiver-required ticket with missing participant status is blocked conservatively", () => {
   assert.equal(
-    getTicketBlocker(ticket({ requiresWaiver: true, participantId: 7 }), {
+    check(ticket({ requiresWaiver: true, participantId: 7 }), {
       balanceDue: 0,
       participantsById: new Map(),
       now,
@@ -125,7 +136,7 @@ test("waiver-required ticket with missing participant status is blocked conserva
 test("valid waiver ticket is ready for check-in", () => {
   const participantsById = new Map([[7, { bookingParticipantId: 7, hasValidWaiver: true }]]);
   const row = ticket({ requiresWaiver: true, participantId: 7 });
-  const blockers = new Map([[row.ticketCode, getTicketBlocker(row, { participantsById, now })]]);
+  const blockers = new Map([[row.ticketCode, check(row, { participantsById, now })]]);
 
   assert.equal(blockers.get(row.ticketCode), null);
   assert.equal(isTicketReadyForCheckIn(row, blockers), true);
@@ -143,7 +154,7 @@ test("select-all/check-in-all guard exposes only actionable issued tickets", () 
     [2, { bookingParticipantId: 2, hasValidWaiver: false }],
   ]);
   const blockers = new Map(
-    rows.map((row) => [row.ticketCode, getTicketBlocker(row, { participantsById, now })])
+    rows.map((row) => [row.ticketCode, check(row, { participantsById, now })])
   );
 
   assert.deepEqual(rows.filter((row) => isTicketReadyForCheckIn(row, blockers)).map((row) => row.ticketCode), [
@@ -170,7 +181,7 @@ test("check-in all plan skips transferables, blocks missing waivers, and keeps v
     [3, { bookingParticipantId: 3, hasValidWaiver: true }],
   ]);
   const blockers = new Map(
-    rows.map((row) => [row.ticketCode, getTicketBlocker(row, { participantsById, now })])
+    rows.map((row) => [row.ticketCode, check(row, { participantsById, now })])
   );
 
   assert.deepEqual(buildCheckInAllPlan({ tickets: rows, ticketBlockers: blockers }), {
@@ -195,7 +206,7 @@ test("Select all includes transferable tickets (no participant, no waiver) that 
     ticket({ ticketCode: "DONE", status: "redeemed" }),
   ];
   const blockers = new Map(
-    rows.map((row) => [row.ticketCode, getTicketBlocker(row, { balanceDue: 0, now })])
+    rows.map((row) => [row.ticketCode, check(row, { balanceDue: 0, now })])
   );
 
   // Select-all gate: both issued party tickets are selectable; redeemed isn't.
@@ -213,7 +224,7 @@ test("selected booking progress separates ready, blocked, pending, and complete 
     ticket({ ticketCode: "BLOCKED", requiresWaiver: true, participantId: null }),
     ticket({ ticketCode: "DONE", status: "redeemed" }),
   ];
-  const blockers = new Map(rows.map((row) => [row.ticketCode, getTicketBlocker(row, { now })]));
+  const blockers = new Map(rows.map((row) => [row.ticketCode, check(row, { now })]));
 
   assert.deepEqual(
     buildSelectedProgress({ tickets: rows, ticketBlockers: blockers, redeemedCount: 1, totalCount: 3 }),
@@ -248,7 +259,7 @@ test("selected progress falls back to redeemed ticket rows when summary is missi
     ticket({ ticketCode: "DONE", status: "redeemed" }),
     ticket({ ticketCode: "READY" }),
   ];
-  const blockers = new Map(rows.map((row) => [row.ticketCode, getTicketBlocker(row, { now })]));
+  const blockers = new Map(rows.map((row) => [row.ticketCode, check(row, { now })]));
 
   assert.deepEqual(
     buildSelectedProgress({ tickets: rows, ticketBlockers: blockers, redeemedCount: undefined, totalCount: undefined }),

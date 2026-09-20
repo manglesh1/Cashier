@@ -1,3 +1,5 @@
+import { formatParkInstantTime, getParkClock } from "../../lib/parkClock.js";
+
 export const redeemReasonLabel = (reason) => {
   const labels = {
     payment_required: "payment required",
@@ -9,6 +11,7 @@ export const redeemReasonLabel = (reason) => {
     refunded: "refunded",
     already_redeemed: "already redeemed",
     requires_manager_override: "manager override required",
+    timezone_required: "park timezone required",
   };
   return labels[reason] || reason || "failed";
 };
@@ -100,9 +103,9 @@ export const normalizeTicketSummaryPayload = (payload = {}, tickets = []) => {
   };
 };
 
-export const redeemReasonMessage = (reason, ticket) => {
+export const redeemReasonMessage = (reason, ticket, timezone) => {
   const start = ticket?.validFrom
-    ? new Date(ticket.validFrom).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
+    ? (timezone ? formatParkInstantTime(ticket.validFrom, timezone) : null)
     : null;
   const messages = {
     payment_required: "Collect payment before check-in",
@@ -114,6 +117,7 @@ export const redeemReasonMessage = (reason, ticket) => {
     refunded: "Ticket refunded",
     already_redeemed: "Already checked in",
     requires_manager_override: "Manager override required",
+    timezone_required: "Configure the park timezone in Control before check-in",
   };
   return messages[reason] || redeemReasonLabel(reason);
 };
@@ -123,12 +127,13 @@ export const isRedeemedTicket = (ticket) =>
 
 export const getTicketBlocker = (
   ticket,
-  { balanceDue = 0, participantsById = new Map(), now = new Date() } = {}
+  { balanceDue = 0, participantsById = new Map(), now = new Date(), timezone } = {}
 ) => {
   if (!ticket) return "not_found";
   if (isRedeemedTicket(ticket)) return "already_redeemed";
   if (["voided", "refunded", "expired"].includes(ticket.status)) return ticket.status;
   if (balanceDue > 0) return "payment_required";
+  if ((ticket.validFrom || ticket.validUntil) && !timezone) return "timezone_required";
 
   // Late arrival: a slot that ENDED earlier today can still be checked in
   // by the cashier (good will — capacity hold has released back into the
@@ -138,7 +143,7 @@ export const getTicketBlocker = (
   // handled by the earlier status check above.
   if (ticket.validUntil) {
     const validUntil = new Date(ticket.validUntil);
-    if (validUntil < now && validUntil.toDateString() !== now.toDateString()) {
+    if (validUntil < now && getParkClock(timezone, validUntil).date !== getParkClock(timezone, now).date) {
       return "expired";
     }
   }
@@ -147,7 +152,7 @@ export const getTicketBlocker = (
   // a FUTURE-DAY slot is still "too early".
   if (ticket.validFrom) {
     const validFrom = new Date(ticket.validFrom);
-    if (validFrom > now && validFrom.toDateString() !== now.toDateString()) {
+    if (validFrom > now && getParkClock(timezone, validFrom).date !== getParkClock(timezone, now).date) {
       return "not_yet_valid";
     }
   }

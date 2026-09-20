@@ -5,6 +5,7 @@ import { useLazyValidateDiscountCodeQuery } from "../../features/discount/discou
 import { usePreviewVoucherCoverageMutation } from "../../features/benefits/benefitsApi";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
 import { useEffectiveSettings } from "../../lib/useEffectiveSettings";
+import { taxLineLabel, totalWithTaxLabel } from "../../lib/taxDisplay";
 import ApplyBenefitFlyout from "./ApplyBenefitFlyout";
 
 // Compute a member benefit discount amount from applied member benefits.
@@ -112,23 +113,10 @@ function isGiftCardSaleLine(item) {
   return String(item?.productType || item?.activityTypeKey || "").toLowerCase() === "gift_card";
 }
 
-// Fallback only — paired terminal/location settings should provide the
-// real tax rate. St. Catharines uses Ontario HST, so falling back to 13%
-// is safer than undercharging at the old 5% placeholder.
 function resolveTaxRate(settings) {
-  const candidates = [
-    settings?.salesTaxRate,
-    settings?.taxRate,
-    settings?.locationTaxRate,
-    settings?.tax?.rate,
-  ];
-  for (const value of candidates) {
-    const numeric = Number(value);
-    if (Number.isFinite(numeric) && numeric >= 0) {
-      return numeric > 1 ? numeric / 100 : numeric;
-    }
-  }
-  return null;
+  if (settings?.taxRate === null || settings?.taxRate === undefined || settings?.taxRate === "") return null;
+  const percent = Number(settings.taxRate);
+  return Number.isFinite(percent) && percent >= 0 && percent <= 100 ? percent / 100 : null;
 }
 
 function getNumberOrNull(value) {
@@ -166,11 +154,16 @@ function getActivityTaxPercent(item, fallbackPercent = 0) {
 function getLineTaxPercent(item, fallbackPercent = 0) {
   if (isGiftCardSaleLine(item) && item.taxAtSale !== true) return 0;
 
-  const activityOverride = getActivityTaxPercent(item, fallbackPercent);
-  if (activityOverride !== null) return activityOverride;
-
   const variationOverride = getTaxOverridePercent(item?.taxOverride, fallbackPercent);
   if (variationOverride !== null) return variationOverride;
+
+  if (item?.taxOverrideEnabled !== false) {
+    const directVariationRate = getNumberOrNull(item?.taxOverridePercent);
+    if (directVariationRate !== null) return directVariationRate;
+  }
+
+  const activityOverride = getActivityTaxPercent(item, fallbackPercent);
+  if (activityOverride !== null) return activityOverride;
 
   return Number(fallbackPercent) || 0;
 }
@@ -365,8 +358,8 @@ export function CartPanel({
       : 0;
   const afterDiscount = Math.max(0, subtotal - discountAmount - memberDiscount);
   const taxRate = resolveTaxRate(settings);
-  const taxConfigMissing = taxRate === null;
-  const taxInclusive = String(settings?.taxCalculation || "add_to_price") === "include_in_price";
+  const taxConfigMissing = taxRate === null || !["add_to_price", "include_in_price"].includes(settings?.taxCalculation);
+  const taxInclusive = settings?.taxCalculation === "include_in_price";
   const fallbackTaxPercent = taxConfigMissing ? 0 : taxRate * 100;
   const tax = taxConfigMissing
     ? 0
@@ -416,6 +409,8 @@ export function CartPanel({
         isGiftCardSaleLine(it) && it.taxAtSale !== true
           ? { enabled: true, amount: 0, name: "No tax" }
           : it.taxOverride || null,
+      taxOverrideEnabled: it.taxOverrideEnabled,
+      taxOverridePercent: it.taxOverridePercent ?? null,
       taxInclusive: it.taxInclusive === true,
       activityTaxOverride: it.activityTaxOverride || null,
       activityTaxOverrideEnabled: it.activityTaxOverrideEnabled === true,
@@ -1225,6 +1220,7 @@ export function CartPanel({
               : "Member 10%"
           }
           tax={tax}
+          taxName={taxLineLabel({ taxName: settings?.taxName, taxCalculation: settings?.taxCalculation })}
           total={total}
           giftCardPaid={appliedBenefits.payments
             .filter((p) => p.method === "gift_card")
@@ -1544,6 +1540,7 @@ function Totals({
   memberDiscount,
   memberLabel = "Member benefit",
   tax,
+  taxName,
   total,
   giftCardPaid = 0,
   voucherReservedCount = 0,
@@ -1577,8 +1574,8 @@ function Totals({
           accent="var(--aero-electric-500)"
         />
       )}
-      <Row label="Tax" value={taxConfigMissing ? "Not configured" : `$${tax.toFixed(2)}`} accent={taxConfigMissing ? "#B83210" : undefined} />
-      <Row label="Total" value={`$${total.toFixed(2)}`} big />
+      <Row label={taxName} value={taxConfigMissing ? "Not configured" : `$${tax.toFixed(2)}`} accent={taxConfigMissing ? "#B83210" : undefined} />
+      <Row label={totalWithTaxLabel("Total", tax)} value={`$${total.toFixed(2)}`} big />
       {giftCardPaid > 0 && (
         <Row
           label="Gift card paid"
