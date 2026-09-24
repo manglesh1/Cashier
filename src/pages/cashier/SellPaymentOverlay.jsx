@@ -42,6 +42,7 @@ export default function SellPaymentOverlay({
   onComplete,        // (paymentComplete) => void — payment recorded; cart can be cleared
   onVoid,            // () => void — cashier voided the pre-payment transaction
   onSeparateSale,
+  onSlotExpired,
 }) {
   // ── Payment-form state (mirrors CheckIn.jsx's parent-owned state) ─
   const [paymentMethod, setPaymentMethod] = useState("card");
@@ -628,6 +629,9 @@ export default function SellPaymentOverlay({
       });
       toast.success(`Order ${primary?.bookingNumber || ""} completed`);
     } catch (err) {
+      if (err?.data?.code === "BOOKING_SLOT_STARTED") {
+        onSlotExpired?.(err.data.expiredSlotIds || err.data.details?.expiredSlotIds || []);
+      }
       const msg = err?.data?.message || err?.data?.error || err?.message || "Could not record payment";
       toast.error(msg);
     } finally {
@@ -734,6 +738,9 @@ export default function SellPaymentOverlay({
           : `${moneyFmt(apply)} paid by gift card`
       );
     } catch (err) {
+      if (err?.data?.code === "BOOKING_SLOT_STARTED") {
+        onSlotExpired?.(err.data.expiredSlotIds || err.data.details?.expiredSlotIds || []);
+      }
       toast.error(err?.data?.error || err?.data?.message || err?.message || "Gift card payment failed.");
     } finally {
       paymentLockRef.current = false;

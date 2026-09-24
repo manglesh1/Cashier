@@ -171,6 +171,7 @@ function normalizePresetSections(preset) {
           minGuests: v.minGuests ?? v.minimumGuests ?? p.minGuests ?? p.minimumGuests ?? null,
           maxGuests: v.maxGuests ?? v.maximumGuests ?? p.maxGuests ?? p.maximumGuests ?? null,
           sku: v.sku || v.SKU || null,
+          imageUrl: v.imageUrl || v.overrideImageUrl || null,
           taxOverride: v.taxOverride || null,
           taxOverrideEnabled: v.taxOverrideEnabled,
           taxOverridePercent: v.taxOverridePercent ?? null,
@@ -195,6 +196,10 @@ function normalizePresetSections(preset) {
         minGuests: p.minGuests ?? p.minimumGuests ?? null,
         maxGuests: p.maxGuests ?? p.maximumGuests ?? null,
         icon: pickItemIcon(productType),
+        imageUrl:
+          (p.variationOptions || []).length === 1
+            ? (p.variationOptions[0]?.imageUrl || p.variationOptions[0]?.overrideImageUrl || p.activityImage || p.imageUrl || null)
+            : (p.activityImage || p.imageUrl || null),
         badge,
         featured: p.featured,
         // Activity-level waiver requirement. Drives cart waiver gating.
@@ -1200,6 +1205,7 @@ export function CashierApp() {
       resourceSelections: productItem.resourceSelections || {},
       qty: initialQty,
       icon: productItem.icon,
+      imageUrl: productItem.imageUrl || null,
       featured: productItem.featured,
       requiresWaiver: !!productItem.requiresWaiver,
       isVoucherPack: isVoucherPackItem(productItem),
@@ -1757,6 +1763,17 @@ export function CashierApp() {
       }).unwrap();
       validatedPricing = validateRes?.pricing || null;
     } catch (err) {
+      if (err?.data?.code === "BOOKING_SLOT_STARTED") {
+        const expiredSlotIds = new Set((err.data.expiredSlotIds || []).map(Number));
+        if (expiredSlotIds.size) {
+          setItems((current) => current.filter((item) => {
+            const itemSlotIds = (Array.isArray(item?.slotId) ? item.slotId : [item?.slotId])
+              .map(Number)
+              .filter(Boolean);
+            return !itemSlotIds.some((slotId) => expiredSlotIds.has(slotId));
+          }));
+        }
+      }
       const msg = getApiErrorMessage(err, "Cart failed validation.");
       blockCheckout("backend_validation", msg);
       return;
@@ -2527,6 +2544,18 @@ export function CashierApp() {
             dispatch(rotateCheckoutKey());
             setPaymentBooking(null);
             toast.info("Previous order preserved. Review the current cart, then take payment for this separate sale.");
+          }}
+          onSlotExpired={(expiredIds) => {
+            const expiredSlotIds = new Set((expiredIds || []).map(Number));
+            setItems((current) => current.filter((item) => {
+              const itemSlotIds = (Array.isArray(item?.slotId) ? item.slotId : [item?.slotId])
+                .map(Number)
+                .filter(Boolean);
+              return expiredSlotIds.size > 0
+                ? !itemSlotIds.some((slotId) => expiredSlotIds.has(slotId))
+                : false;
+            }));
+            setPaymentBooking(null);
           }}
           onVoid={() => {
             dispatch(clearCart());

@@ -318,13 +318,29 @@ function ProductCard({ item, tone = "orange", onClick, busy = false }) {
           padding: "4px 8px", borderRadius: 999, border: "2px solid var(--ink-800)",
         }}>{item.badge}</span>
       )}
-      <div style={{
-        width: 44, height: 44, borderRadius: 12,
-        background: accent.bg, color: accent.fg,
-        display: "inline-flex", alignItems: "center", justifyContent: "center",
-      }}>
-        <Icon name={item.icon} size={24} />
-      </div>
+      {item.imageUrl ? (
+        <img
+          src={item.imageUrl}
+          alt=""
+          loading="lazy"
+          style={{
+            width: 72,
+            height: 56,
+            borderRadius: 12,
+            objectFit: "cover",
+            border: "1.5px solid var(--ink-200)",
+            background: "var(--ink-50)",
+          }}
+        />
+      ) : (
+        <div style={{
+          width: 44, height: 44, borderRadius: 12,
+          background: accent.bg, color: accent.fg,
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+        }}>
+          <Icon name={item.icon} size={24} />
+        </div>
+      )}
       <div style={{ minHeight: 44 }}>
         <div style={{ fontWeight: 700, fontSize: 16, lineHeight: 1.2 }}>{item.name}</div>
         {item.sub && <div style={{ fontSize: 12, color: "var(--ink-500)", marginTop: 2 }}>{item.sub}</div>}
@@ -369,6 +385,7 @@ export function buildChosenWithVariant(item, option) {
     minGuests: option.minGuests ?? option.minimumGuests ?? item.minGuests ?? item.minimumGuests ?? null,
     maxGuests: option.maxGuests ?? option.maximumGuests ?? item.maxGuests ?? item.maximumGuests ?? null,
     sku: option.sku || option.SKU || item.sku || item.SKU || null,
+    imageUrl: option.imageUrl || item.imageUrl || null,
     taxOverride: option.taxOverride || item.taxOverride || null,
     taxOverrideEnabled: option.taxOverrideEnabled ?? item.taxOverrideEnabled,
     taxOverridePercent: option.taxOverridePercent ?? item.taxOverridePercent ?? null,
@@ -439,7 +456,17 @@ export function VariantPickerDialog({ item, section, onClose, onPick }) {
                 background: "var(--ink-0)",
               }}
             >
-              <span style={{ fontWeight: 800, color: "var(--ink-800)" }}>{option.name}</span>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                {option.imageUrl ? (
+                  <img
+                    src={option.imageUrl}
+                    alt=""
+                    loading="lazy"
+                    style={{ width: 44, height: 36, borderRadius: 8, objectFit: "cover", border: "1px solid var(--ink-200)" }}
+                  />
+                ) : null}
+                <span style={{ fontWeight: 800, color: "var(--ink-800)" }}>{option.name}</span>
+              </span>
               <span className="display-num" style={{ fontSize: 20 }}>${Number(option.price || 0).toFixed(2)}</span>
             </button>
           ))}
