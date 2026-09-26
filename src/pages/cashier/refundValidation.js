@@ -1,10 +1,11 @@
 export function validateRefundDestination({
   resolutionMethod,
   destinationGiftCard,
+  issueNewGiftCard = false,
   cashConfirmationRequired,
   cashConfirmed,
 }) {
-  if (resolutionMethod === "gift_card" && !destinationGiftCard?.giftCardId) {
+  if (resolutionMethod === "gift_card" && !issueNewGiftCard && !destinationGiftCard?.giftCardId) {
     return "Look up and select the destination gift card.";
   }
   if (cashConfirmationRequired && !cashConfirmed) {
