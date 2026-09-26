@@ -38,6 +38,8 @@ import SettingsPage from "./SettingsPage";
 import { WaiverDetail } from "./WaiverDetail";
 import { Redeem } from "./Redeem";
 import BookingDetail from "./BookingDetail";
+import TableManagementOverlay from "./TableManagementOverlay";
+import LiveOrdersOverlay from "./LiveOrdersOverlay";
 import {
   buildPaidCheckoutPricingSummary,
   canMergeCartLines,
@@ -838,6 +840,8 @@ export function CashierApp() {
   //               schedule picker so the cashier can pick a date/time.
   //               autoCheckIn stays off; the booking is created unredeemed.
   const [sellMode, setSellMode] = useState("checkin");
+  const [tableOverlayOpen, setTableOverlayOpen] = useState(false);
+  const [ordersOverlayOpen, setOrdersOverlayOpen] = useState(false);
   // Floating add-on popup state — position is draggable; dismissed flag
   // hides the panel until the next sale (cleared in completeDraftCheckout
   // when clearCart() runs). Position is held in CashierApp so it survives
@@ -2343,6 +2347,8 @@ export function CashierApp() {
         subtitle={new Date().toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric" })}
         right={
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button onClick={() => setOrdersOverlayOpen(true)} className="a-btn" style={{ height: 32, padding: "0 12px", background: "var(--ink-50)", border: "1px solid var(--ink-200)", color: "var(--ink-800)" }}><Icon name="chef-hat" size={16} /> Live Orders</button>
+            <button onClick={() => setTableOverlayOpen(true)} className="a-btn" style={{ height: 32, padding: "0 12px", background: "var(--ink-50)", border: "1px solid var(--ink-200)", color: "var(--ink-800)" }}><Icon name="smartphone" size={16} /> Table QR</button>
             <SellModeToggle mode={sellMode} onChange={setSellMode} />
             <StatusPill tone="success" pulse>Drawer open</StatusPill>
           </div>
@@ -2576,6 +2582,8 @@ export function CashierApp() {
           }}
         />
       </ModalErrorBoundary>
+      {tableOverlayOpen && <TableManagementOverlay onClose={() => setTableOverlayOpen(false)} />}
+      {ordersOverlayOpen && <LiveOrdersOverlay onClose={() => setOrdersOverlayOpen(false)} />}
       <RecipientPickerModal
         open={!!recipientPicker}
         customer={cartCustomer || waiversAttached[0] || null}

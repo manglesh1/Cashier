@@ -5,6 +5,7 @@ import {
   useLazyLookupVoucherByTokenQuery,
   useLazyLookupVoucherPackByTokenQuery,
 } from "../../features/vouchers/voucherApi";
+import { useLazyGetInventoryItemByBarcodeQuery } from "../../features/inventory/inventoryApi";
 
 // Token shape — the existing search input doubles as a universal
 // voucher / entitlement / pack lookup. Anything matching this pattern
@@ -35,6 +36,7 @@ export function CatalogGrid({
   const [voucherError, setVoucherError] = useState(null);
   const [lookupVoucher] = useLazyLookupVoucherByTokenQuery();
   const [lookupPack] = useLazyLookupVoucherPackByTokenQuery();
+  const [lookupBarcode] = useLazyGetInventoryItemByBarcodeQuery();
 
   useEffect(() => {
     const trimmed = search.trim();
@@ -49,6 +51,33 @@ export function CatalogGrid({
     setVoucherError(null);
     const timer = setTimeout(async () => {
       try {
+        const barcodeRes = await lookupBarcode(trimmed).unwrap().catch(() => null);
+        if (cancelled) return;
+        if (barcodeRes?.data?.variation) {
+          const varPayload = barcodeRes.data.variation;
+          // Format as a catalog activity for `onAdd`
+          const mappedActivity = {
+            id: varPayload.activityDetailsId,
+            name: varPayload.activityDetails?.name || barcodeRes.data.inventoryItem.name,
+            type: varPayload.activityDetails?.type || "STOCK_ITEM",
+            variations: [
+              {
+                id: varPayload.variationId,
+                name: varPayload.name,
+                price: varPayload.price,
+                additionalsVarData: varPayload.additionalsVarData,
+              }
+            ]
+          };
+          onAdd(mappedActivity, {
+            ...mappedActivity.variations[0],
+            qty: 1
+          });
+          setSearch("");
+          setVoucherSearching(false);
+          return;
+        }
+
         const packRes = await lookupPack(trimmed).unwrap().catch(() => null);
         if (cancelled) return;
         if (packRes?.data) {

@@ -114,7 +114,7 @@ export default function ClockIn({ onUseEmailLogin }) {
               Tap your tile to clock in
             </div>
             <div style={{ fontSize: 13, color: "var(--ink-500)", marginBottom: 18 }}>
-              {users.length > 0 ? `${users.length} staff` : "Loading staff…"}
+              {isLoading ? "Loading staff…" : `${users.length} staff`}
             </div>
 
             {isLoading && <div style={{ padding: 32, textAlign: "center", color: "var(--ink-500)" }}>Loading…</div>}

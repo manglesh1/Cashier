@@ -3,7 +3,7 @@ import { baseApi } from "../../api/baseApi";
 export const bookingApi = baseApi.injectEndpoints({
   endpoints: (builder) => ({
     getAllBooking: builder.query({
-      query: ({ page = 1, limit = 50, search = "", dateFrom = "", dateTo = "", status = [], paymentStatus = [], activityId = [] }) => ({
+      query: ({ page = 1, limit = 50, search = "", dateFrom = "", dateTo = "", status = [], paymentStatus = [], activityId = [], _t }) => ({
         url: "/bookings/all",
         params: {
           page,
@@ -14,6 +14,7 @@ export const bookingApi = baseApi.injectEndpoints({
           status: Array.isArray(status) ? status.join(",") : status,
           paymentStatus: Array.isArray(paymentStatus) ? paymentStatus.join(",") : paymentStatus,
           activityId: Array.isArray(activityId) ? activityId.join(",") : activityId,
+          _t,
         },
       }),
       providesTags: ["Bookings"],
