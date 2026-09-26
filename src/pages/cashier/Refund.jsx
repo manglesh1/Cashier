@@ -61,6 +61,7 @@ export function Refund() {
   const [resolutionMethod, setResolutionMethod] = useState("original_tender");
   const [giftCardCode, setGiftCardCode] = useState("");
   const [destinationGiftCard, setDestinationGiftCard] = useState(null);
+  const [issueNewGiftCard, setIssueNewGiftCard] = useState(false);
   const [cashConfirmed, setCashConfirmed] = useState(false);
   const [lookupGiftCard, { isFetching: giftCardLoading }] = useLazyLookupGiftCardQuery();
   const [done, setDone] = useState(null);
@@ -121,6 +122,7 @@ export function Refund() {
     setDone({
       ...done,
       status: request.status,
+      issuedRefundCards: request.issuedRefundCards || [],
       cancelWhenCompleted: Boolean(request.cancelWhenCompleted),
     });
     if (request.status === "completed") {
@@ -140,6 +142,7 @@ export function Refund() {
     setResolutionMethod("original_tender");
     setGiftCardCode("");
     setDestinationGiftCard(null);
+    setIssueNewGiftCard(false);
     setCashConfirmed(false);
   };
 
@@ -148,6 +151,7 @@ export function Refund() {
     setResolutionMethod("original_tender");
     setGiftCardCode("");
     setDestinationGiftCard(null);
+    setIssueNewGiftCard(false);
     setCashConfirmed(false);
     setSelected(null);
     setQuery("");
@@ -160,6 +164,7 @@ export function Refund() {
   const selectResolutionMethod = (method) => {
     setResolutionMethod(method);
     setDestinationGiftCard(null);
+    setIssueNewGiftCard(false);
     setGiftCardCode("");
     setCashConfirmed(false);
     setAmountInitializedFor(null);
@@ -176,6 +181,7 @@ export function Refund() {
         throw new Error(`Gift card is ${card.status}.`);
       }
       setDestinationGiftCard(card);
+      setIssueNewGiftCard(false);
       toast.success(`Gift card ${card.code} selected.`);
     } catch (error) {
       toast.error(error?.data?.message || error?.message || "Gift card lookup failed.");
@@ -203,6 +209,7 @@ export function Refund() {
     const destinationError = validateRefundDestination({
       resolutionMethod,
       destinationGiftCard,
+      issueNewGiftCard,
       cashConfirmationRequired,
       cashConfirmed,
     });
@@ -225,8 +232,9 @@ export function Refund() {
       resolutionMethod,
       destinationGiftCardId:
         resolutionMethod === "gift_card"
-          ? destinationGiftCard?.giftCardId || null
+          ? issueNewGiftCard ? null : destinationGiftCard?.giftCardId || null
           : null,
+      issueNewGiftCard: resolutionMethod === "gift_card" && issueNewGiftCard,
       cashConfirmed: cashConfirmationRequired ? cashConfirmed : null,
       previewVersion: preview.previewVersion,
     });
@@ -240,7 +248,8 @@ export function Refund() {
         idempotencyKey,
         amount: amountNum,
         resolutionMethod,
-        destinationGiftCardId: resolutionMethod === "gift_card" ? destinationGiftCard?.giftCardId : undefined,
+        destinationGiftCardId: resolutionMethod === "gift_card" && !issueNewGiftCard ? destinationGiftCard?.giftCardId : undefined,
+        issueNewGiftCard: resolutionMethod === "gift_card" && issueNewGiftCard,
         cashConfirmed: cashConfirmationRequired ? cashConfirmed : undefined,
         managerOverrideAuditId: audit?.auditId,
         remarks: [
@@ -264,6 +273,7 @@ export function Refund() {
         bookingNumber: numberOf(selected),
         refundRequestId: request.refundRequestId,
         status,
+        issuedRefundCards: result.issuedRefundCards || [],
         cancelWhenCompleted: Boolean(request.cancelWhenCompleted),
       });
       if (status === "completed") {
@@ -319,6 +329,14 @@ export function Refund() {
               : "The booking remains active because this was a partial refund."}
           </div>
         )}
+        {completed && done.issuedRefundCards?.length > 0 && (
+          <div style={{ maxWidth: 520, width: "100%", padding: 14, marginBottom: 12, border: "1px solid #86efac", borderRadius: 10, background: "#f0fdf4", textAlign: "center" }}>
+            <strong>Give the customer these refund card numbers</strong>
+            {done.issuedRefundCards.map((card) => (
+              <div key={card.giftCardId} style={{ marginTop: 8, fontFamily: "var(--font-mono)" }}>{card.code} · {moneyFmt(card.currentBalance)} available</div>
+            ))}
+          </div>
+        )}
         <div style={{ fontSize: 15, color: "var(--ink-600)", marginBottom: 6 }}>
           {done.bookingNumber}
           {done.balance != null ? ` · balance ${moneyFmt(done.balance)}` : ""}
@@ -346,7 +364,7 @@ export function Refund() {
       cash: "Cash",
     };
     const destinationOptions = preview?.destinations || [];
-    const destinationReady = resolutionMethod !== "gift_card" || Boolean(destinationGiftCard?.giftCardId);
+    const destinationReady = resolutionMethod !== "gift_card" || issueNewGiftCard || Boolean(destinationGiftCard?.giftCardId);
     const cashReady = !cashConfirmationRequired || cashConfirmed;
     const submitBlockReason = refundSubmitBlockReason({
       refunding,
@@ -429,6 +447,11 @@ export function Refund() {
 
           {resolutionMethod === "gift_card" && (
             <div style={{ border: "1.5px solid #93c5fd", background: "#eff6ff", borderRadius: 10, padding: 12 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, fontSize: 12, fontWeight: 800 }}>
+                <input type="checkbox" checked={issueNewGiftCard} onChange={(event) => { setIssueNewGiftCard(event.target.checked); setDestinationGiftCard(null); }} />
+                Issue a new refund card for the booking customer
+              </label>
+              {!issueNewGiftCard && <>
               <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 6 }}>Destination gift card</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <input value={giftCardCode} onChange={(event) => setGiftCardCode(event.target.value)} placeholder="XXXX-XXXX-XXXX" style={{ flex: 1, minWidth: 0, padding: "10px 12px", border: "1.5px solid #93c5fd", borderRadius: 8 }} />
@@ -437,6 +460,7 @@ export function Refund() {
                 </button>
               </div>
               {destinationGiftCard && <div style={{ marginTop: 7, color: "#166534", fontSize: 12, fontWeight: 800 }}>Selected {destinationGiftCard.code} ? balance {moneyFmt(destinationGiftCard.currentBalance)}</div>}
+              </>}
             </div>
           )}
 
@@ -516,6 +540,7 @@ export function Refund() {
             currency: preview?.currency,
             resolutionMethod,
             destinationGiftCardId: destinationGiftCard?.giftCardId || undefined,
+            issueNewGiftCard: resolutionMethod === "gift_card" && issueNewGiftCard,
           }}
           defaultReason=""
           reasonLabel="Approval note (optional)"

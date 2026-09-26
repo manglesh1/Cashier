@@ -28,3 +28,13 @@ test("a fully confirmed destination passes validation", () => {
     cashConfirmed: false,
   }), null);
 });
+
+test("a new refund card does not require an existing card number", () => {
+  assert.equal(validateRefundDestination({
+    resolutionMethod: "gift_card",
+    issueNewGiftCard: true,
+    destinationGiftCard: null,
+    cashConfirmationRequired: false,
+    cashConfirmed: false,
+  }), null);
+});
