@@ -92,6 +92,7 @@ function CheckInPaymentModal({
   // chooser here and report it via onCardTip so the reader uses it.
   cardTipEnabled = false,
   onCardTip,
+  cardReaderControl = null,
 }) {
   const [couponCode, setCouponCode] = useState("");
   const [manualDiscount, setManualDiscount] = useState("");
@@ -569,6 +570,7 @@ function CheckInPaymentModal({
                   <span>{method === "cash" ? "Cash" : methods.find((m) => m.value === method)?.label || method}</span>
                   <span>{moneyFmt(tendered)}</span>
                 </div>
+                {isCard && cardReaderControl}
                 {isCash && cashTenders.length > 0 && (
                   <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
                     {cashTenders.map((entry) => (

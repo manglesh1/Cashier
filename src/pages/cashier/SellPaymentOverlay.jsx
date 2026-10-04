@@ -31,6 +31,8 @@ import { openCashDrawer, printReceipt } from "../../lib/hardware";
 import { buildPaidCheckoutPricingSummary, getCreateBookingPaymentAmount } from "./cartPricing";
 import CheckInPaymentModal from "./CheckInPaymentModal";
 import TerminalPaymentModal from "./TerminalPaymentModal";
+import TerminalReaderSummary from "./TerminalReaderSummary";
+import { attemptStorageKey, readAttempt } from "../../features/payments/terminalAttempt";
 import TerminalProgressModal from "./TerminalProgressModal";
 import { useTipDefaults } from "../../features/tips/useTipDefaults";
 import { useLazyRecoverTerminalCheckoutQuery } from "../../features/payments/terminalApi";
@@ -52,6 +54,9 @@ export default function SellPaymentOverlay({
   const [paymentComplete, setPaymentComplete] = useState(null);
   const [pendingTerminal, setPendingTerminal] = useState(null);
   const [terminalPayment, setTerminalPayment] = useState(null);
+  const [readerOverrideId, setReaderOverrideId] = useState(null);
+  useEffect(() => { if (!open) setReaderOverrideId(null); }, [open]);
+  useEffect(() => { setReaderOverrideId(null); }, [draftPayment?.draft?.checkoutKey]);
   // After atomic create+pay we know the real bookingId — store it so
   // receipt actions (print / email) can target the right booking.
   const [paidBooking, setPaidBooking] = useState(null);
@@ -837,6 +842,10 @@ export default function SellPaymentOverlay({
         onVoid={handleVoid}
         cardTipEnabled={tipDefaults.enabled}
         onCardTip={setCardTipAllocation}
+        cardReaderControl={<TerminalReaderSummary posDeviceId={getTerminal()?.deviceId} locationId={getTerminal()?.locationId}
+          overrideId={readerOverrideId} onChange={setReaderOverrideId}
+          locked={!!(terminalPayment || pendingTerminal || creating || recordingExtra || recovering ||
+            (paidBooking?.bookingId && readAttempt(sessionStorage, attemptStorageKey({ locationId: getTerminal()?.locationId, sourceType: "booking", sourceId: paidBooking.bookingId }))))} />}
       />
       {terminalPayment && (
         <TerminalPaymentModal
@@ -849,7 +858,7 @@ export default function SellPaymentOverlay({
           amount={terminalPayment.amount}
           locationId={getTerminal()?.locationId}
           posDeviceId={getTerminal()?.deviceId}
-          readerId={getTerminal()?.settings?.terminalReaderId || undefined}
+          readerId={readerOverrideId || undefined}
           sourceType="booking"
           sourceId={terminalPayment.bookingId}
           tip={tipDefaults.enabled ? { allocation: cardTipAllocation, defaultAllocation: tipDefaults.defaultAllocation } : null}

@@ -1,11 +1,9 @@
 import { baseApi } from "../../api/baseApi";
 
-// Stripe Terminal (card-present) — server-driven flow.
+// Provider-neutral card-present, server-driven flow.
 //
-//   start  → backend creates a PaymentIntent and tells the reader to
-//            collect. Returns { transaction, status:'processing', readerId }.
-//            We don't pass a readerId — the backend resolves the location's
-//            configured reader (Payments → Card terminals).
+//   readers → assigned/shared readers for the current POS station.
+//   start  → backend starts collection on the selected internal terminalId.
 //   status → poll until status is 'captured' (approved) or terminal-failed.
 //   cancel → cancel the reader's in-flight action.
 //
@@ -14,6 +12,10 @@ import { baseApi } from "../../api/baseApi";
 // supplies it explicitly.
 export const terminalApi = baseApi.injectEndpoints({
   endpoints: (builder) => ({
+    getTerminalReaders: builder.query({
+      query: ({ posDeviceId, currency }) => ({ url: "/payments/terminal/readers", params: { posDeviceId, currency } }),
+      keepUnusedDataFor: 0,
+    }),
     recoverTerminalCheckout: builder.query({
       query: (key) => ({ url: "/payments/terminal/checkout", params: { key } }),
     }),
@@ -38,6 +40,7 @@ export const terminalApi = baseApi.injectEndpoints({
 });
 
 export const {
+  useGetTerminalReadersQuery,
   useLazyRecoverTerminalCheckoutQuery,
   useStartTerminalPaymentMutation,
   useLazyGetTerminalStatusQuery,

@@ -10,8 +10,8 @@
 // so the caller's onApproved just refreshes/closes; it must NOT also
 // record a payment (that would double-charge).
 //
-// Reader: not passed — the backend resolves the location's configured reader
-// (Payments -> Card terminals). Currency must match the sale; unsupported
+// New attempts use the Admin default or an explicit one-sale override. Recovery reuses its saved
+// reader and request. Currency must match the sale; unsupported
 // account currencies are rejected rather than silently converted.
 
 import React, { useEffect, useRef, useState } from "react";
@@ -27,6 +27,7 @@ import { useTipDefaults } from "../../features/tips/useTipDefaults";
 import { useCheckTipOverrideMutation } from "../../features/tips/tipsApi";
 import { TIP_ALLOCATIONS } from "../../features/tips/tipMath";
 import ManagerOverridePrompt from "../../components/ManagerOverridePrompt";
+import TerminalReaderPicker from "./TerminalReaderPicker";
 import { attemptStorageKey, readAttempt, terminalOutcome } from "../../features/payments/terminalAttempt";
 
 const POLL_MS = 2500;
@@ -44,7 +45,7 @@ export default function TerminalPaymentModal({
   locationId,
   currency, // optional — Stripe account currency
   posDeviceId, // this till — backend resolves its DEFAULT card reader
-  readerId, // optional legacy override; backend prefers the till's default reader
+  readerId, // explicit one-sale override; otherwise fetch the Admin default
   sourceType = "booking",
   sourceId = null,
   // Optional on-glass tip context. When present (e.g. { allocation,
@@ -62,8 +63,10 @@ export default function TerminalPaymentModal({
   tipOnly = null,
   onApproved,
 }) {
-  // tip | starting | waiting | approved | declined | error | cancelled
-  const [phase, setPhase] = useState("starting");
+  // reader | tip | starting | waiting | approved | declined | error | cancelled
+  const [phase, setPhase] = useState("reader");
+  const [selectedReader, setSelectedReader] = useState(null);
+  const [autoUseDefault, setAutoUseDefault] = useState(true);
   const [transactionId, setTransactionId] = useState(null);
   const [message, setMessage] = useState("");
   const startedRef = useRef(false);
@@ -120,7 +123,7 @@ export default function TerminalPaymentModal({
 
   // Start the terminal sale. `tipContext` is the on-glass tip allocation
   // (no amount — the guest enters it on the reader), or null for no tip.
-  const beginStart = async (tipContext) => {
+  const beginStart = async (tipContext, terminalId = selectedReader?.terminalId, readerName = selectedReader?.displayName) => {
     if (startedRef.current) return;
     startedRef.current = true;
     setPhase("starting");
@@ -131,7 +134,7 @@ export default function TerminalPaymentModal({
         amount: Number(amount),
         currency: currency || undefined,
         posDeviceId: posDeviceId || undefined,
-        terminalId: Number.isInteger(Number(readerId)) && Number(readerId) > 0 ? Number(readerId) : undefined,
+        terminalId,
         sourceType,
         sourceId,
         // On-glass tip: forwarded only when an allocation was chosen
@@ -142,13 +145,13 @@ export default function TerminalPaymentModal({
         ...(tipOnly ? { metadata: { tip: tipOnly } } : {}),
         idempotencyKey: newIdempotencyKey(sourceType, sourceId),
       };
-      attemptRef.current = saved || { request };
+      attemptRef.current = saved || { request, readerName };
       sessionStorage.setItem(storageKey, JSON.stringify(attemptRef.current));
       const res = saved?.transactionId
         ? await triggerStatus(saved.transactionId).unwrap()
         : await startPayment(request).unwrap();
       const id = res.transaction?.transactionId || res.transactionId;
-      attemptRef.current = { request, transactionId: id };
+      attemptRef.current = { ...attemptRef.current, request, transactionId: id };
       sessionStorage.setItem(storageKey, JSON.stringify(attemptRef.current));
       if (!activeRef.current) return;
       setTransactionId(id);
@@ -159,6 +162,9 @@ export default function TerminalPaymentModal({
       if (!activeRef.current) return;
       const detail = err?.data?.detail;
       if (detail?.status === "failed") {
+        forgetAttempt();
+      } else if (["terminal_busy", "terminal_unavailable", "terminal_not_found", "terminal_not_assigned", "terminal_provider_mismatch", "invalid_terminal_mid"].includes(err?.data?.error)) {
+        // These server preflight failures occur before a payment is dispatched.
         forgetAttempt();
       } else if (err?.data?.error === "terminal_payment_pending" && detail?.transactionId) {
         attemptRef.current = { ...attemptRef.current, transactionId: detail.transactionId };
@@ -173,30 +179,37 @@ export default function TerminalPaymentModal({
     }
   };
 
-  // When the modal opens: collect the tip allocation first if tipping is
-  // on (and the caller didn't pre-set one); otherwise start immediately.
+  // Recover an existing attempt before offering any new reader selection.
   useEffect(() => {
     if (!open) {
       // reset for next open
       startedRef.current = false;
       doneRef.current = false;
       clearTimers();
-      setPhase("starting");
+      setPhase("reader");
+      setSelectedReader(null);
+      setAutoUseDefault(true);
       setTransactionId(null);
       setMessage("");
       setTipAllocation(tipDefaults.defaultAllocation || "booking_host");
       setTipManagerAuditId(null);
       return;
     }
-    if (startedRef.current || phase === "tip") return;
-    if (collectTip) {
-      setPhase("tip");
-    } else {
+    if (startedRef.current) return;
+    if (readAttempt(sessionStorage, storageKey)) {
       beginStart(tip && tip.allocation ? tip : null);
+    } else {
+      setPhase("reader");
     }
     return () => clearTimers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  const chooseReader = (reader) => {
+    setSelectedReader(reader);
+    if (collectTip) setPhase("tip");
+    else beginStart(tip && tip.allocation ? tip : null, reader.terminalId, reader.displayName);
+  };
 
   // Tip-step allocation change — manager-PIN gate for self-assigning a
   // host tip (§5.1), mirroring TipStep.
@@ -357,7 +370,12 @@ export default function TerminalPaymentModal({
           {moneyFmt(attemptRef.current?.request?.amount ?? amount)}{currency ? ` ${String(currency).toUpperCase()}` : ""}
         </div>
 
-        {phase === "tip" ? (
+        {phase !== "reader" && (selectedReader?.displayName || attemptRef.current?.readerName) &&
+          <div style={{ marginBottom: 12, fontSize: 13, overflowWrap: "anywhere" }}>{attemptRef.current?.readerName || selectedReader?.displayName}</div>}
+        {phase === "reader" ? (
+          <TerminalReaderPicker posDeviceId={posDeviceId} locationId={locationId} currency={currency}
+            preferredId={readerId} autoUseDefault={autoUseDefault} onSelect={chooseReader} onClose={onClose} />
+        ) : phase === "tip" ? (
           // ── Tip allocation step (the guest enters the amount on the reader) ──
           <div style={{ textAlign: "left" }}>
             <div style={{ fontSize: 13, fontWeight: 800, color: "var(--ink-700,#334155)", marginBottom: 8, textAlign: "center" }}>
@@ -425,8 +443,15 @@ export default function TerminalPaymentModal({
           {["error", "declined", "cancelled"].includes(phase) && (
             <button type="button" className="a-btn a-btn--primary" onClick={() => {
               startedRef.current = false; doneRef.current = false; setCancelling(false);
-              beginStart(tip && tip.allocation ? tip : null);
+              if (readAttempt(sessionStorage, storageKey)) beginStart(tip && tip.allocation ? tip : null);
+              else { setTransactionId(null); setAutoUseDefault(true); setPhase("reader"); }
             }}> {phase === "error" ? "Check / retry payment" : "Retry payment"} </button>
+          )}
+          {["error", "declined", "cancelled"].includes(phase) && !attemptRef.current && (
+            <button type="button" className="a-btn" onClick={() => {
+              startedRef.current = false; doneRef.current = false; setCancelling(false);
+              setTransactionId(null); setAutoUseDefault(false); setPhase("reader");
+            }}><Icon name="credit-card" size={16} /> Change reader</button>
           )}
           {phase === "approved" ? (
             <button type="button" className="a-btn a-btn--primary" onClick={() => onClose?.()}
