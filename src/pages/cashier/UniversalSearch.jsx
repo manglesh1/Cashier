@@ -22,6 +22,7 @@ import {
   useLazyLookupVoucherByTokenQuery,
   useLazyLookupVoucherPackByTokenQuery,
 } from "../../features/vouchers/voucherApi";
+import { useLazyGetInventoryItemByBarcodeQuery } from "../../features/inventory/inventoryApi";
 
 const DEBOUNCE_MS = 300;
 const MIN_QUERY_CHARS = 6; // most redemption tokens are ≥ 8 chars
@@ -41,6 +42,7 @@ export default function UniversalSearch({ onAddVoucherToCart }) {
 
   const [lookupVoucher] = useLazyLookupVoucherByTokenQuery();
   const [lookupPack] = useLazyLookupVoucherPackByTokenQuery();
+  const [lookupBarcode] = useLazyGetInventoryItemByBarcodeQuery();
 
   // Auto-focus on mount so scanner-flow works ("scan opens Sell screen
   // → code drops straight into the input").
@@ -64,7 +66,25 @@ export default function UniversalSearch({ onAddVoucherToCart }) {
     setSearching(true);
     debounceRef.current = setTimeout(async () => {
       try {
-        // 1. Pack lookup: returns the whole pack's inclusions if the
+        // 1. Check physical inventory by barcode first.
+        const barcodeRes = await lookupBarcode(trimmed).unwrap().catch(() => null);
+        if (barcodeRes?.data) {
+          setResult({ kind: "inventory", payload: barcodeRes.data });
+          // Auto-add to cart right away for physical items
+          if (onAddVoucherToCart) {
+            // We pass it to the cart handler in a shape it can understand, or we let the parent handle it
+            onAddVoucherToCart({
+               kind: 'inventory',
+               inventoryItem: barcodeRes.data
+            });
+            setQuery("");
+            setResult(null);
+          }
+          setSearching(false);
+          return;
+        }
+
+        // 2. Pack lookup: returns the whole pack's inclusions if the
         //    code belongs to one. Best shape for "expand into cart".
         const packRes = await lookupPack(trimmed).unwrap().catch(() => null);
         if (packRes?.data) {
@@ -72,17 +92,17 @@ export default function UniversalSearch({ onAddVoucherToCart }) {
           setSearching(false);
           return;
         }
-        // 2. Single voucher / entitlement lookup.
+        // 3. Single voucher / entitlement lookup.
         const single = await lookupVoucher(trimmed).unwrap();
         if (single?.data) {
           setResult({ kind: single.data.kind || "unknown", payload: single.data });
         } else {
-          setResult({ error: "No voucher matches that code." });
+          setResult({ error: "No voucher or barcode matches that code." });
         }
       } catch (err) {
         const status = err?.status;
         if (status === 404) {
-          setResult({ error: "No voucher matches that code." });
+          setResult({ error: "No voucher or barcode matches that code." });
         } else {
           setResult({ error: err?.data?.message || "Lookup failed." });
         }

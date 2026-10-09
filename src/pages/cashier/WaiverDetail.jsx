@@ -300,9 +300,9 @@ export function WaiverDetail() {
     const rows = [];
     rows.push({
       key: "signer",
-      name: detail.guest?.name || detail.signedByName || "Signer",
+      name: detail.customer?.name || detail.signedByName || "Signer",
       role: detail.includesMinors ? "Signer / guardian" : "Signer",
-      dob: detail.guestDateOfBirth,
+      dob: detail.customerDateOfBirth,
     });
     (Array.isArray(detail.minors) ? detail.minors : []).forEach((minor, index) => {
       rows.push({
@@ -475,11 +475,11 @@ export function WaiverDetail() {
 
             <DetailCard title="Holder details">
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 14 }}>
-                <Field label="Name" value={detail?.guest?.name || selectedRow.name || detail?.signedByName} />
-                <Field label="Email" value={detail?.guest?.email} />
-                <Field label="Phone" value={detail?.guest?.phone} />
-                <Field label="Date of birth" value={formatDate(detail?.guestDateOfBirth, "—")} />
-                <Field label="Address" value={[detail?.guest?.address, detail?.guest?.postcode].filter(Boolean).join(", ")} />
+                <Field label="Name" value={detail?.customer?.name || selectedRow.name || detail?.signedByName} />
+                <Field label="Email" value={detail?.customer?.email} />
+                <Field label="Phone" value={detail?.customer?.phone} />
+                <Field label="Date of birth" value={formatDate(detail?.customerDateOfBirth, "—")} />
+                <Field label="Address" value={[detail?.customer?.address, detail?.customer?.postcode].filter(Boolean).join(", ")} />
                 {detail?.waiver?.locationName && <Field label="Location" value={detail.waiver.locationName} />}
               </div>
             </DetailCard>
